@@ -46,11 +46,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let night = vec3<f32>(0.04, 0.05, 0.10);
 
     let i = camera.sun_intensity;
-    // Dusk-blend window: kicks in low and fades out before full noon.
     let dusk_w = smoothstep(0.0, 0.25, i) - smoothstep(0.25, 0.7, i);
     let sky_col = mix(night, day, smoothstep(0.0, 0.7, i)) + dusk * dusk_w * 0.6;
 
-    // Slight vertical gradient: brighter near the horizon (low |y|).
     let horizon = 1.0 - abs(in.ndc.y) * 0.4;
     return vec4<f32>(sky_col * horizon, 1.0);
 }
