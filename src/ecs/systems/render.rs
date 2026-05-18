@@ -6,14 +6,23 @@
 //! that the *renderer* can grow more pipelines/passes without ECS systems
 //! turning into render-state ceremonies.
 
-use crate::ecs::components::{Camera, Position};
+use crate::ecs::components::{Camera, CursorTarget, Position};
 use crate::ecs::GameEcs;
 use crate::render::Renderer;
 
-/// Read the player's `Position` + `Camera`, compute the eye point, sample
-/// the sun state, and invoke `Renderer::render`. Propagates the surface
-/// error (e.g. swapchain out-of-date) up to the caller.
-pub fn render(ecs: &GameEcs, renderer: &Renderer) -> Result<(), wgpu::SurfaceError> {
+/// Push the cursor target into the renderer and then draw a frame.
+/// The renderer needs `&mut self` for the cursor write — the caller is
+/// expected to already hold a `&mut Renderer`.
+pub fn render(ecs: &GameEcs, renderer: &mut Renderer) -> Result<(), wgpu::SurfaceError> {
+    let target = ecs
+        .world
+        .query_one::<&CursorTarget>(ecs.player)
+        .unwrap()
+        .get()
+        .copied()
+        .unwrap_or_default();
+    renderer.set_cursor(target.hit.map(|(b, _)| b));
+
     let mut q = ecs
         .world
         .query_one::<(&Position, &Camera)>(ecs.player)

@@ -4,5 +4,6 @@
 //! submodule here. Keeping each pipeline in its own file makes shader/layout
 //! changes local.
 
+pub mod cursor;
 pub mod opaque;
 pub mod sky;

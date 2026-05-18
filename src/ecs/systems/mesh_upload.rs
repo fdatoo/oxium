@@ -64,13 +64,34 @@ pub fn drain_jobs(
             } => {
                 renderer.upload_chunk_mesh(coord, &mesh);
             }
+            JobResult::Relit { coord, data } => {
+                // Swap the freshly-relit chunk into the World and reset
+                // its dirty flags. Then queue a mesh job so the new
+                // light bytes reach the GPU.
+                use crate::voxel::chunk::{ChunkDirty, ChunkState};
+                if let Some(ChunkSlot::Stored {
+                    data: cur,
+                    meta,
+                }) = world.chunks.get_mut(&coord)
+                {
+                    *cur = data.clone();
+                    meta.dirty = ChunkDirty {
+                        mesh: true,
+                        light: false,
+                    };
+                    meta.state = ChunkState::Generated;
+                }
+                let data_arc = Arc::new(data);
+                let neighbors = gather_neighbors(world, coord);
+                jobs.spawn_mesh_lod0(coord, data_arc, neighbors, registry.clone());
+            }
         }
     }
 }
 
 /// The six face-adjacent chunk coordinates, in [`crate::mesher::Face`]
 /// order (PosX, NegX, PosY, NegY, PosZ, NegZ).
-fn neighbor_coords(c: ChunkCoord) -> [ChunkCoord; 6] {
+pub fn neighbor_coords(c: ChunkCoord) -> [ChunkCoord; 6] {
     [
         ChunkCoord(c.0 + IVec3::new(1, 0, 0)),
         ChunkCoord(c.0 + IVec3::new(-1, 0, 0)),
@@ -83,7 +104,7 @@ fn neighbor_coords(c: ChunkCoord) -> [ChunkCoord; 6] {
 
 /// Gather Arc-shared snapshots of each loaded neighbour's `PalettedChunk`
 /// in Face order. Slots that aren't `Stored` come back as `None`.
-fn gather_neighbors(world: &World, c: ChunkCoord) -> [Option<Arc<PalettedChunk>>; 6] {
+pub fn gather_neighbors(world: &World, c: ChunkCoord) -> [Option<Arc<PalettedChunk>>; 6] {
     let coords = neighbor_coords(c);
     let mut out: [Option<Arc<PalettedChunk>>; 6] = Default::default();
     for (i, nc) in coords.iter().enumerate() {

@@ -6,6 +6,7 @@
 //! optional automatic schedule and is the friendliest layout to debug.
 
 pub mod input;
+pub mod interaction;
 pub mod mesh_upload;
 pub mod movement;
 pub mod physics;

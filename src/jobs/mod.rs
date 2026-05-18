@@ -34,6 +34,14 @@ pub enum JobResult {
         lod: u8,
         mesh: ChunkMesh,
     },
+    /// A relight job finished; `data` is the re-illuminated paletted chunk
+    /// to swap into the World. A follow-up mesh job runs as soon as the
+    /// caller drains this — without that, the new sky/block light bytes
+    /// never reach the GPU.
+    Relit {
+        coord: ChunkCoord,
+        data: PalettedChunk,
+    },
 }
 
 /// Owns the rayon pool plus the result channel. Held inside `AppState` and
@@ -85,6 +93,42 @@ impl Jobs {
             crate::lighting::recompute_chunk(&mut dense, &no_neighbors, &registry);
             let data = PalettedChunk::compress(&dense);
             let _ = tx.send(JobResult::Generated { coord, data });
+        });
+    }
+
+    /// Spawn a *relight* job for `coord`: decompress, run the lighting
+    /// BFS with whatever neighbour data is available, recompress.
+    ///
+    /// Used by the interaction system whenever the player edits a block
+    /// — that flips `meta.dirty.light` and requires the chunk's voxel
+    /// light arrays to be regenerated before the next mesh job picks up
+    /// fresh `light` bytes for the vertex format.
+    pub fn spawn_relight(
+        &self,
+        coord: ChunkCoord,
+        data: Arc<PalettedChunk>,
+        neighbors: [Option<Arc<PalettedChunk>>; 6],
+        registry: Arc<BlockRegistry>,
+    ) {
+        let tx = self.tx.clone();
+        self.pool.spawn(move || {
+            let mut dense = data.decompress();
+            let neighbor_dense: Vec<Option<DenseChunk>> = neighbors
+                .iter()
+                .map(|opt| opt.as_ref().map(|p| p.decompress()))
+                .collect();
+            let n_refs: [Option<&DenseChunk>; 6] = [
+                neighbor_dense[0].as_ref(),
+                neighbor_dense[1].as_ref(),
+                neighbor_dense[2].as_ref(),
+                neighbor_dense[3].as_ref(),
+                neighbor_dense[4].as_ref(),
+                neighbor_dense[5].as_ref(),
+            ];
+            let ns = crate::voxel::chunk::Neighbors { chunks: n_refs };
+            crate::lighting::recompute_chunk(&mut dense, &ns, &registry);
+            let data = PalettedChunk::compress(&dense);
+            let _ = tx.send(JobResult::Relit { coord, data });
         });
     }
 

@@ -8,4 +8,5 @@ pub mod block;
 pub mod chunk;
 pub mod coords;
 pub mod packed;
+pub mod raycast;
 pub mod world;

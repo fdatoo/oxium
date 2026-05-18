@@ -141,4 +141,37 @@ pub fn apply_input(ecs: &mut GameEcs, buf: &InputBuf) {
 
     input.break_ = buf.lmb_pressed;
     input.place = buf.rmb_pressed;
+
+    // Number-row 1..7 cycle the currently-selected block. Held in its own
+    // query so the borrow above can release before we touch a different
+    // component on the same entity.
+    drop(q);
+    let blocks = [
+        crate::voxel::block::Block::Stone,
+        crate::voxel::block::Block::Dirt,
+        crate::voxel::block::Block::Grass,
+        crate::voxel::block::Block::Sand,
+        crate::voxel::block::Block::Wood,
+        crate::voxel::block::Block::Leaves,
+        crate::voxel::block::Block::Torch,
+    ];
+    let keys = [
+        KeyCode::Digit1,
+        KeyCode::Digit2,
+        KeyCode::Digit3,
+        KeyCode::Digit4,
+        KeyCode::Digit5,
+        KeyCode::Digit6,
+        KeyCode::Digit7,
+    ];
+    let mut sq = ecs
+        .world
+        .query_one::<&mut crate::ecs::components::Selected>(ecs.player)
+        .unwrap();
+    let sel = sq.get().unwrap();
+    for (i, k) in keys.iter().enumerate() {
+        if buf.key_pressed_this_frame.contains(k) {
+            sel.0 = blocks[i];
+        }
+    }
 }

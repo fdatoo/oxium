@@ -89,6 +89,24 @@ pub struct Grounded(pub bool);
 /// (`Query::<&Player>` finds the player and nothing else).
 pub struct Player;
 
+/// Currently-selected block for the "place" action. Cycled via the 1–7
+/// number-row keys.
+#[derive(Debug, Clone, Copy)]
+pub struct Selected(pub crate::voxel::block::Block);
+impl Default for Selected {
+    fn default() -> Self {
+        Self(crate::voxel::block::Block::Stone)
+    }
+}
+
+/// What the cursor (centre-screen raycast) is pointed at, if anything.
+/// Refreshed each frame by the interaction system; consumed by the
+/// renderer for the wireframe highlight.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CursorTarget {
+    pub hit: Option<(crate::voxel::coords::BlockPos, crate::mesher::Face)>,
+}
+
 /// Marker on the sun entity that carries the [`TimeOfDay`] state.
 pub struct Sun;
 

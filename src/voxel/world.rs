@@ -7,7 +7,8 @@
 
 use crate::voxel::block::{Block, BlockRegistry};
 use crate::voxel::chunk::{ChunkDirty, ChunkMeta, ChunkState, PalettedChunk};
-use crate::voxel::coords::{BlockPos, ChunkCoord};
+use crate::voxel::coords::{BlockPos, ChunkCoord, CHUNK_DIM_U};
+use glam::IVec3;
 use std::collections::HashMap;
 
 /// State of a single slot in the chunk map.
@@ -67,6 +68,73 @@ impl World {
             ..Default::default()
         };
         self.chunks.insert(c, ChunkSlot::Stored { data, meta });
+    }
+
+    /// Overwrite the block at `pos` with `new_block` and mark every chunk
+    /// that needs to be re-meshed as a consequence.
+    ///
+    /// The returned vector contains:
+    ///
+    /// 1. The chunk containing `pos`, always.
+    /// 2. Each face-adjacent neighbour chunk *if* `pos` sits on the
+    ///    corresponding edge of its chunk — those neighbours' boundary
+    ///    faces are affected by the edit.
+    ///
+    /// Chunks that aren't loaded are silently skipped (you can't edit
+    /// what hasn't streamed in yet). The chunk's dirty flags are toggled
+    /// so the scheduler will queue a relight + remesh on the next pass.
+    pub fn set_block(&mut self, pos: BlockPos, new_block: Block) -> Vec<ChunkCoord> {
+        let chunk_coord = pos.to_chunk();
+        let local = pos.to_local();
+        let mut dirty = Vec::new();
+
+        let Some(ChunkSlot::Stored { data, meta }) = self.chunks.get_mut(&chunk_coord) else {
+            return dirty;
+        };
+
+        // Decompress, edit, re-compress. Cheap at ~50 KB; for bulk edits
+        // we'd batch and decompress once, but the player can only edit
+        // one block per click so it's fine.
+        let mut dense = data.decompress();
+        dense.set(local, new_block);
+        *data = PalettedChunk::compress(&dense);
+
+        meta.dirty.mesh = true;
+        meta.dirty.light = true;
+        meta.modified = true;
+        meta.state = ChunkState::Generated;
+        dirty.push(chunk_coord);
+
+        // Border edits propagate to the neighbour on that side.
+        let (lx, ly, lz) = (local.0.x, local.0.y, local.0.z);
+        let dim = CHUNK_DIM_U;
+        let mut maybe_mark = |this: &mut World, dc: IVec3| {
+            let nc = ChunkCoord(chunk_coord.0 + dc);
+            if let Some(ChunkSlot::Stored { meta, .. }) = this.chunks.get_mut(&nc) {
+                meta.dirty.mesh = true;
+                dirty.push(nc);
+            }
+        };
+        if lx == 0 {
+            maybe_mark(self, IVec3::new(-1, 0, 0));
+        }
+        if lx == dim - 1 {
+            maybe_mark(self, IVec3::new(1, 0, 0));
+        }
+        if ly == 0 {
+            maybe_mark(self, IVec3::new(0, -1, 0));
+        }
+        if ly == dim - 1 {
+            maybe_mark(self, IVec3::new(0, 1, 0));
+        }
+        if lz == 0 {
+            maybe_mark(self, IVec3::new(0, 0, -1));
+        }
+        if lz == dim - 1 {
+            maybe_mark(self, IVec3::new(0, 0, 1));
+        }
+
+        dirty
     }
 }
 

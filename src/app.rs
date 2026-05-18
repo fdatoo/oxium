@@ -81,6 +81,32 @@ impl AppState {
         crate::ecs::systems::time_of_day::advance(&mut self.ecs, dt);
         crate::ecs::systems::movement::movement(&mut self.ecs, dt);
         crate::ecs::systems::physics::physics(&mut self.ecs, &self.world, dt);
+
+        // Interaction: raycast + place/break. Returns chunks the edit
+        // dirtied; we immediately spawn relight (followed by remesh) on
+        // each so the player sees the result within a frame or two.
+        let dirty_chunks =
+            crate::ecs::systems::interaction::interaction(&mut self.ecs, &mut self.world);
+        for c in dirty_chunks {
+            use crate::voxel::world::ChunkSlot;
+            let needs_light = match self.world.chunks.get(&c) {
+                Some(ChunkSlot::Stored { meta, .. }) => meta.dirty.light,
+                _ => false,
+            };
+            let Some(ChunkSlot::Stored { data, .. }) = self.world.chunks.get(&c) else {
+                continue;
+            };
+            let data_arc = std::sync::Arc::new(data.clone());
+            let neighbors =
+                crate::ecs::systems::mesh_upload::gather_neighbors(&self.world, c);
+            if needs_light {
+                self.jobs
+                    .spawn_relight(c, data_arc, neighbors, self.registry.clone());
+            } else {
+                self.jobs
+                    .spawn_mesh_lod0(c, data_arc, neighbors, self.registry.clone());
+            }
+        }
         crate::ecs::systems::world_stream::world_stream(
             &self.ecs,
             &mut self.world,
@@ -100,7 +126,7 @@ impl AppState {
             &mut self.renderer,
         );
 
-        if let Err(e) = crate::ecs::systems::render::render(&self.ecs, &self.renderer) {
+        if let Err(e) = crate::ecs::systems::render::render(&self.ecs, &mut self.renderer) {
             log::warn!("render error: {e:?}");
         }
         self.input_buf.clear_per_frame();

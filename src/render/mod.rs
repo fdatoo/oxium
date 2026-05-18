@@ -27,9 +27,12 @@ use crate::render::camera::{
 };
 use crate::render::gpu::{make_depth_texture, Gpu};
 use crate::render::mesh::{upload_mesh, GpuMesh};
+use crate::render::pipelines::cursor::{
+    build as build_cursor, make_cursor_bind_group_layout, CursorPipeline,
+};
 use crate::render::pipelines::opaque::{build as build_opaque, OpaquePipeline};
 use crate::render::pipelines::sky::{build as build_sky, SkyPipeline};
-use crate::voxel::coords::ChunkCoord;
+use crate::voxel::coords::{BlockPos, ChunkCoord};
 use glam::Vec3;
 use wgpu::util::DeviceExt;
 
@@ -50,6 +53,12 @@ pub struct Renderer {
     opaque_pipe: OpaquePipeline,
     /// Sky-gradient pipeline, drawn before opaque each frame.
     sky_pipe: SkyPipeline,
+    /// Wireframe cursor pipeline + its uniform/bind group. Drawn last
+    /// (over the opaque pass) only when `cursor_visible == true`.
+    cursor_pipe: CursorPipeline,
+    cursor_buf: wgpu::Buffer,
+    cursor_bg: wgpu::BindGroup,
+    cursor_visible: bool,
 
     /// One GPU mesh + a per-chunk uniform buffer per loaded chunk (LOD0
     /// only — LODs 1 and 2 arrive in M8).
@@ -89,6 +98,29 @@ impl Renderer {
             &chunk_bgl,
         );
         let sky_pipe = build_sky(&gpu.device, gpu.surface_cfg.format, &camera_bgl);
+
+        // Cursor highlight pipeline + buffer.
+        let cursor_bgl = make_cursor_bind_group_layout(&gpu.device);
+        let cursor_buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("cursor-uniform"),
+            contents: bytemuck::cast_slice(&[0.0f32; 4]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let cursor_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cursor-bg"),
+            layout: &cursor_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: cursor_buf.as_entire_binding(),
+            }],
+        });
+        let cursor_pipe = build_cursor(
+            &gpu.device,
+            gpu.surface_cfg.format,
+            &camera_bgl,
+            &cursor_bgl,
+        );
+
         Self {
             gpu,
             depth_view,
@@ -97,7 +129,31 @@ impl Renderer {
             chunk_bgl,
             opaque_pipe,
             sky_pipe,
+            cursor_pipe,
+            cursor_buf,
+            cursor_bg,
+            cursor_visible: false,
             chunk_meshes: HashMap::new(),
+        }
+    }
+
+    /// Update the wireframe cursor target. Pass `None` to hide it (the
+    /// player isn't aimed at anything within reach).
+    pub fn set_cursor(&mut self, hit: Option<BlockPos>) {
+        match hit {
+            Some(block) => {
+                let v = [
+                    block.0.x as f32,
+                    block.0.y as f32,
+                    block.0.z as f32,
+                    1.0,
+                ];
+                self.gpu
+                    .queue
+                    .write_buffer(&self.cursor_buf, 0, bytemuck::cast_slice(&v));
+                self.cursor_visible = true;
+            }
+            None => self.cursor_visible = false,
         }
     }
 
@@ -242,6 +298,14 @@ impl Renderer {
             pass.set_vertex_buffer(0, cg.mesh.vbuf.slice(..));
             pass.set_index_buffer(cg.mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..cg.mesh.index_count, 0, 0..1);
+        }
+
+        // 3) Cursor wireframe (12 line segments, no vertex buffer).
+        if self.cursor_visible {
+            pass.set_pipeline(&self.cursor_pipe.pipeline);
+            pass.set_bind_group(0, &self.camera_bg, &[]);
+            pass.set_bind_group(1, &self.cursor_bg, &[]);
+            pass.draw(0..24, 0..1);
         }
     }
 

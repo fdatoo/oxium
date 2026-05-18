@@ -58,6 +58,8 @@ impl GameEcs {
             },
             PlayerInput::default(),
             Grounded::default(),
+            Selected::default(),
+            CursorTarget::default(),
         ));
         // Sun entity holds the single TimeOfDay state queried by render +
         // sky systems. Living in the ECS means future features (multiple
