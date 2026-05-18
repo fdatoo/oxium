@@ -124,9 +124,15 @@ fn emit_quad(
 /// expressed in 0..=32 local coordinates (the cube spans
 /// `(x,y,z)..(x+1,y+1,z+1)`).
 ///
-/// The orderings here were carefully tuned to:
-/// - keep all six faces in CCW winding from the *outside* of the cube
-/// - match the AO sampling pattern in M4's greedy mesher
+/// "Counter-clockwise from outside" is the convention required by our
+/// `front_face = Ccw` + back-face cull pipeline state. It means: standing
+/// on the *outward* side of the face and tracing the corners in the order
+/// returned, you should turn left at each step.
+///
+/// Validating one face is a one-line cross-product check: for any
+/// `(v0, v1, v2)` from the returned list, `(v1-v0) × (v2-v0)` must equal
+/// the face's outward normal. The PosY/NegY entries used to be wound the
+/// other way and got silently back-face culled — fixed below.
 fn face_corners(x: u8, y: u8, z: u8, face: Face) -> [[u8; 3]; 4] {
     let x1 = x + 1;
     let y1 = y + 1;
@@ -134,8 +140,8 @@ fn face_corners(x: u8, y: u8, z: u8, face: Face) -> [[u8; 3]; 4] {
     match face {
         Face::PosX => [[x1, y, z], [x1, y1, z], [x1, y1, z1], [x1, y, z1]],
         Face::NegX => [[x, y, z1], [x, y1, z1], [x, y1, z], [x, y, z]],
-        Face::PosY => [[x, y1, z], [x1, y1, z], [x1, y1, z1], [x, y1, z1]],
-        Face::NegY => [[x, y, z1], [x1, y, z1], [x1, y, z], [x, y, z]],
+        Face::PosY => [[x, y1, z], [x, y1, z1], [x1, y1, z1], [x1, y1, z]],
+        Face::NegY => [[x, y, z], [x1, y, z], [x1, y, z1], [x, y, z1]],
         Face::PosZ => [[x1, y, z1], [x1, y1, z1], [x, y1, z1], [x, y, z1]],
         Face::NegZ => [[x, y, z], [x, y1, z], [x1, y1, z], [x1, y, z]],
     }
