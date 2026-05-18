@@ -268,6 +268,10 @@ impl Renderer {
         let aspect =
             self.gpu.surface_cfg.width as f32 / self.gpu.surface_cfg.height.max(1) as f32;
         let vp = view_proj(eye, yaw, pitch, 70f32.to_radians(), aspect);
+        // Inverse for the sky shader's NDC → world ray reconstruction.
+        // Inversion fails for a degenerate matrix; that can only happen
+        // with a zero frustum, so we fall back to identity for safety.
+        let inv_vp = vp.inverse();
         self.gpu.queue.write_buffer(
             &self.camera_buf,
             0,
@@ -275,7 +279,11 @@ impl Renderer {
                 view_proj: vp.to_cols_array_2d(),
                 sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.0],
                 sun_intensity,
-                _pad: [0.0; 3],
+                _pad0: 0.0,
+                _pad1: 0.0,
+                _pad2: 0.0,
+                eye: [eye.x, eye.y, eye.z, 0.0],
+                inv_view_proj: inv_vp.to_cols_array_2d(),
             }]),
         );
 
@@ -388,6 +396,7 @@ impl Renderer {
         sun_intensity: f32,
     ) {
         let vp = view_proj(eye, yaw, pitch, 70f32.to_radians(), aspect);
+        let inv_vp = vp.inverse();
         self.gpu.queue.write_buffer(
             &self.camera_buf,
             0,
@@ -395,7 +404,11 @@ impl Renderer {
                 view_proj: vp.to_cols_array_2d(),
                 sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.0],
                 sun_intensity,
-                _pad: [0.0; 3],
+                _pad0: 0.0,
+                _pad1: 0.0,
+                _pad2: 0.0,
+                eye: [eye.x, eye.y, eye.z, 0.0],
+                inv_view_proj: inv_vp.to_cols_array_2d(),
             }]),
         );
 

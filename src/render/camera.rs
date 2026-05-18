@@ -16,20 +16,37 @@ use glam::{Mat4, Vec3};
 
 /// View-projection + lighting context shared with every opaque/sky draw.
 ///
-/// Memory layout is std140-friendly: `mat4x4` (16-byte align, 64 bytes) +
-/// `vec4` (16 bytes) + `f32` + `vec3<f32>` padding. Total: 96 bytes.
+/// Memory layout (std140-friendly, all members 16-byte aligned, total 176
+/// bytes — a multiple of 16):
+///
+/// | Offset | Size | Field           |
+/// |-------:|-----:|-----------------|
+/// |     0  |  64  | `view_proj`     |
+/// |    64  |  16  | `sun_dir`       |
+/// |    80  |   4  | `sun_intensity` |
+/// |    84  |  12  | trailing scalar padding (`_pad0..2`) |
+/// |    96  |  16  | `eye`           |
+/// |   112  |  64  | `inv_view_proj` |
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4],
-    /// Unit-length sun direction in world space. `w` is unused padding
-    /// but kept so the field is 16-byte-aligned in the std140 layout.
+    /// Unit-length sun direction in world space. `w` is unused padding.
     pub sun_dir: [f32; 4],
     /// Scalar sun brightness, 0..=1. The shader multiplies the per-vertex
     /// sky-light channel by this so torches still glow in the dark.
     pub sun_intensity: f32,
-    /// std140 padding to keep the struct size a multiple of 16 bytes.
-    pub _pad: [f32; 3],
+    pub _pad0: f32,
+    pub _pad1: f32,
+    pub _pad2: f32,
+    /// Camera (eye) world-space position. `w` unused. Used by:
+    /// - opaque fog to compute fragment distance from camera
+    /// - sky sun-disc to compute world-space ray direction
+    pub eye: [f32; 4],
+    /// Inverse of `view_proj`. The sky shader uses it to reconstruct a
+    /// world-space ray direction from NDC, so the sun disc can be drawn
+    /// in the correct world direction regardless of camera orientation.
+    pub inv_view_proj: [[f32; 4]; 4],
 }
 
 impl CameraUniform {
@@ -40,7 +57,11 @@ impl CameraUniform {
             view_proj: Mat4::IDENTITY.to_cols_array_2d(),
             sun_dir: [0.0, 1.0, 0.0, 0.0],
             sun_intensity: 1.0,
-            _pad: [0.0; 3],
+            _pad0: 0.0,
+            _pad1: 0.0,
+            _pad2: 0.0,
+            eye: [0.0; 4],
+            inv_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
         }
     }
 }

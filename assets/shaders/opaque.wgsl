@@ -14,17 +14,20 @@
 //   * face-direction tint (top brightest, bottom darkest)
 //   * baked vertex AO (0..3 → 0.45..1.0 brightness)
 //   * lighting: max(sky × sun_intensity, block)
+//   * distance fog: fade to the same sky palette beyond ~80 blocks
 //
 // `sun_intensity` is supplied by the time-of-day system. At midnight it
 // drops to 0 and torches dominate; at noon the sky channel wins.
 
 struct CameraUniform {
-    view_proj:     mat4x4<f32>,   //  0  ..  64
-    sun_dir:       vec4<f32>,     // 64  ..  80
-    sun_intensity: f32,           // 80  ..  84
-    _pad0:         f32,           // 84  ..  88
-    _pad1:         f32,           // 88  ..  92
-    _pad2:         f32,           // 92  ..  96   (struct size: 96 bytes)
+    view_proj:     mat4x4<f32>,
+    sun_dir:       vec4<f32>,
+    sun_intensity: f32,
+    _pad0:         f32,
+    _pad1:         f32,
+    _pad2:         f32,
+    eye:           vec4<f32>,
+    inv_view_proj: mat4x4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 
@@ -44,6 +47,7 @@ struct VsOut {
     @location(0) v_color: vec4<f32>,
     @location(1) v_ao:    f32,
     @location(2) v_light: f32,
+    @location(3) v_world: vec3<f32>,   // world-space fragment pos for fog
 };
 
 @vertex
@@ -52,6 +56,7 @@ fn vs_main(in: VsIn) -> VsOut {
 
     var out: VsOut;
     out.clip_pos = camera.view_proj * vec4<f32>(world_pos, 1.0);
+    out.v_world = world_pos;
 
     let face = in.face_light.x;
     var face_mul: f32 = 0.80;
@@ -70,12 +75,34 @@ fn vs_main(in: VsIn) -> VsOut {
     return out;
 }
 
+// Compute the colour of the sky at the horizon, used as the fog tint.
+// Mirrors the gradient logic in sky.wgsl so distant terrain dissolves
+// seamlessly into the sky's horizon band rather than into a flat grey.
+fn horizon_color(sun_intensity: f32) -> vec3<f32> {
+    let day   = vec3<f32>(0.65, 0.80, 1.00);   // brighter than zenith
+    let dusk  = vec3<f32>(0.98, 0.62, 0.35);
+    let night = vec3<f32>(0.05, 0.06, 0.12);
+    let i = sun_intensity;
+    let dusk_w = smoothstep(0.0, 0.25, i) - smoothstep(0.25, 0.7, i);
+    return mix(night, day, smoothstep(0.0, 0.7, i)) + dusk * dusk_w * 0.6;
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let ao = mix(0.45, 1.0, in.v_ao);
-    // Tiny ambient floor so the deep dark isn't pitch black — easier to
-    // see what we're walking into in caves.
     let lit = max(0.05, in.v_light);
     let shade = ao * lit;
-    return vec4<f32>(in.v_color.rgb * shade, in.v_color.a);
+    let lit_rgb = in.v_color.rgb * shade;
+
+    // Distance fog: linear ramp between FOG_START and FOG_END. The end
+    // distance is tuned so it sits just inside the LOD2 boundary so the
+    // chunky LOD silhouettes fade out before they read as artefacts.
+    let dist = length(in.v_world - camera.eye.xyz);
+    let fog_start = 96.0;
+    let fog_end   = 360.0;
+    let fog_t = clamp((dist - fog_start) / (fog_end - fog_start), 0.0, 1.0);
+    let fog_col = horizon_color(camera.sun_intensity);
+    let out_rgb = mix(lit_rgb, fog_col, fog_t);
+
+    return vec4<f32>(out_rgb, in.v_color.a);
 }

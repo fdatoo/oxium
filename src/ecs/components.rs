@@ -132,10 +132,13 @@ pub struct TimeOfDay {
 
 impl Default for TimeOfDay {
     fn default() -> Self {
-        // Start in the morning so a fresh world is well-lit on spawn; a
-        // 10-minute day keeps the cycle visible during play sessions.
+        // Start a bit after sunrise — sun is ~45° above the horizon in
+        // the +X direction so the default `yaw=0, pitch=0` camera has
+        // it visible up-and-ahead, and intensity is already ~0.8 so the
+        // world is well lit. A 10-minute day keeps the cycle visible
+        // during play sessions.
         Self {
-            t: 0.25,
+            t: 0.125,
             day_length: 600.0,
         }
     }
