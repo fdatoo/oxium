@@ -62,7 +62,13 @@ fn vs_main(in: VsIn) -> VsOut {
     var face_mul: f32 = 0.80;
     if (face == 2u) { face_mul = 1.00; }       // +Y top
     else if (face == 3u) { face_mul = 0.55; }  // -Y bottom
-    out.v_color = in.color * face_mul;
+    // face_mul applies to RGB only — leaving alpha untouched means the
+    // fragment shader can reliably identify water by `v_color.a < 0.95`
+    // (water is the only block with alpha != 1.0 at the vertex source).
+    // Otherwise face_mul=0.80 on opaque sides + face_mul=0.55 on
+    // opaque bottoms would falsely match the water threshold and
+    // trigger the water shimmer code path on leaves / stone undersides.
+    out.v_color = vec4<f32>(in.color.rgb * face_mul, in.color.a);
     out.v_ao    = f32(in.pos_ao.w) / 3.0;
 
     // Light byte: high nibble = sky, low nibble = block. Scale each
