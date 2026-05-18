@@ -14,6 +14,21 @@
 //! corner: the two "sides" sharing the corner along the face's plane plus
 //! the diagonal "corner" block. If both sides are solid, the corner is
 //! fully occluded (= 0). Otherwise the AO value is `3 − occupied_count`.
+//!
+//! Corner index convention (must match `greedy.rs`'s `corner_uv` layout):
+//!
+//!   index 0 → (-u, -v)
+//!   index 1 → (+u, -v)
+//!   index 2 → (+u, +v)
+//!   index 3 → (-u, +v)
+//!
+//! Per face, the `(u_axis, v_axis)` directions are the same ones the
+//! greedy mesher uses to unmap `(slice, u, v)` back into world space.
+//! Keeping that mapping consistent here is what makes adjacent quads agree
+//! on the AO value at a shared vertex — without it, neighbouring grass
+//! tops sample *different* occluders for the same world-space corner, and
+//! the resulting AO discontinuity reads as visible block-sized shadow
+//! tiles that don't flow into each other.
 
 use crate::mesher::Face;
 use crate::voxel::block::Block;
@@ -25,56 +40,57 @@ use crate::voxel::block::Block;
 /// isn't loaded). Out-of-bounds samples are treated as *unoccluded* —
 /// erring on the side of brighter rather than darker at the world edge.
 ///
-/// Returns `[ao_c0, ao_c1, ao_c2, ao_c3]` matching the corner order used by
-/// the mesher's quad emitter.
+/// Returns `[ao_c0, ao_c1, ao_c2, ao_c3]` in the corner order described in
+/// the module doc, which matches the mesher's vertex emission order.
 pub fn corner_ao_at<F>(face: Face, query: F) -> [u8; 4]
 where
     F: Fn(i32, i32, i32) -> Option<Block>,
 {
-    // `n_off` is the offset to the face's outward neighbour (where AO is
-    // measured). `plane` is the 4 in-plane neighbour offsets in winding
-    // order — these define the (side1, side2, corner) sampling triple for
-    // each corner of the face.
-    let (n_off, plane) = match face {
-        Face::PosX => ((1, 0, 0), [(0, 1, 0), (0, 0, 1), (0, -1, 0), (0, 0, -1)]),
-        Face::NegX => ((-1, 0, 0), [(0, 1, 0), (0, 0, -1), (0, -1, 0), (0, 0, 1)]),
-        Face::PosY => ((0, 1, 0), [(-1, 0, 0), (0, 0, 1), (1, 0, 0), (0, 0, -1)]),
-        Face::NegY => ((0, -1, 0), [(1, 0, 0), (0, 0, 1), (-1, 0, 0), (0, 0, -1)]),
-        Face::PosZ => ((0, 0, 1), [(1, 0, 0), (0, 1, 0), (-1, 0, 0), (0, -1, 0)]),
-        Face::NegZ => ((0, 0, -1), [(-1, 0, 0), (0, 1, 0), (1, 0, 0), (0, -1, 0)]),
-    };
+    // `normal` is the unit step from the cube into the air side of the
+    // face; `u_unit` / `v_unit` are unit steps in the face's in-plane
+    // axes, in the same orientation the greedy mesher uses.
+    let (normal, u_unit, v_unit) = face_axes(face);
 
-    // Closure: is the block at `(n_off + off)` solid (i.e. anything but Air)?
     let is_solid = |off: (i32, i32, i32)| -> bool {
-        let p = (n_off.0 + off.0, n_off.1 + off.1, n_off.2 + off.2);
-        query(p.0, p.1, p.2)
+        query(off.0, off.1, off.2)
             .map(|b| b != Block::Air)
             .unwrap_or(false)
     };
 
-    // The four edges (side1+side2 pairs) wrapping around the face's plane.
-    // Each adjacent pair shares one corner of the quad.
-    let plane_solid: [bool; 4] = [
-        is_solid(plane[0]),
-        is_solid(plane[1]),
-        is_solid(plane[2]),
-        is_solid(plane[3]),
-    ];
-    let corner_solid = |a: (i32, i32, i32), b: (i32, i32, i32)| -> bool {
-        is_solid((a.0 + b.0, a.1 + b.1, a.2 + b.2))
-    };
-
-    // Corner i uses plane[pairs[i].0] + plane[pairs[i].1] + their diagonal.
-    let pairs = [(3, 0), (0, 1), (1, 2), (2, 3)];
     let mut out = [3u8; 4];
-    for (i, (a, b)) in pairs.iter().enumerate() {
-        let s1 = plane_solid[*a];
-        let s2 = plane_solid[*b];
-        let c = corner_solid(plane[*a], plane[*b]);
-        out[i] = ao_value(s1, s2, c);
+    for (i, slot) in out.iter_mut().enumerate() {
+        // Corner i sits at (u_sign · u_unit + v_sign · v_unit) from the
+        // cube origin (plus the face's normal, on the air side). The two
+        // "side" occluders are one step out along each axis; the "diag"
+        // occluder is one step along both.
+        let u_sign = if i == 0 || i == 3 { -1 } else { 1 };
+        let v_sign = if i == 0 || i == 1 { -1 } else { 1 };
+        let side1 = add(normal, scale(u_unit, u_sign));
+        let side2 = add(normal, scale(v_unit, v_sign));
+        let diag = add(side1, scale(v_unit, v_sign));
+        *slot = ao_value(is_solid(side1), is_solid(side2), is_solid(diag));
     }
     out
 }
+
+/// Per-face `(normal, u_unit, v_unit)` triple, matching the axis mapping
+/// used by `greedy.rs::greedy_one_face`. Changing one without the other
+/// would re-introduce the corner-mismatch artefact this function exists
+/// to prevent.
+fn face_axes(face: Face) -> (Off, Off, Off) {
+    match face {
+        Face::PosY => ((0, 1, 0), (1, 0, 0), (0, 0, 1)),
+        Face::NegY => ((0, -1, 0), (0, 0, 1), (1, 0, 0)),
+        Face::PosX => ((1, 0, 0), (0, 0, 1), (0, 1, 0)),
+        Face::NegX => ((-1, 0, 0), (0, 1, 0), (0, 0, 1)),
+        Face::PosZ => ((0, 0, 1), (0, 1, 0), (1, 0, 0)),
+        Face::NegZ => ((0, 0, -1), (1, 0, 0), (0, 1, 0)),
+    }
+}
+
+type Off = (i32, i32, i32);
+fn add(a: Off, b: Off) -> Off { (a.0 + b.0, a.1 + b.1, a.2 + b.2) }
+fn scale(a: Off, k: i32) -> Off { (a.0 * k, a.1 * k, a.2 * k) }
 
 /// Minecraft-style AO function. The "both sides solid" shortcut is
 /// important — without it a corner with side1=side2=true but corner=false
@@ -100,11 +116,9 @@ mod tests {
 
     #[test]
     fn two_sides_solid_returns_zero() {
-        // For the PosY face at the origin, corner 0 samples plane[3] + plane[0]
-        // after the +Y normal offset:
-        //   plane[3] = (0, 0, -1)  → side1 offset (0, 1, -1)
-        //   plane[0] = (-1, 0, 0)  → side2 offset (-1, 1, 0)
-        let solids: [(i32, i32, i32); 2] = [(0, 1, -1), (-1, 1, 0)];
+        // PosY corner 0 is at (-u, -v) = (-x, -z). Both side occluders
+        // sit one step along the air side (y=+1) in -x and -z.
+        let solids: [(i32, i32, i32); 2] = [(-1, 1, 0), (0, 1, -1)];
         let ao = corner_ao_at(Face::PosY, |x, y, z| {
             if solids.iter().any(|s| *s == (x, y, z)) {
                 Some(Block::Stone)
@@ -117,7 +131,7 @@ mod tests {
 
     #[test]
     fn one_side_solid_returns_two() {
-        // PosY, only one of the two sides for corner 0 is solid.
+        // PosY corner 0 with only one of its two side occluders solid.
         let ao = corner_ao_at(Face::PosY, |x, y, z| {
             if (x, y, z) == (0, 1, -1) {
                 Some(Block::Stone)
@@ -126,5 +140,62 @@ mod tests {
             }
         });
         assert_eq!(ao[0], 2, "one solid neighbour -> 2");
+    }
+
+    /// Regression guard: adjacent cells on the same face must agree on the
+    /// AO value at a shared vertex. Two PosY-top cells at (0,0,0) and
+    /// (1,0,0) share the edge along x=1. With a single stone occluder
+    /// floating to one side of that shared edge, the AO computed for
+    /// cell A's corner-at-(1,1,0) must equal the AO computed for cell B's
+    /// corner-at-(1,1,0). Otherwise the mesher emits two adjacent quads
+    /// whose interpolated AO discontinuously snaps at the shared edge,
+    /// producing the "shadows don't flow into next tile" artefact.
+    #[test]
+    fn shared_vertex_ao_agrees_across_adjacent_cells() {
+        // Occluder sits one block above and one block in -z from the
+        // shared vertex at world (1, 1, 0). This block contributes as a
+        // "side" occluder for both cells' corners that touch (1, 1, 0).
+        let occluder = (1, 1, -1);
+        let q = |x: i32, y: i32, z: i32| -> Option<Block> {
+            if (x, y, z) == occluder {
+                Some(Block::Stone)
+            } else {
+                Some(Block::Air)
+            }
+        };
+
+        // Cell A at (0, 0, 0). Its corner 1 is at world (1, 1, 0).
+        let ao_a = corner_ao_at(Face::PosY, |dx, dy, dz| q(dx, dy, dz));
+        // Cell B at (1, 0, 0). Its corner 0 is at world (1, 1, 0).
+        let ao_b = corner_ao_at(Face::PosY, |dx, dy, dz| q(1 + dx, dy, dz));
+
+        assert_eq!(
+            ao_a[1], ao_b[0],
+            "AO at shared vertex must agree between adjacent cells"
+        );
+    }
+
+    /// Same agreement check on a vertical face, since the bug also
+    /// affected `Face::PosX` / `NegX` / `PosZ` / `NegZ`.
+    #[test]
+    fn shared_vertex_ao_agrees_on_vertical_face() {
+        // PosX face, u_axis=z, v_axis=y. Two cells stacked along +y at
+        // (0, 0, 0) and (0, 1, 0) share the edge at y=1. Cell A's
+        // corner 3 (=(−u,+v)=(z=0,y=1)) and Cell B's corner 0
+        // (=(−u,−v)=(z=0,y=1)) both sit at world (1, 1, 0).
+        let occluder = (1, 1, -1);
+        let q = |x: i32, y: i32, z: i32| -> Option<Block> {
+            if (x, y, z) == occluder {
+                Some(Block::Stone)
+            } else {
+                Some(Block::Air)
+            }
+        };
+        let ao_a = corner_ao_at(Face::PosX, |dx, dy, dz| q(dx, dy, dz));
+        let ao_b = corner_ao_at(Face::PosX, |dx, dy, dz| q(dx, 1 + dy, dz));
+        assert_eq!(
+            ao_a[3], ao_b[0],
+            "PosX shared vertex AO must agree between vertically-adjacent cells"
+        );
     }
 }
