@@ -14,11 +14,14 @@
 use crate::ecs::components::Position;
 use crate::ecs::GameEcs;
 use crate::jobs::Jobs;
+use crate::persistence::region::region_path;
+use crate::persistence::thread::{PersistRequest, Persistence};
 use crate::voxel::block::BlockRegistry;
 use crate::voxel::coords::ChunkCoord;
 use crate::voxel::world::{ChunkSlot, World};
 use crate::worldgen::Generator;
 use glam::IVec3;
+use std::path::Path;
 use std::sync::Arc;
 
 /// Horizontal load radius in chunks. M8 raises this from 6 → 12 once
@@ -50,6 +53,8 @@ pub fn world_stream(
     jobs: &Jobs,
     generator: &Arc<Generator>,
     registry: &Arc<BlockRegistry>,
+    persistence: &Persistence,
+    saves_dir: &Path,
 ) {
     let mut q = ecs.world.query_one::<&Position>(ecs.player).unwrap();
     let pos = q.get().unwrap();
@@ -74,14 +79,27 @@ pub fn world_stream(
         if !world.chunks.contains_key(&c) {
             // Mark Pending so we don't re-spawn the same job next frame.
             world.chunks.insert(c, ChunkSlot::Pending);
-            jobs.spawn_gen(c, generator.clone(), registry.clone());
+            // Prefer loading from disk when a region file exists —
+            // persisted edits should reappear next session.
+            let path = region_path(saves_dir, c);
+            if path.exists() {
+                let _ = persistence.req_tx.send(PersistRequest::Load { coord: c });
+            } else {
+                jobs.spawn_gen(c, generator.clone(), registry.clone());
+            }
         }
     }
 }
 
 /// Per-frame: evict chunks that have moved outside the unload radius.
-/// Runs *after* `drain_jobs` (see module docs).
-pub fn world_unload(ecs: &GameEcs, world: &mut World, renderer: &mut crate::render::Renderer) {
+/// Modified chunks are queued for save *before* eviction so we don't lose
+/// the player's work. Runs *after* `drain_jobs` (see module docs).
+pub fn world_unload(
+    ecs: &GameEcs,
+    world: &mut World,
+    renderer: &mut crate::render::Renderer,
+    persistence: &Persistence,
+) {
     let mut q = ecs.world.query_one::<&Position>(ecs.player).unwrap();
     let pos = q.get().unwrap();
     let pc = player_chunk(pos.0).0;
@@ -96,6 +114,17 @@ pub fn world_unload(ecs: &GameEcs, world: &mut World, renderer: &mut crate::rend
         .copied()
         .collect();
     for c in to_remove {
+        // Save before evict if the player modified this chunk. Pure-
+        // generated chunks regenerate from seed on next visit, so we
+        // don't waste disk on them.
+        if let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get(&c) {
+            if meta.modified {
+                let _ = persistence.req_tx.send(PersistRequest::Save {
+                    coord: c,
+                    data: data.clone(),
+                });
+            }
+        }
         world.chunks.remove(&c);
         renderer.remove_chunk_mesh(c);
     }

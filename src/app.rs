@@ -13,16 +13,18 @@
 //! Each system is a free function in `ecs::systems`; the ordering here is
 //! the *only* place we declare it — easy to debug and reason about.
 
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use winit::window::Window;
 
 use crate::ecs::systems::input::InputBuf;
 use crate::ecs::GameEcs;
 use crate::jobs::Jobs;
+use crate::persistence::thread::{PersistRequest, Persistence};
 use crate::render::Renderer;
 use crate::voxel::block::BlockRegistry;
-use crate::voxel::world::World;
+use crate::voxel::world::{ChunkSlot, World};
 use crate::worldgen::Generator;
 
 /// Global per-session state. Constructed once at startup and stepped once
@@ -40,10 +42,20 @@ pub struct AppState {
     pub generator: Arc<Generator>,
     /// Block registry, shared with worker threads via `Arc`.
     pub registry: Arc<BlockRegistry>,
+    /// Dedicated I/O thread for chunk save/load.
+    pub persistence: Persistence,
+    /// Root directory for region files this session writes to.
+    pub saves_dir: PathBuf,
+    /// Wall-clock time of the previous autosave tick. Autosave runs every
+    /// `AUTOSAVE_INTERVAL` seconds.
+    pub last_autosave: Instant,
     pub input_buf: InputBuf,
     /// Wall-clock time of the previous `step`; used to derive `dt`.
     pub last_tick: Instant,
 }
+
+/// How often the autosave system flushes modified chunks to disk.
+const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(60);
 
 impl AppState {
     /// Build all subsystems. The player spawns at `(16, 96, 16)` — above
@@ -57,6 +69,12 @@ impl AppState {
         let jobs = Jobs::new();
         let generator = Arc::new(Generator::new(seed));
         let registry = Arc::new(BlockRegistry::new());
+
+        // One save folder per binary; could grow into a world-picker UI.
+        let saves_dir = PathBuf::from("saves/default");
+        std::fs::create_dir_all(&saves_dir).ok();
+        let persistence = Persistence::spawn(saves_dir.clone());
+
         Self {
             window,
             renderer,
@@ -65,6 +83,9 @@ impl AppState {
             jobs,
             generator,
             registry,
+            persistence,
+            saves_dir,
+            last_autosave: Instant::now(),
             input_buf: InputBuf::default(),
             last_tick: Instant::now(),
         }
@@ -113,6 +134,8 @@ impl AppState {
             &self.jobs,
             &self.generator,
             &self.registry,
+            &self.persistence,
+            &self.saves_dir,
         );
         crate::ecs::systems::mesh_upload::drain_jobs(
             &mut self.world,
@@ -120,15 +143,56 @@ impl AppState {
             &mut self.renderer,
             &self.registry,
         );
+        crate::ecs::systems::mesh_upload::drain_persistence(
+            &mut self.world,
+            &self.jobs,
+            &self.persistence,
+            &self.generator,
+            &self.registry,
+        );
         crate::ecs::systems::world_stream::world_unload(
             &self.ecs,
             &mut self.world,
             &mut self.renderer,
+            &self.persistence,
         );
+
+        // Autosave: every AUTOSAVE_INTERVAL, push every modified chunk
+        // through to the persistence thread. Cheap if no chunks are
+        // modified.
+        if self.last_autosave.elapsed() >= AUTOSAVE_INTERVAL {
+            self.last_autosave = Instant::now();
+            self.flush_modified();
+        }
 
         if let Err(e) = crate::ecs::systems::render::render(&self.ecs, &mut self.renderer) {
             log::warn!("render error: {e:?}");
         }
         self.input_buf.clear_per_frame();
+    }
+
+    /// Send every currently-modified chunk through the persistence thread.
+    /// Used by both autosave and the `Drop` flush-on-close path.
+    fn flush_modified(&self) {
+        for (c, slot) in &self.world.chunks {
+            if let ChunkSlot::Stored { data, meta } = slot {
+                if meta.modified {
+                    let _ = self.persistence.req_tx.send(PersistRequest::Save {
+                        coord: *c,
+                        data: data.clone(),
+                    });
+                }
+            }
+        }
+    }
+}
+
+impl Drop for AppState {
+    /// On a clean shutdown, push any modified chunks out to disk and
+    /// politely tell the persistence thread to exit. We send a
+    /// `Shutdown` *after* the saves so the channel drains in order.
+    fn drop(&mut self) {
+        self.flush_modified();
+        let _ = self.persistence.req_tx.send(PersistRequest::Shutdown);
     }
 }

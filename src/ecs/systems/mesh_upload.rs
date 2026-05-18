@@ -12,11 +12,13 @@
 //!   one for that coordinate.
 
 use crate::jobs::{JobResult, Jobs};
+use crate::persistence::thread::{PersistResult, Persistence};
 use crate::render::Renderer;
 use crate::voxel::block::BlockRegistry;
 use crate::voxel::chunk::PalettedChunk;
 use crate::voxel::coords::ChunkCoord;
 use crate::voxel::world::{ChunkSlot, World};
+use crate::worldgen::Generator;
 use glam::IVec3;
 use std::sync::Arc;
 
@@ -105,6 +107,47 @@ pub fn neighbor_coords(c: ChunkCoord) -> [ChunkCoord; 6] {
         ChunkCoord(c.0 + IVec3::new(0, 0, 1)),
         ChunkCoord(c.0 + IVec3::new(0, 0, -1)),
     ]
+}
+
+/// Drain pending persistence results: install loaded chunks, mark saved
+/// chunks as no-longer-modified. Bounded per frame so a burst of saves
+/// (e.g. autosave fanout) doesn't blow the frame budget.
+pub fn drain_persistence(
+    world: &mut World,
+    jobs: &Jobs,
+    persistence: &Persistence,
+    generator: &Arc<Generator>,
+    registry: &Arc<BlockRegistry>,
+) {
+    const MAX_PER_FRAME: usize = 16;
+    for _ in 0..MAX_PER_FRAME {
+        let Ok(res) = persistence.result_rx.try_recv() else {
+            return;
+        };
+        match res {
+            PersistResult::Loaded { coord, data } => match data {
+                Some(data) => {
+                    // Install the loaded chunk and queue all three LODs.
+                    world.insert(coord, data.clone());
+                    let data_arc = Arc::new(data);
+                    let neighbors = gather_neighbors(world, coord);
+                    jobs.spawn_mesh_lod0(coord, data_arc.clone(), neighbors, registry.clone());
+                    jobs.spawn_mesh_lod(coord, 1, data_arc.clone(), registry.clone());
+                    jobs.spawn_mesh_lod(coord, 2, data_arc, registry.clone());
+                }
+                None => {
+                    // Region file existed but the slot was empty —
+                    // fall back to procedural gen.
+                    jobs.spawn_gen(coord, generator.clone(), registry.clone());
+                }
+            },
+            PersistResult::Saved { coord } => {
+                if let Some(ChunkSlot::Stored { meta, .. }) = world.chunks.get_mut(&coord) {
+                    meta.modified = false;
+                }
+            }
+        }
+    }
 }
 
 /// Gather Arc-shared snapshots of each loaded neighbour's `PalettedChunk`

@@ -5,3 +5,6 @@
 //! u24, len_sectors: u8)` so the file can be opened, header-read, and a
 //! single chunk located in two seeks. Chunk payload is `bincode(PalettedChunk)`
 //! then `zstd`-compressed.
+
+pub mod region;
+pub mod thread;
