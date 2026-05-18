@@ -1,0 +1,180 @@
+//! Naive culled mesher — one quad per *visible* block face.
+//!
+//! "Visible" means the neighbour in that face's direction is non-opaque.
+//! At chunk boundaries we don't yet have access to the adjacent chunk's
+//! contents, so we conservatively *do* emit those faces; M3 fixes this by
+//! plumbing neighbour chunks into the mesher.
+//!
+//! The greedy mesher in `greedy.rs` (M4) replaces this on the hot path, but
+//! the naive variant stays because:
+//!
+//! 1. It is the obvious-but-correct reference; greedy tests compare against it.
+//! 2. It's useful as a fallback during debugging.
+
+use crate::mesher::{ChunkMesh, Face, Vertex};
+use crate::voxel::block::{Block, BlockRegistry};
+use crate::voxel::chunk::DenseChunk;
+use crate::voxel::coords::{LocalPos, CHUNK_DIM_U};
+use glam::UVec3;
+
+/// Mesh a single chunk **without** neighbour information. Chunk-boundary
+/// faces are always emitted (correct in isolation, but produces extra
+/// overdraw between two adjacent chunks until M3 wires neighbours through).
+pub fn mesh_chunk_no_neighbors(chunk: &DenseChunk, reg: &BlockRegistry) -> ChunkMesh {
+    let mut mesh = ChunkMesh::empty();
+
+    // Iteration order is z outer → y → x inner so the inner-most index is
+    // the one stored fastest in memory (matches `LocalPos::to_index`'s layout).
+    for z in 0..CHUNK_DIM_U {
+        for y in 0..CHUNK_DIM_U {
+            for x in 0..CHUNK_DIM_U {
+                let p = LocalPos(UVec3::new(x, y, z));
+                let block = chunk.get(p);
+                if block == Block::Air {
+                    continue;
+                }
+
+                for face in Face::all() {
+                    if face_visible(chunk, reg, x as i32, y as i32, z as i32, face) {
+                        emit_quad(&mut mesh, x as u8, y as u8, z as u8, face, block, reg);
+                    }
+                }
+            }
+        }
+    }
+    mesh
+}
+
+/// Is the face of the block at `(x, y, z)` looking in `face` direction
+/// visible — i.e. does the neighbour in that direction not block the view?
+fn face_visible(
+    chunk: &DenseChunk,
+    reg: &BlockRegistry,
+    x: i32,
+    y: i32,
+    z: i32,
+    face: Face,
+) -> bool {
+    let [dx, dy, dz] = face.normal();
+    let (nx, ny, nz) = (x + dx, y + dy, z + dz);
+    let dim = CHUNK_DIM_U as i32;
+
+    // Out-of-chunk neighbour: M3 supplies the real neighbour chunk; here we
+    // assume the face is visible (worst case: a wasted quad, never an
+    // incorrect missing quad).
+    if nx < 0 || ny < 0 || nz < 0 || nx >= dim || ny >= dim || nz >= dim {
+        return true;
+    }
+
+    let neighbor = chunk.get(LocalPos(UVec3::new(nx as u32, ny as u32, nz as u32)));
+    !reg.info(neighbor).opaque
+}
+
+/// Push a single quad (two triangles, four vertices) into `mesh`.
+fn emit_quad(
+    mesh: &mut ChunkMesh,
+    x: u8,
+    y: u8,
+    z: u8,
+    face: Face,
+    block: Block,
+    reg: &BlockRegistry,
+) {
+    let corners = face_corners(x, y, z, face);
+    let info = reg.info(block);
+    // Grass-style top tint: if the block declares a separate top colour,
+    // use it for the +Y face only.
+    let color = match face {
+        Face::PosY if info.top_color.is_some() => info.top_color.unwrap(),
+        _ => info.color,
+    };
+    let color_u8 = [
+        (color[0] * 255.0) as u8,
+        (color[1] * 255.0) as u8,
+        (color[2] * 255.0) as u8,
+        (color[3] * 255.0) as u8,
+    ];
+
+    let base = mesh.vertices.len() as u32;
+    for c in corners {
+        mesh.vertices.push(Vertex {
+            pos: c,
+            // No real AO yet — uniform "fully unoccluded" (3); M4 bakes proper AO.
+            ao: 3,
+            color: color_u8,
+            normal_face: face as u8,
+            // No real lighting yet — fully lit on both channels; M5 fills this in.
+            light: 0xFF,
+            _pad: [0; 2],
+        });
+    }
+    // Two triangles forming the quad, in counter-clockwise winding so the
+    // pipeline's `front_face = Ccw` + back-face cull keep them visible.
+    mesh.indices.extend_from_slice(&[
+        base,
+        base + 1,
+        base + 2,
+        base,
+        base + 2,
+        base + 3,
+    ]);
+}
+
+/// Counter-clockwise corner positions for the cube face at `(x,y,z)`,
+/// expressed in 0..=32 local coordinates (the cube spans
+/// `(x,y,z)..(x+1,y+1,z+1)`).
+///
+/// The orderings here were carefully tuned to:
+/// - keep all six faces in CCW winding from the *outside* of the cube
+/// - match the AO sampling pattern in M4's greedy mesher
+fn face_corners(x: u8, y: u8, z: u8, face: Face) -> [[u8; 3]; 4] {
+    let x1 = x + 1;
+    let y1 = y + 1;
+    let z1 = z + 1;
+    match face {
+        Face::PosX => [[x1, y, z], [x1, y1, z], [x1, y1, z1], [x1, y, z1]],
+        Face::NegX => [[x, y, z1], [x, y1, z1], [x, y1, z], [x, y, z]],
+        Face::PosY => [[x, y1, z], [x1, y1, z], [x1, y1, z1], [x, y1, z1]],
+        Face::NegY => [[x, y, z1], [x1, y, z1], [x1, y, z], [x, y, z]],
+        Face::PosZ => [[x1, y, z1], [x1, y1, z1], [x, y1, z1], [x, y, z1]],
+        Face::NegZ => [[x, y, z], [x, y1, z], [x1, y1, z], [x1, y, z]],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::voxel::chunk::DenseChunk;
+    use crate::voxel::coords::CHUNK_DIM_U;
+
+    #[test]
+    fn empty_chunk_produces_empty_mesh() {
+        let c = DenseChunk::empty();
+        let r = BlockRegistry::new();
+        let mesh = mesh_chunk_no_neighbors(&c, &r);
+        assert!(mesh.vertices.is_empty());
+        assert!(mesh.indices.is_empty());
+    }
+
+    #[test]
+    fn single_block_emits_six_quads() {
+        let mut c = DenseChunk::empty();
+        c.set(LocalPos(UVec3::new(5, 5, 5)), Block::Stone);
+        let r = BlockRegistry::new();
+        let mesh = mesh_chunk_no_neighbors(&c, &r);
+        assert_eq!(mesh.vertices.len(), 24, "6 faces × 4 verts");
+        assert_eq!(mesh.indices.len(), 36, "6 faces × 6 indices");
+    }
+
+    #[test]
+    fn full_chunk_emits_only_outer_faces() {
+        let c = DenseChunk::new_filled(Block::Stone);
+        let r = BlockRegistry::new();
+        let mesh = mesh_chunk_no_neighbors(&c, &r);
+        // Interior faces are all culled. Every chunk-boundary face is emitted
+        // (we don't have neighbour info), so we expect 6 × 32 × 32 quads.
+        let expected_quads = 6 * CHUNK_DIM_U as usize * CHUNK_DIM_U as usize;
+        assert_eq!(mesh.vertices.len(), expected_quads * 4);
+        assert_eq!(mesh.indices.len(), expected_quads * 6);
+    }
+}
