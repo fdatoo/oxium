@@ -78,12 +78,14 @@ impl AppState {
         self.last_tick = now;
 
         crate::ecs::systems::input::apply_input(&mut self.ecs, &self.input_buf);
+        crate::ecs::systems::time_of_day::advance(&mut self.ecs, dt);
         crate::ecs::systems::movement::movement(&mut self.ecs, dt);
         crate::ecs::systems::world_stream::world_stream(
             &self.ecs,
             &mut self.world,
             &self.jobs,
             &self.generator,
+            &self.registry,
         );
         crate::ecs::systems::mesh_upload::drain_jobs(
             &mut self.world,

@@ -14,33 +14,47 @@
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 
-/// Single mat4 view-projection. Stored as `[[f32; 4]; 4]` (column-major)
-/// to match wgsl's `mat4x4<f32>` memory layout exactly under bytemuck.
+/// View-projection + lighting context shared with every opaque/sky draw.
+///
+/// Memory layout is std140-friendly: `mat4x4` (16-byte align, 64 bytes) +
+/// `vec4` (16 bytes) + `f32` + `vec3<f32>` padding. Total: 96 bytes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4],
+    /// Unit-length sun direction in world space. `w` is unused padding
+    /// but kept so the field is 16-byte-aligned in the std140 layout.
+    pub sun_dir: [f32; 4],
+    /// Scalar sun brightness, 0..=1. The shader multiplies the per-vertex
+    /// sky-light channel by this so torches still glow in the dark.
+    pub sun_intensity: f32,
+    /// std140 padding to keep the struct size a multiple of 16 bytes.
+    pub _pad: [f32; 3],
 }
 
 impl CameraUniform {
-    /// Default identity transform; useful as initial buffer contents before
-    /// the first frame's view-proj is computed.
+    /// Default identity transform with an overhead sun. Used as initial
+    /// buffer contents before the first frame's data is written.
     pub fn identity() -> Self {
         Self {
             view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+            sun_dir: [0.0, 1.0, 0.0, 0.0],
+            sun_intensity: 1.0,
+            _pad: [0.0; 3],
         }
     }
 }
 
 /// Bind-group layout for the camera uniform. One uniform at binding 0,
-/// visible only from the vertex stage (the fragment doesn't transform
-/// anything by view-proj).
+/// visible from *both* shader stages: the vertex stage uses `view_proj`,
+/// the fragment stage uses `sun_dir`/`sun_intensity` (sky shader) and
+/// will use `sun_dir` for diffuse shading once M5+ lighting kicks in.
 pub fn make_camera_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("camera-bgl"),
         entries: &[wgpu::BindGroupLayoutEntry {
             binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,

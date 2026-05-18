@@ -14,6 +14,7 @@
 use crate::ecs::components::Position;
 use crate::ecs::GameEcs;
 use crate::jobs::Jobs;
+use crate::voxel::block::BlockRegistry;
 use crate::voxel::coords::ChunkCoord;
 use crate::voxel::world::{ChunkSlot, World};
 use crate::worldgen::Generator;
@@ -48,6 +49,7 @@ pub fn world_stream(
     world: &mut World,
     jobs: &Jobs,
     generator: &Arc<Generator>,
+    registry: &Arc<BlockRegistry>,
 ) {
     let mut q = ecs.world.query_one::<&Position>(ecs.player).unwrap();
     let pos = q.get().unwrap();
@@ -72,7 +74,7 @@ pub fn world_stream(
         if !world.chunks.contains_key(&c) {
             // Mark Pending so we don't re-spawn the same job next frame.
             world.chunks.insert(c, ChunkSlot::Pending);
-            jobs.spawn_gen(c, generator.clone());
+            jobs.spawn_gen(c, generator.clone(), registry.clone());
         }
     }
 }

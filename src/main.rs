@@ -126,7 +126,17 @@ impl ApplicationHandler for App {
                 if let Some(path) = self.cli.screenshot_path.clone() {
                     if self.frames_drawn > self.cli.warmup_frames {
                         let (eye, yaw, pitch) = camera_from_ecs(&state.ecs);
-                        match capture_offscreen(&state.renderer, &path, eye, yaw, pitch) {
+                        let (sun_dir, sun_intensity) =
+                            ecs::systems::time_of_day::sun_state(&state.ecs);
+                        match capture_offscreen(
+                            &state.renderer,
+                            &path,
+                            eye,
+                            yaw,
+                            pitch,
+                            sun_dir,
+                            sun_intensity,
+                        ) {
                             Ok(()) => log::info!(
                                 "screenshot saved to {} ({} chunks)",
                                 path.display(),
@@ -179,6 +189,8 @@ fn capture_offscreen(
     eye: Vec3,
     yaw: f32,
     pitch: f32,
+    sun_dir: [f32; 3],
+    sun_intensity: f32,
 ) -> anyhow::Result<()> {
     let width = renderer.gpu.surface_cfg.width;
     let height = renderer.gpu.surface_cfg.height;
@@ -200,7 +212,7 @@ fn capture_offscreen(
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     let aspect = width as f32 / height.max(1) as f32;
-    renderer.render_to_view(&view, eye, yaw, pitch, aspect);
+    renderer.render_to_view(&view, eye, yaw, pitch, aspect, sun_dir, sun_intensity);
 
     render::screenshot::capture_texture_to_png(
         &renderer.gpu.device,

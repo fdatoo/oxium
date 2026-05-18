@@ -63,17 +63,26 @@ impl Jobs {
     /// Spawn a worldgen job for the chunk at `coord`. The job:
     ///
     /// 1. Allocates a fresh `DenseChunk`.
-    /// 2. Asks the `Generator` to fill it.
-    /// 3. Compresses it into a `PalettedChunk` (canonical form).
-    /// 4. Sends the result through the channel.
-    ///
-    /// `Arc<Generator>` is cheap to clone and lets every worker share the
-    /// same noise field state without re-initialising.
-    pub fn spawn_gen(&self, coord: ChunkCoord, generator: Arc<Generator>) {
+    /// 2. Asks the `Generator` to fill it with terrain.
+    /// 3. Runs the lighting BFS *locally* (no neighbours yet — cross-chunk
+    ///    bleed gets reapplied later when the streaming system queues a
+    ///    relight on the dirty neighbour).
+    /// 4. Compresses it into a `PalettedChunk` (canonical form).
+    /// 5. Sends the result through the channel.
+    pub fn spawn_gen(
+        &self,
+        coord: ChunkCoord,
+        generator: Arc<Generator>,
+        registry: Arc<BlockRegistry>,
+    ) {
         let tx = self.tx.clone();
         self.pool.spawn(move || {
             let mut dense = DenseChunk::empty();
             generator.fill_chunk(coord, &mut dense);
+            // Local-only lighting; the streaming system will re-run light
+            // jobs on neighbours later if light leaks across a boundary.
+            let no_neighbors = crate::voxel::chunk::Neighbors { chunks: [None; 6] };
+            crate::lighting::recompute_chunk(&mut dense, &no_neighbors, &registry);
             let data = PalettedChunk::compress(&dense);
             let _ = tx.send(JobResult::Generated { coord, data });
         });

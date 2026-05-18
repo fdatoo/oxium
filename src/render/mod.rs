@@ -28,6 +28,7 @@ use crate::render::camera::{
 use crate::render::gpu::{make_depth_texture, Gpu};
 use crate::render::mesh::{upload_mesh, GpuMesh};
 use crate::render::pipelines::opaque::{build as build_opaque, OpaquePipeline};
+use crate::render::pipelines::sky::{build as build_sky, SkyPipeline};
 use crate::voxel::coords::ChunkCoord;
 use glam::Vec3;
 use wgpu::util::DeviceExt;
@@ -47,6 +48,8 @@ pub struct Renderer {
     camera_bg: wgpu::BindGroup,
     chunk_bgl: wgpu::BindGroupLayout,
     opaque_pipe: OpaquePipeline,
+    /// Sky-gradient pipeline, drawn before opaque each frame.
+    sky_pipe: SkyPipeline,
 
     /// One GPU mesh + a per-chunk uniform buffer per loaded chunk (LOD0
     /// only — LODs 1 and 2 arrive in M8).
@@ -85,6 +88,7 @@ impl Renderer {
             &camera_bgl,
             &chunk_bgl,
         );
+        let sky_pipe = build_sky(&gpu.device, gpu.surface_cfg.format, &camera_bgl);
         Self {
             gpu,
             depth_view,
@@ -92,6 +96,7 @@ impl Renderer {
             camera_bg,
             chunk_bgl,
             opaque_pipe,
+            sky_pipe,
             chunk_meshes: HashMap::new(),
         }
     }
@@ -155,8 +160,17 @@ impl Renderer {
         self.chunk_meshes.len()
     }
 
-    /// Draw a single frame.
-    pub fn render(&self, eye: Vec3, yaw: f32, pitch: f32) -> Result<(), wgpu::SurfaceError> {
+    /// Draw a single frame. `sun_dir` is the (unit-length) world-space sun
+    /// direction and `sun_intensity` is its brightness `[0, 1]`; both come
+    /// from the time-of-day system.
+    pub fn render(
+        &self,
+        eye: Vec3,
+        yaw: f32,
+        pitch: f32,
+        sun_dir: [f32; 3],
+        sun_intensity: f32,
+    ) -> Result<(), wgpu::SurfaceError> {
         let aspect =
             self.gpu.surface_cfg.width as f32 / self.gpu.surface_cfg.height.max(1) as f32;
         let vp = view_proj(eye, yaw, pitch, 70f32.to_radians(), aspect);
@@ -165,6 +179,9 @@ impl Renderer {
             0,
             bytemuck::cast_slice(&[CameraUniform {
                 view_proj: vp.to_cols_array_2d(),
+                sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.0],
+                sun_intensity,
+                _pad: [0.0; 3],
             }]),
         );
 
@@ -182,22 +199,20 @@ impl Renderer {
         Ok(())
     }
 
-    /// Encode the opaque pass into `enc` against the given color view +
-    /// the renderer's depth view. Reused by both the live `render` and
-    /// the offscreen screenshot path.
+    /// Encode the sky + opaque passes into `enc` against the given color
+    /// view + the renderer's depth view. Reused by both the live `render`
+    /// and the offscreen screenshot path.
     fn encode_opaque_pass(&self, enc: &mut wgpu::CommandEncoder, color_view: &wgpu::TextureView) {
         let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("opaque-pass"),
+            label: Some("sky+opaque-pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: color_view,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.55,
-                        g: 0.78,
-                        b: 1.0,
-                        a: 1.0,
-                    }),
+                    // The sky pass overwrites every pixel, so this clear
+                    // color only shows in degenerate frames (e.g. before
+                    // the sky pipeline is even set up).
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -213,11 +228,15 @@ impl Renderer {
             occlusion_query_set: None,
         });
 
+        // 1) Sky: full-screen triangle at far plane, no depth write.
+        pass.set_pipeline(&self.sky_pipe.pipeline);
+        pass.set_bind_group(0, &self.camera_bg, &[]);
+        pass.draw(0..3, 0..1);
+
+        // 2) Opaque chunks. M3 doesn't sort or frustum-cull yet — both
+        // arrive in M8 — so we iterate the hashmap in arbitrary order.
         pass.set_pipeline(&self.opaque_pipe.pipeline);
         pass.set_bind_group(0, &self.camera_bg, &[]);
-        // Each chunk has its own bind group at offset 0. M3 doesn't sort or
-        // frustum-cull yet — both arrive in M8 — so we just iterate the
-        // hashmap in arbitrary order.
         for cg in self.chunk_meshes.values() {
             pass.set_bind_group(1, &cg.bg, &[0]);
             pass.set_vertex_buffer(0, cg.mesh.vbuf.slice(..));
@@ -236,6 +255,8 @@ impl Renderer {
         yaw: f32,
         pitch: f32,
         aspect: f32,
+        sun_dir: [f32; 3],
+        sun_intensity: f32,
     ) {
         let vp = view_proj(eye, yaw, pitch, 70f32.to_radians(), aspect);
         self.gpu.queue.write_buffer(
@@ -243,6 +264,9 @@ impl Renderer {
             0,
             bytemuck::cast_slice(&[CameraUniform {
                 view_proj: vp.to_cols_array_2d(),
+                sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.0],
+                sun_intensity,
+                _pad: [0.0; 3],
             }]),
         );
 

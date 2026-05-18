@@ -10,9 +10,9 @@ use crate::ecs::components::{Camera, Position};
 use crate::ecs::GameEcs;
 use crate::render::Renderer;
 
-/// Read the player's `Position` + `Camera`, compute the eye point, and
-/// invoke `Renderer::render`. Propagates the renderer's surface error
-/// (e.g. swapchain out-of-date) up to the caller, which can resize-or-skip.
+/// Read the player's `Position` + `Camera`, compute the eye point, sample
+/// the sun state, and invoke `Renderer::render`. Propagates the surface
+/// error (e.g. swapchain out-of-date) up to the caller.
 pub fn render(ecs: &GameEcs, renderer: &Renderer) -> Result<(), wgpu::SurfaceError> {
     let mut q = ecs
         .world
@@ -20,5 +20,6 @@ pub fn render(ecs: &GameEcs, renderer: &Renderer) -> Result<(), wgpu::SurfaceErr
         .unwrap();
     let (pos, cam) = q.get().unwrap();
     let eye = pos.0 + cam.eye_offset;
-    renderer.render(eye, cam.yaw, cam.pitch)
+    let (sun_dir, intensity) = crate::ecs::systems::time_of_day::sun_state(ecs);
+    renderer.render(eye, cam.yaw, cam.pitch, sun_dir, intensity)
 }

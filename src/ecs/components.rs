@@ -88,3 +88,29 @@ pub struct Grounded(pub bool);
 /// Zero-sized marker on the single player entity. Useful for queries
 /// (`Query::<&Player>` finds the player and nothing else).
 pub struct Player;
+
+/// Marker on the sun entity that carries the [`TimeOfDay`] state.
+pub struct Sun;
+
+/// Wall-clock state of the simulated day/night cycle.
+///
+/// `t` is a 0..1 fraction of a full day. By convention `t = 0.0` is
+/// midnight, `0.25` is sunrise, `0.5` is noon, `0.75` is sunset. The
+/// renderer's sun direction and procedural sky are derived from `t`.
+#[derive(Debug, Clone, Copy)]
+pub struct TimeOfDay {
+    pub t: f32,
+    /// Real-time seconds in a full simulated day. Smaller = faster cycle.
+    pub day_length: f32,
+}
+
+impl Default for TimeOfDay {
+    fn default() -> Self {
+        // Start in the morning so a fresh world is well-lit on spawn; a
+        // 10-minute day keeps the cycle visible during play sessions.
+        Self {
+            t: 0.25,
+            day_length: 600.0,
+        }
+    }
+}

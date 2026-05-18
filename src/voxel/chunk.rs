@@ -211,6 +211,14 @@ pub struct ChunkDirty {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MeshHandle(pub u64);
 
+/// Read-only references to (up to) the six neighbouring chunks in
+/// [`crate::mesher::Face`] order. Used by both the lighting BFS and the
+/// neighbour-aware mesher so they can sample one block off the chunk's
+/// edge.
+pub struct Neighbors<'a> {
+    pub chunks: [Option<&'a DenseChunk>; 6],
+}
+
 /// Per-chunk bookkeeping. Lives alongside the [`PalettedChunk`] in
 /// `ChunkSlot::Stored`.
 #[derive(Debug, Default)]

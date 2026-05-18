@@ -56,6 +56,10 @@ impl GameEcs {
             PlayerInput::default(),
             Grounded::default(),
         ));
+        // Sun entity holds the single TimeOfDay state queried by render +
+        // sky systems. Living in the ECS means future features (multiple
+        // suns, scripted skies) just spawn another entity.
+        world.spawn((Sun, TimeOfDay::default()));
         Self { world, player }
     }
 }
