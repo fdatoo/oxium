@@ -65,9 +65,15 @@ impl AppState {
     /// the average terrain height (≈ 64) so the world streams in
     /// beneath the player rather than around them.
     pub fn new(window: Arc<Window>) -> Self {
+        Self::new_with_spawn(window, glam::Vec3::new(16.0, 96.0, 16.0))
+    }
+
+    /// Like [`new`] but accepts an explicit spawn point. Used by the
+    /// CLI `--spawn` / `--find-water` flags.
+    pub fn new_with_spawn(window: Arc<Window>, spawn: glam::Vec3) -> Self {
         let seed = 42;
         let renderer = Renderer::new(window.clone());
-        let ecs = GameEcs::new(glam::Vec3::new(16.0, 96.0, 16.0));
+        let ecs = GameEcs::new(spawn);
         let world = World::new(seed);
         let jobs = Jobs::new();
         let generator = Arc::new(Generator::new(seed));

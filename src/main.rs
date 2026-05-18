@@ -29,27 +29,57 @@ use winit::window::{CursorGrabMode, WindowAttributes, WindowId};
 use app::AppState;
 use glam::Vec3;
 
-/// Parsed CLI flags. Only the screenshot flag is meaningful right now.
+/// Parsed CLI flags.
 struct CliOptions {
-    /// If set, render one offscreen frame, save a PNG, and exit.
-    /// Activated by `--screenshot-and-exit <path>`.
+    /// Render one offscreen frame, save a PNG, and exit.
+    /// `--screenshot-and-exit <path>`.
     screenshot_path: Option<PathBuf>,
     /// Number of normal frames to render before the screenshot capture.
-    /// Tunable via `OXIUM_SCREENSHOT_WARMUP_FRAMES` (default 60 — enough
-    /// to let the streaming system generate the nearby chunks).
+    /// Tunable via `OXIUM_SCREENSHOT_WARMUP_FRAMES` (default 60).
     warmup_frames: u32,
+    /// Override the player spawn point. `--spawn x,y,z`.
+    spawn: Option<Vec3>,
+    /// Override the camera orientation, *degrees*. `--look yaw,pitch`.
+    /// Applied at screenshot time only (so it doesn't fight the
+    /// physics-driven walking camera in a real session).
+    look: Option<(f32, f32)>,
+    /// Auto-locate a water column and use it as the spawn — useful for
+    /// "show me the water" screenshots without having to compute a
+    /// coordinate by hand. `--find-water`.
+    find_water: bool,
 }
 
 impl CliOptions {
     fn parse() -> Self {
         let mut args = std::env::args().skip(1);
         let mut screenshot_path = None;
+        let mut spawn = None;
+        let mut look = None;
+        let mut find_water = false;
         while let Some(arg) = args.next() {
-            if arg == "--screenshot-and-exit" {
-                let path = args
-                    .next()
-                    .expect("--screenshot-and-exit requires a path argument");
-                screenshot_path = Some(PathBuf::from(path));
+            match arg.as_str() {
+                "--screenshot-and-exit" => {
+                    let path = args
+                        .next()
+                        .expect("--screenshot-and-exit requires a path argument");
+                    screenshot_path = Some(PathBuf::from(path));
+                }
+                "--spawn" => {
+                    let v = args.next().expect("--spawn requires `x,y,z`");
+                    let parts: Vec<f32> = v.split(',').map(|s| s.parse().unwrap()).collect();
+                    assert_eq!(parts.len(), 3, "--spawn expects three comma-separated floats");
+                    spawn = Some(Vec3::new(parts[0], parts[1], parts[2]));
+                }
+                "--look" => {
+                    let v = args.next().expect("--look requires `yaw_deg,pitch_deg`");
+                    let parts: Vec<f32> = v.split(',').map(|s| s.parse().unwrap()).collect();
+                    assert_eq!(parts.len(), 2, "--look expects two comma-separated floats");
+                    look = Some((parts[0].to_radians(), parts[1].to_radians()));
+                }
+                "--find-water" => {
+                    find_water = true;
+                }
+                _ => {}
             }
         }
         let warmup_frames = std::env::var("OXIUM_SCREENSHOT_WARMUP_FRAMES")
@@ -59,8 +89,60 @@ impl CliOptions {
         Self {
             screenshot_path,
             warmup_frames,
+            spawn,
+            look,
+            find_water,
         }
     }
+}
+
+/// Scan world generation around `(0, 0)` for the lowest-height column
+/// (which will be flooded with water by the sea-level pass). Returns a
+/// position 2 blocks above the water surface so the camera lands just
+/// over the waves.
+fn find_water_spawn() -> Vec3 {
+    use worldgen::{Generator, SEA_LEVEL};
+    let g = Generator::new(42);
+    let mut dense = voxel::chunk::DenseChunk::empty();
+    let mut best: Option<(f32, Vec3)> = None;
+    // Sweep a handful of chunks around the origin. We only need to find
+    // one tile with height < SEA_LEVEL.
+    for cx in -3..=3 {
+        for cz in -3..=3 {
+            for cy in 1..=2 {
+                let coord = voxel::coords::ChunkCoord(glam::IVec3::new(cx, cy, cz));
+                g.fill_chunk(coord, &mut dense);
+                let origin = coord.origin().0;
+                for lx in 0..32 {
+                    for lz in 0..32 {
+                        // Scan the column top-down for the topmost
+                        // *non-air* block. If it's Water we found a
+                        // sea-surface cell.
+                        for ly in (0..32).rev() {
+                            let lp = voxel::coords::LocalPos(glam::UVec3::new(lx, ly, lz));
+                            let b = dense.blocks[lp.to_index()];
+                            if b == voxel::block::Block::Air {
+                                continue;
+                            }
+                            if b == voxel::block::Block::Water {
+                                let wx = origin.x as f32 + lx as f32;
+                                let wy = origin.y as f32 + ly as f32;
+                                let wz = origin.z as f32 + lz as f32;
+                                let dist =
+                                    (wx * wx + wz * wz + (wy - SEA_LEVEL as f32).powi(2)).sqrt();
+                                if best.map(|(d, _)| dist < d).unwrap_or(true) {
+                                    best = Some((dist, Vec3::new(wx, wy + 2.0, wz)));
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+        .unwrap_or_else(|| Vec3::new(0.0, SEA_LEVEL as f32 + 2.0, 0.0))
 }
 
 /// winit application handler. `state` is created lazily in `resumed`.
@@ -74,7 +156,16 @@ impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let attrs = WindowAttributes::default().with_title("oxium");
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
-        let state = AppState::new(window.clone());
+        // Pick spawn: explicit --spawn wins, else --find-water locates
+        // a known wet column, else the default mid-air spawn.
+        let spawn = self
+            .cli
+            .spawn
+            .or_else(|| self.cli.find_water.then(find_water_spawn));
+        let state = match spawn {
+            Some(p) => AppState::new_with_spawn(window.clone(), p),
+            None => AppState::new(window.clone()),
+        };
 
         // Skip cursor grab when running in screenshot mode so the helper
         // doesn't steal cursor focus on the host system.
@@ -127,7 +218,11 @@ impl ApplicationHandler for App {
                 if let Some(path) = self.cli.screenshot_path.clone()
                     && self.frames_drawn > self.cli.warmup_frames
                 {
-                    let (eye, yaw, pitch) = camera_from_ecs(&state.ecs);
+                    let (eye, mut yaw, mut pitch) = camera_from_ecs(&state.ecs);
+                    if let Some((y, p)) = self.cli.look {
+                        yaw = y;
+                        pitch = p;
+                    }
                     let (sun_dir, sun_intensity) =
                         ecs::systems::time_of_day::sun_state(&state.ecs);
                     let time = state.start_time.elapsed().as_secs_f32();

@@ -105,19 +105,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Water shimmer: any fragment whose vertex alpha came in below
     // ~0.95 is non-opaque material — water in v0. Modulate brightness
-    // and lightly bias the colour toward a cooler tint with the
-    // shimmer factor. Only affects translucent fragments so opaque
-    // chunks render exactly as before.
+    // *and* bias the colour toward a cooler/warmer tint with the
+    // shimmer factor, both keyed off world space + time so adjacent
+    // greedy-merged water quads stay coherent.
     if (in.v_color.a < 0.95) {
         let s = water_shimmer(in.v_world, camera.time);
-        // Brightness ripple: ±15 % around the lit colour.
-        lit_rgb = lit_rgb * (1.0 + 0.15 * s);
+        // Brightness ripple: ±30 % around the lit colour.
+        lit_rgb = lit_rgb * (1.0 + 0.30 * s);
         // Hue lean: bright crests get a touch of foam-cyan, troughs
-        // a touch of deeper blue. Mix is tiny so it reads as motion
-        // not as colour discoloration.
-        let crest = vec3<f32>(0.55, 0.85, 1.00);
+        // a touch of deeper blue.
+        let crest = vec3<f32>(0.65, 0.90, 1.00);
         let trough = vec3<f32>(0.05, 0.15, 0.45);
-        lit_rgb = mix(lit_rgb, mix(trough, crest, s * 0.5 + 0.5), 0.10);
+        lit_rgb = mix(lit_rgb, mix(trough, crest, s * 0.5 + 0.5), 0.30);
     }
 
     // Distance fog: linear ramp between FOG_START and FOG_END.
