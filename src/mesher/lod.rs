@@ -169,19 +169,25 @@ pub fn mesh_lod(
     let mut mesh = ChunkMesh::empty();
     let dim = lod.dim as i32;
 
-    // Inside the LOD chunk we read real cells. *Outside* we treat the
-    // neighbour as **opaque** instead of air — this is the
-    // load-bearing trick of mesh_lod. The job doesn't have neighbour
-    // chunks to consult, and the old "out-of-bounds = air" rule was
-    // emitting spurious +Y/+X/+Z faces at every chunk boundary, showing
-    // up as stone-coloured "shelves" across the rendered landscape.
-    // Calling out-of-bounds opaque hides those boundary faces; the
-    // neighbouring LOD chunk's own geometry covers the void from its
-    // side. At LOD distance the player can't see the tiny single-cell
-    // gaps this leaves where adjacent topographies differ.
+    // Inside the LOD chunk we read real cells. *Outside* we conservatively
+    // return Air so boundary faces are emitted. We don't currently have
+    // neighbour LOD chunks plumbed through, so the choice is between:
+    //
+    //   * "out = Stone": hide boundary faces. Looks clean for same-height
+    //     adjacent LOD chunks but leaves *sky-visible holes* wherever
+    //     adjacent LOD chunks fill to different heights (which is the
+    //     common case with varied terrain).
+    //
+    //   * "out = Air": emit boundary faces. Always covers the height
+    //     differences correctly; the cost is a faint duplicate face at
+    //     same-height boundaries (z-fight resolved by last-drawn) plus
+    //     some +Y "shelf" faces at the permanent load-range top.
+    //
+    // Air wins: holes are far worse than minor z-fighting on a flat
+    // boundary at LOD distance.
     let block_at = |x: i32, y: i32, z: i32| -> Block {
         if x < 0 || y < 0 || z < 0 || x >= dim || y >= dim || z >= dim {
-            return Block::Stone;
+            return Block::Air;
         }
         lod.blocks[(x + y * dim + z * dim * dim) as usize]
     };
