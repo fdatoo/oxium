@@ -4,19 +4,26 @@
 //! coordinate so chunks can be regenerated from disk-free state and so unit
 //! tests can pin output with golden hashes.
 //!
-//! The v0 algorithm is intentionally simple:
+//! The pipeline runs in five conceptual passes per column:
 //!
-//! 1. **Heightmap.** 2D fractal Brownian motion gives each `(x, z)` column a
-//!    surface height in `[BASE - AMPL, BASE + AMPL]` blocks.
-//! 2. **Layers.** Top block is grass (or sand near water); the next three
-//!    are dirt; everything below is stone.
-//! 3. **Caves.** A 3D fractal-Simplex noise sample > `CAVE_THRESH` (in
-//!    absolute value) carves the block into air. Caves only carve below the
-//!    top 3 blocks of dirt so the surface stays intact.
-//! 4. **Sea level.** Any air at or below `SEA_LEVEL` becomes water.
+//! 1. **Biome maps.** Two very low-frequency noise fields drive geography:
+//!    `mountainness_map` decides where tall ranges cluster, `desert_map`
+//!    decides where sand replaces grass at the surface. Both are smooth so
+//!    biomes blend instead of stepping.
+//! 2. **Heightmap.** Base FBM gives rolling hills (`±AMPLITUDE` blocks).
+//!    A second `mountain_noise` adds *positive-only* extra elevation
+//!    (`+MOUNTAIN_PEAK`) scaled by `mountainness_map` — only mountainy
+//!    regions get tall peaks, plains stay rolling.
+//! 3. **Layers.** Top block is grass (sand near sea level *or* in
+//!    deserts, stone on tall mountain peaks); next three are dirt;
+//!    everything below is stone.
+//! 4. **Caves.** A 3D FBM sample whose absolute value exceeds
+//!    `CAVE_THRESH` carves the block into air. Caves only carve below
+//!    the dirt cap so the surface stays intact.
+//! 5. **Sea level.** Any air at or below `SEA_LEVEL` becomes water.
 //!
-//! Adding biomes/structures (caves of differing styles, ore veins, trees)
-//! happens in v0.2 by layering more passes on top of this baseline.
+//! Tree placement (in `add_trees`) reuses the same biome data so
+//! deserts and mountain peaks stay bare.
 
 use crate::voxel::block::Block;
 use crate::voxel::chunk::DenseChunk;
@@ -31,9 +38,16 @@ pub const SEA_LEVEL: i32 = 62;
 const BASE_HEIGHT: f32 = 64.0;
 /// Peak-to-peak amplitude of the heightmap (a column can be `BASE ± AMPL`).
 const AMPLITUDE: f32 = 24.0;
+/// Maximum extra elevation a mountain column can pick up on top of the
+/// base heightmap. Capped at 48 so the tallest peaks sit around y≈136 —
+/// inside the loaded vertical radius of 6 chunks above the player chunk.
+const MOUNTAIN_PEAK: f32 = 48.0;
 /// Absolute-value threshold above which the 3D cave noise carves out a block.
 /// Lower values → more cave; higher values → fewer / smaller caves.
 const CAVE_THRESH: f64 = 0.55;
+/// World-space Y above which a mountain-biome surface block becomes
+/// bare stone (proxy for "above the tree line").
+const MOUNTAIN_ROCK_LINE: i32 = 92;
 
 /// World is partitioned into `CELL_SIZE × CELL_SIZE` (XZ) tree cells.
 /// Each cell rolls a deterministic hash to decide whether it contains a
@@ -52,7 +66,20 @@ const TREE_MARGIN: i32 = 5;
 /// `Fbm` builder is comparatively expensive, and chunk generation calls
 /// `get` thousands of times per chunk.
 pub struct Generator {
+    /// Rolling-hills base height. 96-block period.
     height_noise: Fbm<Simplex>,
+    /// Sharper-frequency peak elevation, additive on top of `height_noise`.
+    /// Only contributes positive elevation, gated by `mountainness_map`.
+    mountain_noise: Fbm<Simplex>,
+    /// Geographic "is this region mountainous?" mask. Very low frequency
+    /// (~512-block period) so mountains cluster into ranges instead of
+    /// flecking the whole world.
+    mountainness_map: Fbm<Simplex>,
+    /// Geographic "is this region desert?" mask. Same large period as the
+    /// mountainness map but uncorrelated (different seed) so deserts and
+    /// mountains drift independently.
+    desert_map: Fbm<Simplex>,
+    /// 3D cave-carving noise.
     cave_noise: Fbm<Simplex>,
     seed: u64,
 }
@@ -60,26 +87,73 @@ pub struct Generator {
 impl Generator {
     /// Build a `Generator` with the given world seed.
     ///
-    /// `height_noise` and `cave_noise` are seeded with slightly different
-    /// seeds (the cave seed is `seed + 1`) so they don't produce correlated
-    /// patterns.
+    /// Each noise field is seeded with a different per-axis salt so they
+    /// don't produce correlated patterns (mountain-noise lining up with
+    /// height-noise would just amplify existing hills instead of adding
+    /// new geographic features).
     pub fn new(seed: u64) -> Self {
-        // Heightmap noise: 4 octaves, ~96-block period at octave 0. Persistence
-        // 0.5 means each successive octave contributes half as much amplitude.
+        // Heightmap noise: 4 octaves, ~96-block period at octave 0.
         let height_noise = Fbm::<Simplex>::new(seed as u32)
             .set_octaves(4)
             .set_frequency(1.0 / 96.0)
             .set_persistence(0.5);
-        // Cave noise: tighter frequency (24-block period) gives twistier
-        // caves; slightly higher persistence keeps mid-frequency detail.
         let cave_noise = Fbm::<Simplex>::new(seed.wrapping_add(1) as u32)
             .set_octaves(3)
             .set_frequency(1.0 / 24.0)
             .set_persistence(0.55);
+        // Mountain noise: smaller period (~64) for sharp peaks, higher
+        // persistence so mid-frequency detail is preserved.
+        let mountain_noise = Fbm::<Simplex>::new(seed.wrapping_add(2) as u32)
+            .set_octaves(3)
+            .set_frequency(1.0 / 64.0)
+            .set_persistence(0.6);
+        // Biome maps: large period so each biome covers many chunks.
+        let mountainness_map = Fbm::<Simplex>::new(seed.wrapping_add(3) as u32)
+            .set_octaves(2)
+            .set_frequency(1.0 / 512.0)
+            .set_persistence(0.5);
+        let desert_map = Fbm::<Simplex>::new(seed.wrapping_add(4) as u32)
+            .set_octaves(2)
+            .set_frequency(1.0 / 512.0)
+            .set_persistence(0.5);
         Self {
             height_noise,
+            mountain_noise,
+            mountainness_map,
+            desert_map,
             cave_noise,
             seed,
+        }
+    }
+
+    /// Per-column terrain decisions: surface height + biome weights.
+    /// Used by both `fill_chunk` (block selection) and `add_trees`
+    /// (tree placement), so a single noise evaluation per column drives
+    /// every geographic choice consistently.
+    fn column_data(&self, wx: i32, wz: i32) -> ColumnData {
+        let xz = [wx as f64, wz as f64];
+        let base = self.height_noise.get(xz) as f32;
+        let mountainness_raw = self.mountainness_map.get(xz) as f32;
+        // Smoothstep so plains↔mountain transitions are gradual.
+        // Mountains start contributing at mountainness_raw > -0.05 and
+        // fully kick in around 0.45.
+        let mountain_weight = smoothstep(-0.05, 0.45, mountainness_raw);
+        // Only the *positive* half of the mountain noise contributes —
+        // negative values would just deepen valleys, which the base
+        // heightmap already does. `pow` accentuates peakiness.
+        let mountain_raw = self.mountain_noise.get(xz) as f32;
+        let mountain_lift = mountain_raw.max(0.0).powf(1.4) * MOUNTAIN_PEAK * mountain_weight;
+        let height = (BASE_HEIGHT + base * AMPLITUDE + mountain_lift) as i32;
+
+        let desertness = self.desert_map.get(xz) as f32;
+        // Hard cutoff (no transition smoothing) so the desert/grass
+        // boundary stays crisp and recognisable.
+        let is_desert = desertness > 0.30;
+
+        ColumnData {
+            height,
+            mountain_weight,
+            is_desert,
         }
     }
 
@@ -96,26 +170,21 @@ impl Generator {
             for x in 0..CHUNK_DIM_U {
                 let wx = origin.x + x as i32;
                 let wz = origin.z + z as i32;
-                let h_val = self.height_noise.get([wx as f64, wz as f64]) as f32;
-                let height = (BASE_HEIGHT + h_val * AMPLITUDE) as i32;
+                let col = self.column_data(wx, wz);
+                let height = col.height;
 
                 for y in 0..CHUNK_DIM_U {
                     let wy = origin.y + y as i32;
                     let local = LocalPos(UVec3::new(x, y, z));
 
                     let block = if wy > height {
-                        // Above the terrain surface.
                         if wy <= SEA_LEVEL {
                             Block::Water
                         } else {
                             Block::Air
                         }
                     } else {
-                        // Below or at the surface.
                         let depth = height - wy;
-                        // Caves: only carve below the top 3 dirt rows so the
-                        // surface look stays intact. Air above sea level;
-                        // water below it (flood the cave).
                         let cave = depth > 3
                             && self
                                 .cave_noise
@@ -129,15 +198,32 @@ impl Generator {
                                 Block::Air
                             }
                         } else if depth == 0 {
-                            // Surface block: grass everywhere unless we're
-                            // right at or below sea level — then sand.
+                            // Surface block. Beach > desert > mountain
+                            // rock > grass — priorities chosen so a
+                            // beach always wins (deserts shouldn't have
+                            // sand-into-water edges) and mountain rock
+                            // beats both beach and desert when the
+                            // column is high *and* deeply mountain-y.
                             if height <= SEA_LEVEL + 1 {
+                                Block::Sand
+                            } else if col.mountain_weight > 0.45
+                                && height > MOUNTAIN_ROCK_LINE
+                            {
+                                Block::Stone
+                            } else if col.is_desert {
                                 Block::Sand
                             } else {
                                 Block::Grass
                             }
                         } else if depth <= 3 {
-                            Block::Dirt
+                            // Mountain-rock peaks have stone directly
+                            // beneath the surface too (no dirt layer
+                            // looks more believable for high terrain).
+                            if col.mountain_weight > 0.45 && height > MOUNTAIN_ROCK_LINE {
+                                Block::Stone
+                            } else {
+                                Block::Dirt
+                            }
                         } else {
                             Block::Stone
                         }
@@ -153,12 +239,6 @@ impl Generator {
         self.add_trees(coord, out);
     }
 
-    /// Re-derive the height noise's vertical pick for a single column.
-    /// Cheaper than running `fill_chunk` when all we need is a surface y.
-    fn column_height(&self, wx: i32, wz: i32) -> i32 {
-        let h = self.height_noise.get([wx as f64, wz as f64]) as f32;
-        (BASE_HEIGHT + h * AMPLITUDE) as i32
-    }
 
     /// Place all trees whose blocks could overlap `coord`'s chunk
     /// volume. Each tree is deterministic in `(seed, cell_x, cell_z)`,
@@ -202,12 +282,19 @@ impl Generator {
         let off_z = (tree_hash(self.seed, cell_x, cell_z, 2) % 6) as i32 + 1;
         let wx = cell_x * TREE_CELL_SIZE + off_x;
         let wz = cell_z * TREE_CELL_SIZE + off_z;
-        // Trees only grow on grass — above sea level and not on
-        // sand-tipped islands. (height <= SEA_LEVEL produces sand.)
-        let height = self.column_height(wx, wz);
-        if height <= SEA_LEVEL + 1 {
+        // Trees only grow on grass — keep them off sand-tipped beaches,
+        // desert biomes, and bare mountain rock. The column_data call
+        // mirrors the same biome thresholds used by fill_chunk so a
+        // tree never sprouts on a surface that's rendered as sand or
+        // stone.
+        let col = self.column_data(wx, wz);
+        if col.height <= SEA_LEVEL + 1 || col.is_desert {
             return None;
         }
+        if col.mountain_weight > 0.45 && col.height > MOUNTAIN_ROCK_LINE {
+            return None;
+        }
+        let height = col.height;
         // Roll #3: trunk height in 4..=6 blocks.
         let trunk_h = 4 + (tree_hash(self.seed, cell_x, cell_z, 3) % 3) as i32;
         Some(Tree {
@@ -251,6 +338,28 @@ impl Generator {
             }
         }
     }
+}
+
+/// Per-column biome + geometry summary used by both `fill_chunk` and
+/// `add_trees` so block selection and tree placement stay in sync.
+#[derive(Debug, Clone, Copy)]
+struct ColumnData {
+    /// Surface height in world Y. Includes the mountain lift.
+    height: i32,
+    /// 0..1: how strongly this column belongs to a mountain region.
+    /// 1.0 ⇒ deep in a range; 0.0 ⇒ plains.
+    mountain_weight: f32,
+    /// `true` when the column is inside the desert biome.
+    is_desert: bool,
+}
+
+/// GLSL/WGSL-style smoothstep. We re-implement it (Rust has nothing in
+/// std and we don't want a dep for one function) because both `column_data`
+/// and the mountain falloff want a smooth Hermite ramp from `edge0` to
+/// `edge1`.
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// Tree placement metadata for one cell.
@@ -353,7 +462,7 @@ mod tests {
         // again after the v0.1.10 tree-placement pass changed chunk
         // contents. Locks here so any future change to noise/parameters
         // surfaces immediately.
-        const GOLDEN_42_002: u64 = 0x20E3_B24B_BDCE_1F0C;
+        const GOLDEN_42_002: u64 = 0x299D_48F9_3303_B701;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);
