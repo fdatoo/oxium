@@ -26,23 +26,31 @@ pub struct LodChunk {
     pub light: Vec<u8>,
 }
 
-/// Build an `LodChunk` from a `DenseChunk` by collapsing each `factor³`
-/// voxel group into one block. `factor` must be 2 (L1) or 4 (L2).
+/// Build an `LodChunk` from a `DenseChunk`. `factor` must be 2 (L1) or
+/// 4 (L2).
 ///
-/// **Surface-aware vote.** Each `(dx, dz)` column inside the group
-/// contributes its *topmost non-air block within the cell*. That
-/// contribution is classified as either a **surface** vote (the block
-/// directly above it is air — i.e. it's actually visible from outside)
-/// or a **bulk** vote (it has a solid neighbour above, so this cell sits
-/// underneath the terrain in that column).
+/// The downsample is built in two passes per LOD column:
 ///
-/// Surface votes win over bulk votes for the cell's representative block.
-/// This stops the "stone roof" tiling — where one column's bulk-stone
-/// vote was outvoting the grass surface from neighbouring columns — and
-/// preserves the visible top across the LOD0/LOD1/LOD2 boundary.
+/// 1. **Column scan.** For each of the `factor²` source columns inside
+///    this LOD column we find the source-y of the *topmost non-air
+///    block*. The LOD column's "surface y_lod" is the highest cell that
+///    any source column reaches. The "surface block" is voted from the
+///    source columns whose surface lands in (or above) the LOD-column's
+///    surface cell.
 ///
-/// Light is averaged across the whole group — the eye can't distinguish
-/// per-cell light at LOD distances anyway.
+/// 2. **Vertical fill.** Every LOD cell at `y_lod ≤ surface_y_lod` is
+///    set: the surface cell gets the surface block; cells below get a
+///    bulk block (the topmost solid block in the lowest source column).
+///    Cells *above* `surface_y_lod` are Air.
+///
+/// Why the fill: the naive "vote per cell independently" approach
+/// produced floating cube artefacts when adjacent LOD columns had their
+/// terrain in different `y_lod` slots — the sky showed *through* the
+/// stepped gap between them. Filling each LOD column from the bottom up
+/// to its surface y_lod removes those gaps; adjacent LOD columns now
+/// hide each others' vertical seams because they're back-to-back solid.
+///
+/// Light is averaged across the whole group.
 pub fn downsample(src: &DenseChunk, factor: u32) -> LodChunk {
     assert!(factor == 2 || factor == 4, "factor must be 2 or 4");
     let dim = CHUNK_DIM_U / factor;
@@ -50,71 +58,96 @@ pub fn downsample(src: &DenseChunk, factor: u32) -> LodChunk {
     let mut blocks = vec![Block::Air; len];
     let mut light = vec![0u8; len];
 
+    let chunk_dim = CHUNK_DIM_U;
     for z in 0..dim {
-        for y in 0..dim {
-            for x in 0..dim {
-                let mut surface_counts: HashMap<Block, u32> = HashMap::new();
-                let mut bulk_counts: HashMap<Block, u32> = HashMap::new();
-                let mut sky_sum: u32 = 0;
-                let mut blk_sum: u32 = 0;
+        for x in 0..dim {
+            // (1) Column scan: per-source-column surface info.
+            let mut max_surface_y: Option<u32> = None;
+            let mut surface_counts: HashMap<Block, u32> = HashMap::new();
+            let mut bulk_counts: HashMap<Block, u32> = HashMap::new();
 
-                // Walk each column inside the cell top-to-bottom.
-                for dz in 0..factor {
-                    for dx in 0..factor {
-                        let mut found_top = false;
-                        for dy_top in 0..factor {
-                            let dy = factor - 1 - dy_top;
-                            let yl = y * factor + dy;
-                            let lp = LocalPos(UVec3::new(
-                                x * factor + dx,
-                                yl,
-                                z * factor + dz,
-                            ));
-                            let b = src.blocks[lp.to_index()];
-                            sky_sum += src.sky_light[lp.to_index()] as u32;
-                            blk_sum += src.block_light[lp.to_index()] as u32;
-                            if !found_top && b != Block::Air {
-                                found_top = true;
-                                // Determine surface vs bulk by looking one
-                                // block higher. Outside the chunk we treat
-                                // the above-block as air (so a column whose
-                                // surface coincides with the chunk's top
-                                // counts as a surface, not as bulk).
-                                let above = if yl + 1 < CHUNK_DIM_U {
-                                    src.blocks[LocalPos(UVec3::new(
-                                        x * factor + dx,
-                                        yl + 1,
-                                        z * factor + dz,
-                                    ))
-                                    .to_index()]
-                                } else {
-                                    Block::Air
-                                };
-                                if above == Block::Air {
-                                    *surface_counts.entry(b).or_insert(0) += 1;
-                                } else {
-                                    *bulk_counts.entry(b).or_insert(0) += 1;
-                                }
-                            }
+            for dz in 0..factor {
+                for dx in 0..factor {
+                    let sx = x * factor + dx;
+                    let sz = z * factor + dz;
+                    // Find the highest non-air block in this source column.
+                    let mut top_y: Option<u32> = None;
+                    let mut top_b = Block::Air;
+                    for sy in (0..chunk_dim).rev() {
+                        let b = src.blocks
+                            [LocalPos(UVec3::new(sx, sy, sz)).to_index()];
+                        if b != Block::Air {
+                            top_y = Some(sy);
+                            top_b = b;
+                            break;
                         }
                     }
-                }
+                    let Some(top_y) = top_y else { continue };
 
-                // Surface votes always win when any exist; bulk votes
-                // only matter for cells entirely below the visible
-                // terrain.
-                let chosen = surface_counts
-                    .into_iter()
-                    .max_by_key(|(_, c)| *c)
-                    .or_else(|| bulk_counts.into_iter().max_by_key(|(_, c)| *c))
-                    .map(|(b, _)| b)
-                    .unwrap_or(Block::Air);
-                let n = factor * factor * factor;
-                let sky = (sky_sum / n) as u8;
-                let blk = (blk_sum / n) as u8;
-                let idx = (x + y * dim + z * dim * dim) as usize;
-                blocks[idx] = chosen;
-                light[idx] = (sky.min(15) << 4) | blk.min(15);
+                    // Update the LOD column's max surface y_lod.
+                    let top_y_lod = top_y / factor;
+                    if max_surface_y.map(|m| top_y_lod > m).unwrap_or(true) {
+                        max_surface_y = Some(top_y_lod);
+                    }
+                    // Surface vote: the topmost block of this column.
+                    *surface_counts.entry(top_b).or_insert(0) += 1;
+                    // Bulk vote: a block well below the surface (skip
+                    // the dirt-layer; sample the deepest source row of
+                    // this column to get the underlying material).
+                    let bulk_b = src.blocks
+                        [LocalPos(UVec3::new(sx, 0, sz)).to_index()];
+                    if bulk_b != Block::Air {
+                        *bulk_counts.entry(bulk_b).or_insert(0) += 1;
+                    }
+                }
+            }
+
+            // Light: averaged across the whole LOD column footprint.
+            // (Cheap and good enough for "sky vs cave" distinction.)
+            let mut sky_sum: u32 = 0;
+            let mut blk_sum: u32 = 0;
+            for sy in 0..chunk_dim {
+                for dz in 0..factor {
+                    for dx in 0..factor {
+                        let idx = LocalPos(UVec3::new(
+                            x * factor + dx,
+                            sy,
+                            z * factor + dz,
+                        ))
+                        .to_index();
+                        sky_sum += src.sky_light[idx] as u32;
+                        blk_sum += src.block_light[idx] as u32;
+                    }
+                }
+            }
+            let n = chunk_dim * factor * factor;
+            let avg_sky = (sky_sum / n) as u8;
+            let avg_blk = (blk_sum / n) as u8;
+            let light_byte = (avg_sky.min(15) << 4) | avg_blk.min(15);
+
+            // (2) Vertical fill of this LOD column.
+            let Some(surface_y_lod) = max_surface_y else {
+                continue;
+            };
+            let surface_block = surface_counts
+                .into_iter()
+                .max_by_key(|(_, c)| *c)
+                .map(|(b, _)| b)
+                .unwrap_or(Block::Stone);
+            let bulk_block = bulk_counts
+                .into_iter()
+                .max_by_key(|(_, c)| *c)
+                .map(|(b, _)| b)
+                .unwrap_or(Block::Stone);
+
+            for y_lod in 0..=surface_y_lod {
+                let idx = (x + y_lod * dim + z * dim * dim) as usize;
+                blocks[idx] = if y_lod == surface_y_lod {
+                    surface_block
+                } else {
+                    bulk_block
+                };
+                light[idx] = light_byte;
             }
         }
     }
