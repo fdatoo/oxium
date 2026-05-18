@@ -1,11 +1,10 @@
 //! oxium — entry point.
 //!
-//! M2 wires an ECS-driven fly-cam (WASD + mouse + space/shift + F-toggle)
-//! around the M1 test chunk. The window grabs the cursor so mouse motion
-//! becomes free-look input.
+//! M3 onwards: the world is streamed in around the player by background
+//! generation jobs. No more hardcoded test chunk.
 //!
-//! Hidden flag `--screenshot-and-exit <path>` keeps the M1 headless visual
-//! verification path alive (used by the milestone-end sanity checks).
+//! Hidden flag `--screenshot-and-exit <path>` is still here: it renders one
+//! offscreen frame from the live camera state and saves a PNG.
 
 mod app;
 mod ecs;
@@ -27,42 +26,16 @@ use winit::keyboard::PhysicalKey;
 use winit::window::{CursorGrabMode, WindowAttributes, WindowId};
 
 use app::AppState;
-use glam::{UVec3, Vec3};
-use mesher::naive::mesh_chunk_no_neighbors;
-use voxel::block::{Block, BlockRegistry};
-use voxel::chunk::DenseChunk;
-use voxel::coords::{LocalPos, CHUNK_DIM_U};
+use glam::Vec3;
 
-/// Hardcoded M1/M2 test chunk: 8-block-tall stone/dirt/grass slab.
-/// Replaced in M3 by procedural worldgen.
-fn build_test_chunk() -> DenseChunk {
-    let mut c = DenseChunk::empty();
-    for z in 0..CHUNK_DIM_U {
-        for x in 0..CHUNK_DIM_U {
-            for y in 0..8 {
-                let b = if y == 7 {
-                    Block::Grass
-                } else if y >= 4 {
-                    Block::Dirt
-                } else {
-                    Block::Stone
-                };
-                c.set(LocalPos(UVec3::new(x, y, z)), b);
-            }
-        }
-    }
-    c
-}
-
-/// Parsed CLI flags. Only the screenshot flag is meaningful in M2; we keep
-/// the rest of argv intact for future use.
+/// Parsed CLI flags. Only the screenshot flag is meaningful right now.
 struct CliOptions {
     /// If set, render one offscreen frame, save a PNG, and exit.
     /// Activated by `--screenshot-and-exit <path>`.
     screenshot_path: Option<PathBuf>,
     /// Number of normal frames to render before the screenshot capture.
-    /// Tunable via `OXIUM_SCREENSHOT_WARMUP_FRAMES` (default 2). Some
-    /// platforms need an extra frame for the swap chain to settle.
+    /// Tunable via `OXIUM_SCREENSHOT_WARMUP_FRAMES` (default 60 — enough
+    /// to let the streaming system generate the nearby chunks).
     warmup_frames: u32,
 }
 
@@ -81,7 +54,7 @@ impl CliOptions {
         let warmup_frames = std::env::var("OXIUM_SCREENSHOT_WARMUP_FRAMES")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(2);
+            .unwrap_or(60);
         Self {
             screenshot_path,
             warmup_frames,
@@ -100,19 +73,11 @@ impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let attrs = WindowAttributes::default().with_title("oxium");
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
-        let mut state = AppState::new(window.clone());
-
-        // Build the M2 test chunk and upload it. M3 replaces this with the
-        // streaming worldgen.
-        let registry = BlockRegistry::new();
-        let mesh = mesh_chunk_no_neighbors(&build_test_chunk(), &registry);
-        state.renderer.upload_test_mesh(&mesh);
+        let state = AppState::new(window.clone());
 
         // Skip cursor grab when running in screenshot mode so the helper
         // doesn't steal cursor focus on the host system.
         if self.cli.screenshot_path.is_none() {
-            // Try Locked first (raw mouse, hidden) then Confined (clamped to
-            // the window) as a fallback. Some platforms don't support both.
             if let Err(e) = window
                 .set_cursor_grab(CursorGrabMode::Locked)
                 .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined))
@@ -140,7 +105,6 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event: ke, .. } => {
                 if let PhysicalKey::Code(code) = ke.physical_key {
                     state.input_buf.on_key(code, ke.state);
-                    // Esc is the panic button — release the cursor and quit.
                     if code == winit::keyboard::KeyCode::Escape
                         && ke.state == ElementState::Pressed
                     {
@@ -148,7 +112,11 @@ impl ApplicationHandler for App {
                     }
                 }
             }
-            WindowEvent::MouseInput { button, state: bstate, .. } => {
+            WindowEvent::MouseInput {
+                button,
+                state: bstate,
+                ..
+            } => {
                 state.input_buf.on_mouse_button(button, bstate);
             }
             WindowEvent::RedrawRequested => {
@@ -157,18 +125,13 @@ impl ApplicationHandler for App {
 
                 if let Some(path) = self.cli.screenshot_path.clone() {
                     if self.frames_drawn > self.cli.warmup_frames {
-                        // Pick up the camera from the ECS for the offscreen
-                        // capture so any user input that fired during warmup
-                        // is reflected.
-                        let cam_eye_yaw_pitch = camera_from_ecs(&state.ecs);
-                        match capture_offscreen(
-                            &state.renderer,
-                            &path,
-                            cam_eye_yaw_pitch.0,
-                            cam_eye_yaw_pitch.1,
-                            cam_eye_yaw_pitch.2,
-                        ) {
-                            Ok(()) => log::info!("screenshot saved to {}", path.display()),
+                        let (eye, yaw, pitch) = camera_from_ecs(&state.ecs);
+                        match capture_offscreen(&state.renderer, &path, eye, yaw, pitch) {
+                            Ok(()) => log::info!(
+                                "screenshot saved to {} ({} chunks)",
+                                path.display(),
+                                state.renderer.chunk_mesh_count()
+                            ),
                             Err(e) => log::error!("screenshot failed: {e:?}"),
                         }
                         event_loop.exit();
@@ -191,16 +154,13 @@ impl ApplicationHandler for App {
         let Some(state) = self.state.as_mut() else {
             return;
         };
-        // Raw mouse motion (with the cursor grabbed, this gives us
-        // un-accelerated deltas rather than absolute positions).
         if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
             state.input_buf.on_mouse_motion(dx, dy);
         }
     }
 }
 
-/// Pull `(eye, yaw, pitch)` from the player entity in the ECS. Used by the
-/// screenshot path so the offscreen capture matches the live camera.
+/// Pull `(eye, yaw, pitch)` from the player entity in the ECS.
 fn camera_from_ecs(ecs: &crate::ecs::GameEcs) -> (Vec3, f32, f32) {
     use crate::ecs::components::{Camera, Position};
     let mut q = ecs
@@ -211,9 +171,8 @@ fn camera_from_ecs(ecs: &crate::ecs::GameEcs) -> (Vec3, f32, f32) {
     (pos.0 + cam.eye_offset, cam.yaw, cam.pitch)
 }
 
-/// Render one frame to an offscreen texture matching the surface format and
-/// save it as a PNG. Same as M1; lifted up here so it remains stable across
-/// milestones.
+/// Render one frame to an offscreen texture matching the surface format
+/// and save it as a PNG.
 fn capture_offscreen(
     renderer: &render::Renderer,
     path: &std::path::Path,

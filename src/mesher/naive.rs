@@ -147,6 +147,84 @@ fn face_corners(x: u8, y: u8, z: u8, face: Face) -> [[u8; 3]; 4] {
     }
 }
 
+/// Mesh a chunk *with* optional access to its six neighbours.
+///
+/// `neighbors` is ordered by [`Face`] discriminant (PosX, NegX, PosY, NegY,
+/// PosZ, NegZ). A `Some(&DenseChunk)` neighbour fixes the face culling at
+/// the chunk boundary (so two adjacent solid chunks don't both emit their
+/// shared face). A `None` neighbour means "we don't know what's there"; we
+/// conservatively emit the boundary face and let the next mesh job (when
+/// the neighbour generates) fix it up.
+pub fn mesh_chunk_with_neighbors(
+    chunk: &DenseChunk,
+    neighbors: &[Option<&DenseChunk>; 6],
+    reg: &BlockRegistry,
+) -> ChunkMesh {
+    let mut mesh = ChunkMesh::empty();
+    for z in 0..CHUNK_DIM_U {
+        for y in 0..CHUNK_DIM_U {
+            for x in 0..CHUNK_DIM_U {
+                let p = LocalPos(UVec3::new(x, y, z));
+                let block = chunk.get(p);
+                if block == Block::Air {
+                    continue;
+                }
+                for face in Face::all() {
+                    if face_visible_with_neighbors(
+                        chunk,
+                        neighbors,
+                        reg,
+                        x as i32,
+                        y as i32,
+                        z as i32,
+                        face,
+                    ) {
+                        emit_quad(&mut mesh, x as u8, y as u8, z as u8, face, block, reg);
+                    }
+                }
+            }
+        }
+    }
+    mesh
+}
+
+/// Variant of [`face_visible`] that consults the supplied neighbour chunk
+/// when the face is at the chunk boundary.
+fn face_visible_with_neighbors(
+    chunk: &DenseChunk,
+    neighbors: &[Option<&DenseChunk>; 6],
+    reg: &BlockRegistry,
+    x: i32,
+    y: i32,
+    z: i32,
+    face: Face,
+) -> bool {
+    let [dx, dy, dz] = face.normal();
+    let (nx, ny, nz) = (x + dx, y + dy, z + dz);
+    let dim = CHUNK_DIM_U as i32;
+
+    // Same-chunk case: simple in-bounds opacity test.
+    if nx >= 0 && ny >= 0 && nz >= 0 && nx < dim && ny < dim && nz < dim {
+        let neighbor = chunk.get(LocalPos(UVec3::new(nx as u32, ny as u32, nz as u32)));
+        return !reg.info(neighbor).opaque;
+    }
+
+    // Boundary case: consult the neighbour chunk on the face's side.
+    let neighbor_chunk = match neighbors[face as usize] {
+        Some(c) => c,
+        None => return true, // unloaded neighbour → emit
+    };
+    // Wrap the out-of-bounds coordinate around to the neighbour's local
+    // space. `+ dim) % dim` handles both `-1 → dim-1` and `dim → 0`.
+    let (lx, ly, lz) = (
+        ((nx + dim) % dim) as u32,
+        ((ny + dim) % dim) as u32,
+        ((nz + dim) % dim) as u32,
+    );
+    let neighbor = neighbor_chunk.get(LocalPos(UVec3::new(lx, ly, lz)));
+    !reg.info(neighbor).opaque
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +260,26 @@ mod tests {
         let expected_quads = 6 * CHUNK_DIM_U as usize * CHUNK_DIM_U as usize;
         assert_eq!(mesh.vertices.len(), expected_quads * 4);
         assert_eq!(mesh.indices.len(), expected_quads * 6);
+    }
+
+    #[test]
+    fn with_solid_neighbor_no_boundary_face() {
+        // Single stone block at (0,0,0). With a fully-solid neighbour on
+        // the -X side, the -X face of (0,0,0) must be culled.
+        let mut center = DenseChunk::empty();
+        center.set(LocalPos(UVec3::new(0, 0, 0)), Block::Stone);
+        let neighbor = DenseChunk::new_filled(Block::Stone);
+        let neighbors: [Option<&DenseChunk>; 6] = [
+            None,            // PosX
+            Some(&neighbor), // NegX
+            None,
+            None,
+            None,
+            None,
+        ];
+        let r = BlockRegistry::new();
+        let mesh = mesh_chunk_with_neighbors(&center, &neighbors, &r);
+        // 6 total minus 1 hidden face = 5 quads = 20 verts.
+        assert_eq!(mesh.vertices.len(), 20);
     }
 }

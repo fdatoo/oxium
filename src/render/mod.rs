@@ -16,6 +16,7 @@ pub mod mesh;
 pub mod pipelines;
 pub mod screenshot;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use winit::window::Window;
 
@@ -27,38 +28,46 @@ use crate::render::camera::{
 use crate::render::gpu::{make_depth_texture, Gpu};
 use crate::render::mesh::{upload_mesh, GpuMesh};
 use crate::render::pipelines::opaque::{build as build_opaque, OpaquePipeline};
+use crate::voxel::coords::ChunkCoord;
 use glam::Vec3;
 use wgpu::util::DeviceExt;
 
-/// Top-level rendering object. Owns the `wgpu` state, the per-frame
-/// uniforms (camera + chunk), the opaque draw pipeline, and (for M1)
-/// a single test mesh.
+/// Top-level rendering object. Owns the GPU state and a hashmap of all
+/// loaded chunk meshes keyed by their world coordinate.
 ///
-/// As later milestones land, the single `test_mesh` slot is replaced by a
-/// `HashMap<ChunkCoord, [Option<GpuMesh>; 3]>` (M3+) and additional pipelines
-/// (sky, translucent, cursor highlight, HUD).
+/// Per-chunk uniform buffers live alongside the meshes: each chunk gets its
+/// own `ChunkUniform` (16 bytes) with the chunk's world origin baked in.
+/// This is simpler than packing many chunks into one buffer with dynamic
+/// offsets and costs negligible memory at our scale (a few hundred chunks ×
+/// a 256-byte uniform buffer is well under a megabyte).
 pub struct Renderer {
     pub gpu: Gpu,
     depth_view: wgpu::TextureView,
     camera_buf: wgpu::Buffer,
     camera_bg: wgpu::BindGroup,
-    chunk_buf: wgpu::Buffer,
-    chunk_bg: wgpu::BindGroup,
+    chunk_bgl: wgpu::BindGroupLayout,
     opaque_pipe: OpaquePipeline,
-    test_mesh: Option<GpuMesh>,
+
+    /// One GPU mesh + a per-chunk uniform buffer per loaded chunk (LOD0
+    /// only — LODs 1 and 2 arrive in M8).
+    chunk_meshes: HashMap<ChunkCoord, ChunkGpu>,
+}
+
+/// Per-chunk GPU resources: the mesh buffers, the chunk-origin uniform, and
+/// the bind group that points the pipeline at that uniform.
+struct ChunkGpu {
+    mesh: GpuMesh,
+    /// Kept alive so the `bind_group` keeps a valid buffer reference.
+    _ubuf: wgpu::Buffer,
+    bg: wgpu::BindGroup,
 }
 
 impl Renderer {
-    /// Initialize the renderer on the given window. Performs adapter, device
-    /// and surface setup; builds the opaque pipeline; creates uniform buffers
-    /// and depth target sized to the window.
+    /// Initialize the renderer on the given window.
     pub fn new(window: Arc<Window>) -> Self {
         let gpu = Gpu::new(window);
-
         let depth_view =
             make_depth_texture(&gpu.device, gpu.surface_cfg.width, gpu.surface_cfg.height);
-
-        // Camera uniform: one mat4 per frame, written by `render`.
         let camera_bgl = make_camera_bind_group_layout(&gpu.device);
         let camera_buf = make_camera_buffer(&gpu.device);
         let camera_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -69,65 +78,84 @@ impl Renderer {
                 resource: camera_buf.as_entire_binding(),
             }],
         });
-
-        // Per-chunk uniform: the chunk's world-space origin. M1 only draws
-        // one mesh at origin (0,0,0); M3 grows this into a dynamic-offset
-        // ring buffer indexed per draw call.
         let chunk_bgl = make_chunk_bind_group_layout(&gpu.device);
-        let chunk_buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("chunk-uniform"),
-            contents: bytemuck::cast_slice(&[ChunkUniform { origin: [0.0; 4] }]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-        let chunk_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("chunk-bg"),
-            layout: &chunk_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                // The layout was declared with `has_dynamic_offset = true` so
-                // the binding range is fixed to a single 16-byte slot.
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &chunk_buf,
-                    offset: 0,
-                    size: std::num::NonZeroU64::new(16),
-                }),
-            }],
-        });
-
         let opaque_pipe = build_opaque(
             &gpu.device,
             gpu.surface_cfg.format,
             &camera_bgl,
             &chunk_bgl,
         );
-
         Self {
             gpu,
             depth_view,
             camera_buf,
             camera_bg,
-            chunk_buf,
-            chunk_bg,
+            chunk_bgl,
             opaque_pipe,
-            test_mesh: None,
+            chunk_meshes: HashMap::new(),
         }
     }
 
-    /// Upload a test chunk mesh to the GPU and remember it for `render`.
-    /// In M3 this is replaced by `upload_chunk(coord, mesh)`.
-    pub fn upload_test_mesh(&mut self, mesh: &ChunkMesh) {
-        self.test_mesh = upload_mesh(&self.gpu.device, mesh);
-    }
-
-    /// Resize the surface + depth texture in response to a window resize.
+    /// Reconfigure the surface + depth texture for a new window size.
     pub fn resize(&mut self, w: u32, h: u32) {
         self.gpu.resize(w, h);
         self.depth_view = make_depth_texture(&self.gpu.device, w, h);
     }
 
-    /// Draw a single frame from the given camera state. Writes per-frame
-    /// uniforms, acquires a swap texture, encodes the opaque pass, and
-    /// presents.
+    /// Upload (or replace) the GPU mesh for chunk `coord`. If the mesh is
+    /// empty (no visible faces), removes any existing entry — useful so
+    /// remeshing an all-air chunk doesn't leave a stale draw call behind.
+    pub fn upload_chunk_mesh(&mut self, coord: ChunkCoord, mesh: &ChunkMesh) {
+        let Some(gpu_mesh) = upload_mesh(&self.gpu.device, mesh) else {
+            self.chunk_meshes.remove(&coord);
+            return;
+        };
+        let origin = coord.origin().0;
+        let ubuf = self
+            .gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("chunk-uniform"),
+                contents: bytemuck::cast_slice(&[ChunkUniform {
+                    origin: [origin.x as f32, origin.y as f32, origin.z as f32, 0.0],
+                }]),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("chunk-bg"),
+            layout: &self.chunk_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &ubuf,
+                    offset: 0,
+                    size: std::num::NonZeroU64::new(16),
+                }),
+            }],
+        });
+        self.chunk_meshes.insert(
+            coord,
+            ChunkGpu {
+                mesh: gpu_mesh,
+                _ubuf: ubuf,
+                bg,
+            },
+        );
+    }
+
+    /// Drop the GPU mesh + uniform for `coord`. Called by `world_unload`
+    /// after a chunk leaves the load radius.
+    pub fn remove_chunk_mesh(&mut self, coord: ChunkCoord) {
+        self.chunk_meshes.remove(&coord);
+    }
+
+    /// Number of chunk meshes currently held by the GPU. Exposed for the
+    /// debug HUD (M10).
+    pub fn chunk_mesh_count(&self) -> usize {
+        self.chunk_meshes.len()
+    }
+
+    /// Draw a single frame.
     pub fn render(&self, eye: Vec3, yaw: f32, pitch: f32) -> Result<(), wgpu::SurfaceError> {
         let aspect =
             self.gpu.surface_cfg.width as f32 / self.gpu.surface_cfg.height.max(1) as f32;
@@ -139,13 +167,6 @@ impl Renderer {
                 view_proj: vp.to_cols_array_2d(),
             }]),
         );
-        self.gpu.queue.write_buffer(
-            &self.chunk_buf,
-            0,
-            bytemuck::cast_slice(&[ChunkUniform {
-                origin: [0.0, 0.0, 0.0, 0.0],
-            }]),
-        );
 
         let frame = self.gpu.surface.get_current_texture()?;
         let view = frame
@@ -155,17 +176,15 @@ impl Renderer {
             .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-
         self.encode_opaque_pass(&mut enc, &view);
-
         self.gpu.queue.submit(std::iter::once(enc.finish()));
         frame.present();
         Ok(())
     }
 
-    /// Encode the opaque draw pass into `enc`, writing to `color_view` and
-    /// the renderer's own depth view. Shared between window rendering and
-    /// the offscreen screenshot path so they stay visually identical.
+    /// Encode the opaque pass into `enc` against the given color view +
+    /// the renderer's depth view. Reused by both the live `render` and
+    /// the offscreen screenshot path.
     fn encode_opaque_pass(&self, enc: &mut wgpu::CommandEncoder, color_view: &wgpu::TextureView) {
         let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("opaque-pass"),
@@ -173,8 +192,6 @@ impl Renderer {
                 view: color_view,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    // Sky-blue clear so an "empty" frame is visually
-                    // distinguishable from a black-window crash.
                     load: wgpu::LoadOp::Clear(wgpu::Color {
                         r: 0.55,
                         g: 0.78,
@@ -196,23 +213,22 @@ impl Renderer {
             occlusion_query_set: None,
         });
 
-        if let Some(m) = &self.test_mesh {
-            pass.set_pipeline(&self.opaque_pipe.pipeline);
-            pass.set_bind_group(0, &self.camera_bg, &[]);
-            // The chunk bind group was declared with a dynamic offset (so it
-            // can be reused for many chunks in M3); for M1's single chunk
-            // the offset is always 0.
-            pass.set_bind_group(1, &self.chunk_bg, &[0]);
-            pass.set_vertex_buffer(0, m.vbuf.slice(..));
-            pass.set_index_buffer(m.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..m.index_count, 0, 0..1);
+        pass.set_pipeline(&self.opaque_pipe.pipeline);
+        pass.set_bind_group(0, &self.camera_bg, &[]);
+        // Each chunk has its own bind group at offset 0. M3 doesn't sort or
+        // frustum-cull yet — both arrive in M8 — so we just iterate the
+        // hashmap in arbitrary order.
+        for cg in self.chunk_meshes.values() {
+            pass.set_bind_group(1, &cg.bg, &[0]);
+            pass.set_vertex_buffer(0, cg.mesh.vbuf.slice(..));
+            pass.set_index_buffer(cg.mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..cg.mesh.index_count, 0, 0..1);
         }
     }
 
-    /// Render exactly one frame from `(eye, yaw, pitch)` straight into the
-    /// supplied texture *view*, with the renderer's depth attachment. Used
-    /// by the screenshot path, which needs a `COPY_SRC`-capable texture
-    /// rather than a swap-chain frame.
+    /// Render one frame into the supplied texture view + the renderer's
+    /// depth attachment. Used by the screenshot path so it can target an
+    /// offscreen texture instead of the swap chain.
     pub fn render_to_view(
         &self,
         target: &wgpu::TextureView,
@@ -227,13 +243,6 @@ impl Renderer {
             0,
             bytemuck::cast_slice(&[CameraUniform {
                 view_proj: vp.to_cols_array_2d(),
-            }]),
-        );
-        self.gpu.queue.write_buffer(
-            &self.chunk_buf,
-            0,
-            bytemuck::cast_slice(&[ChunkUniform {
-                origin: [0.0, 0.0, 0.0, 0.0],
             }]),
         );
 
