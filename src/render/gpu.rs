@@ -20,11 +20,13 @@ pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 pub struct Gpu {
     /// Instance — the wgpu entry point. Held so the surface (which borrows
     /// from it conceptually) remains valid.
+    #[allow(dead_code)] // kept-alive owner for `surface`
     pub instance: wgpu::Instance,
     /// Drawable window surface. Lifetime is `'static` because it keeps the
     /// `Arc<Window>` alive internally.
     pub surface: wgpu::Surface<'static>,
     /// The chosen physical GPU.
+    #[allow(dead_code)] // retained for `request_device` lifetime + future diagnostics
     pub adapter: wgpu::Adapter,
     /// Logical device — the interface for resource creation.
     pub device: wgpu::Device,

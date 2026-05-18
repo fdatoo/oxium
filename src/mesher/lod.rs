@@ -67,7 +67,7 @@ pub fn downsample(src: &DenseChunk, factor: u32) -> LodChunk {
                     .max_by_key(|(_, c)| *c)
                     .map(|(b, _)| b)
                     .unwrap_or(Block::Air);
-                let n = (factor * factor * factor) as u32;
+                let n = factor * factor * factor;
                 let sky = (sky_sum / n) as u8;
                 let blk = (blk_sum / n) as u8;
                 let idx = (x + y * dim + z * dim * dim) as usize;

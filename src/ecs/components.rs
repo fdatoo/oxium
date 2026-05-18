@@ -55,7 +55,11 @@ pub struct Camera {
     pub yaw: f32,
     /// Up-down rotation, radians, clamped to ±89°.
     pub pitch: f32,
-    /// Vertical field-of-view, radians.
+    /// Vertical field-of-view, radians. The renderer currently hardcodes
+    /// 70° at the call site; this field is reserved for a future "FOV
+    /// slider" setting and lives here so the player's preferred FOV
+    /// travels with the entity.
+    #[allow(dead_code)]
     pub fov: f32,
     /// Translation from [`Position`] (feet) to the eye/lens. Player default
     /// is `(0, 1.6, 0)` — eye-height in blocks.
@@ -77,6 +81,10 @@ pub struct PlayerInput {
     /// Edge-triggered (consumed per frame): left-mouse button pressed.
     pub break_: bool,
     /// Edge-triggered: `F` was tapped this frame to toggle walk/fly.
+    /// Currently the input system applies the toggle directly to the
+    /// `Movement` component, so this flag isn't consumed elsewhere —
+    /// kept for a future scriptable input rebind UI.
+    #[allow(dead_code)]
     pub toggle_mode: bool,
 }
 

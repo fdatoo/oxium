@@ -175,13 +175,13 @@ impl AppState {
     /// Used by both autosave and the `Drop` flush-on-close path.
     fn flush_modified(&self) {
         for (c, slot) in &self.world.chunks {
-            if let ChunkSlot::Stored { data, meta } = slot {
-                if meta.modified {
-                    let _ = self.persistence.req_tx.send(PersistRequest::Save {
-                        coord: *c,
-                        data: data.clone(),
-                    });
-                }
+            if let ChunkSlot::Stored { data, meta } = slot
+                && meta.modified
+            {
+                let _ = self.persistence.req_tx.send(PersistRequest::Save {
+                    coord: *c,
+                    data: data.clone(),
+                });
             }
         }
     }

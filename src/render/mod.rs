@@ -362,6 +362,7 @@ impl Renderer {
     /// Render one frame into the supplied texture view + the renderer's
     /// depth attachment. Used by the screenshot path so it can target an
     /// offscreen texture instead of the swap chain.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_to_view(
         &self,
         target: &wgpu::TextureView,

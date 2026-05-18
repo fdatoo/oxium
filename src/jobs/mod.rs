@@ -46,11 +46,18 @@ pub enum JobResult {
 
 /// Owns the rayon pool plus the result channel. Held inside `AppState` and
 /// shared by reference to all systems that spawn or drain jobs.
+#[allow(clippy::too_many_arguments)] // mesh-spawn helpers naturally take many context args
 pub struct Jobs {
     tx: Sender<JobResult>,
     /// Receivers drain `try_recv()` from this each frame.
     pub rx: Receiver<JobResult>,
     pool: rayon::ThreadPool,
+}
+
+impl Default for Jobs {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Jobs {

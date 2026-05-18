@@ -90,17 +90,20 @@ pub fn raycast(world: &World, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<
     );
 
     // Inside-block start: hit immediately.
-    if let Some(b) = world.get_block(BlockPos(block)) {
-        if b != Block::Air && b != Block::Water {
-            return Some(RaycastHit {
-                block: BlockPos(block),
-                face: Face::PosY,
-                distance: 0.0,
-            });
-        }
+    if let Some(b) = world.get_block(BlockPos(block))
+        && b != Block::Air
+        && b != Block::Water
+    {
+        return Some(RaycastHit {
+            block: BlockPos(block),
+            face: Face::PosY,
+            distance: 0.0,
+        });
     }
 
-    let mut last_face = Face::PosY;
+    // `last_face` is always overwritten on the first iteration before being
+    // read, but Rust can't see that — initialise to any face.
+    let mut last_face;
     let mut traveled;
     loop {
         // Step on the axis with the smallest t_max — that's the next

@@ -257,6 +257,7 @@ fn step_along(x: i32, y: i32, z: i32, n_axis: u8, sign: i32) -> (i32, i32, i32) 
 
 /// Emit a single greedy-merged quad of size `w × h` at slice `slice` and
 /// in-plane position `(ui, vi)`.
+#[allow(clippy::too_many_arguments)]
 fn emit_greedy_quad(
     mesh: &mut ChunkMesh,
     face: Face,

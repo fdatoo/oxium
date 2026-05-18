@@ -177,19 +177,14 @@ impl PalettedChunk {
 ///
 /// (Edits move `Ready` back to `Meshing`; light dirty moves back to
 /// `Generated` and re-runs lighting.)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChunkState {
+    #[default]
     Empty,
     Generating,
     Generated,
     Meshing,
     Ready,
-}
-
-impl Default for ChunkState {
-    fn default() -> Self {
-        ChunkState::Empty
-    }
 }
 
 /// Tracks which expensive recomputes the chunk owes. Edits set these;
@@ -199,17 +194,6 @@ pub struct ChunkDirty {
     pub mesh: bool,
     pub light: bool,
 }
-
-/// Opaque handle to a GPU mesh.
-///
-/// In the v0 renderer we actually keep the [`crate::render::mesh::GpuMesh`]
-/// in a `HashMap<ChunkCoord, _>` and never store a `MeshHandle` separately;
-/// this type is kept around for the spec's modeling but unused in M3. It
-/// will become load-bearing once the renderer's mesh storage grows beyond
-/// what a `HashMap` keyed on coordinate can express (e.g. handing handles
-/// to far-away LOD jobs to update without racing the renderer).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct MeshHandle(pub u64);
 
 /// Read-only references to (up to) the six neighbouring chunks in
 /// [`crate::mesher::Face`] order. Used by both the lighting BFS and the
@@ -221,11 +205,15 @@ pub struct Neighbors<'a> {
 
 /// Per-chunk bookkeeping. Lives alongside the [`PalettedChunk`] in
 /// `ChunkSlot::Stored`.
+///
+/// `state` and `dirty` drive the streaming/relight scheduler; `modified`
+/// is read by the persistence layer to decide whether to flush the chunk
+/// on unload/autosave. The renderer holds its own
+/// `HashMap<ChunkCoord, [Option<ChunkGpu>; 3]>` for LOD mesh storage —
+/// no separate `MeshHandle` is needed in v0.
 #[derive(Debug, Default)]
 pub struct ChunkMeta {
     pub state: ChunkState,
-    /// `[L0, L1, L2]` mesh handles, populated when each LOD has uploaded.
-    pub mesh_handles: [Option<MeshHandle>; 3],
     pub dirty: ChunkDirty,
     /// True if this chunk has been edited by the player since load.
     /// Persistence uses this to skip saving unmodified, regenerable chunks.

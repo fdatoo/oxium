@@ -47,6 +47,7 @@ fn player_chunk(pos: glam::Vec3) -> ChunkCoord {
 /// radius that the World doesn't already know about (either as `Pending` or
 /// `Stored`). Visits chunks closest-first so nearby terrain appears before
 /// the horizon fills in.
+#[allow(clippy::too_many_arguments)]
 pub fn world_stream(
     ecs: &GameEcs,
     world: &mut World,
@@ -76,9 +77,10 @@ pub fn world_stream(
     });
 
     for c in targets {
-        if !world.chunks.contains_key(&c) {
-            // Mark Pending so we don't re-spawn the same job next frame.
-            world.chunks.insert(c, ChunkSlot::Pending);
+        // Mark Pending only when the slot is currently absent. Using
+        // `entry` avoids the double-hash of contains_key + insert.
+        if let std::collections::hash_map::Entry::Vacant(slot) = world.chunks.entry(c) {
+            slot.insert(ChunkSlot::Pending);
             // Prefer loading from disk when a region file exists —
             // persisted edits should reappear next session.
             let path = region_path(saves_dir, c);
@@ -117,13 +119,13 @@ pub fn world_unload(
         // Save before evict if the player modified this chunk. Pure-
         // generated chunks regenerate from seed on next visit, so we
         // don't waste disk on them.
-        if let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get(&c) {
-            if meta.modified {
-                let _ = persistence.req_tx.send(PersistRequest::Save {
-                    coord: c,
-                    data: data.clone(),
-                });
-            }
+        if let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get(&c)
+            && meta.modified
+        {
+            let _ = persistence.req_tx.send(PersistRequest::Save {
+                coord: c,
+                data: data.clone(),
+            });
         }
         world.chunks.remove(&c);
         renderer.remove_chunk_mesh(c);

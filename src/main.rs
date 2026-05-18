@@ -6,16 +6,17 @@
 //! Hidden flag `--screenshot-and-exit <path>` is still here: it renders one
 //! offscreen frame from the live camera state and saves a PNG.
 
+// Pure engine modules live in the `oxium` library crate so integration
+// tests can drive them headlessly. Re-export them at the binary's crate
+// root so `crate::voxel::…` references in our `app` / `ecs` / `render`
+// submodules continue to resolve without rewriting paths everywhere.
+pub use oxium::{jobs, lighting, mesher, persistence, physics, voxel, worldgen};
+
+// Binary-only modules — they import `winit`/`wgpu` directly and so
+// aren't part of the library surface.
 mod app;
 mod ecs;
-mod jobs;
-mod lighting;
-mod mesher;
-mod persistence;
-mod physics;
 mod render;
-mod voxel;
-mod worldgen;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -123,30 +124,30 @@ impl ApplicationHandler for App {
                 state.step();
                 self.frames_drawn = self.frames_drawn.saturating_add(1);
 
-                if let Some(path) = self.cli.screenshot_path.clone() {
-                    if self.frames_drawn > self.cli.warmup_frames {
-                        let (eye, yaw, pitch) = camera_from_ecs(&state.ecs);
-                        let (sun_dir, sun_intensity) =
-                            ecs::systems::time_of_day::sun_state(&state.ecs);
-                        match capture_offscreen(
-                            &state.renderer,
-                            &path,
-                            eye,
-                            yaw,
-                            pitch,
-                            sun_dir,
-                            sun_intensity,
-                        ) {
-                            Ok(()) => log::info!(
-                                "screenshot saved to {} ({} chunks)",
-                                path.display(),
-                                state.renderer.chunk_mesh_count()
-                            ),
-                            Err(e) => log::error!("screenshot failed: {e:?}"),
-                        }
-                        event_loop.exit();
-                        return;
+                if let Some(path) = self.cli.screenshot_path.clone()
+                    && self.frames_drawn > self.cli.warmup_frames
+                {
+                    let (eye, yaw, pitch) = camera_from_ecs(&state.ecs);
+                    let (sun_dir, sun_intensity) =
+                        ecs::systems::time_of_day::sun_state(&state.ecs);
+                    match capture_offscreen(
+                        &state.renderer,
+                        &path,
+                        eye,
+                        yaw,
+                        pitch,
+                        sun_dir,
+                        sun_intensity,
+                    ) {
+                        Ok(()) => log::info!(
+                            "screenshot saved to {} ({} chunks)",
+                            path.display(),
+                            state.renderer.chunk_mesh_count()
+                        ),
+                        Err(e) => log::error!("screenshot failed: {e:?}"),
                     }
+                    event_loop.exit();
+                    return;
                 }
 
                 state.window.request_redraw();
