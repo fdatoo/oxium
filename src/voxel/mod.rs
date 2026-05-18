@@ -5,4 +5,5 @@
 //! to keep individual mesh/load/save units bounded.
 
 pub mod block;
+pub mod chunk;
 pub mod coords;
