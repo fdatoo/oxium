@@ -5,6 +5,17 @@
 //! implementor just opens a window and idles; subsequent milestones layer on
 //! GPU initialization, ECS scheduling, and rendering.
 
+mod app;
+mod ecs;
+mod jobs;
+mod lighting;
+mod mesher;
+mod persistence;
+mod physics;
+mod render;
+mod voxel;
+mod worldgen;
+
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
