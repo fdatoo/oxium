@@ -314,12 +314,17 @@ fn emit_greedy_quad(
         positions[i] = p;
     }
 
-    // Pick a winding so the resulting triangle's normal matches the face's
-    // outward normal. With our u/v axis mappings, positive-normal faces
-    // happen to come out CW from outside under the natural order; we
-    // reverse to get them CCW, matching the back-face-cull setup. (Verified
-    // by hand against each of the six axis mappings; see commit message.)
-    let order: [usize; 4] = if normal_pos { [0, 3, 2, 1] } else { [0, 1, 2, 3] };
+    // Triangle-corner order. The corner_uv layout above gives all six
+    // faces correct outward-pointing normals (verified by hand-running
+    // the cross product (v1-v0) × (v2-v0) against each axis mapping)
+    // *only* when we always use [0, 3, 2, 1]. The previous code branched
+    // on `normal_pos` and used [0, 1, 2, 3] for negative-normal faces;
+    // that flipped their winding, so NegX/NegY/NegZ ended up back-face
+    // culled. From the player's POV that meant the west/bottom/south
+    // sides of every cube were invisible — you only ever saw the east,
+    // top, and north sides. (The hand-traced fix is documented in the
+    // commit message.)
+    let order: [usize; 4] = [0, 3, 2, 1];
 
     let base = mesh.vertices.len() as u32;
     let ao = cell.ao;
@@ -387,5 +392,62 @@ mod tests {
         let mesh = mesh_greedy(&c, &n, &r);
         assert_eq!(mesh.vertices.len(), 24, "expected 6 merged 32x32 quads");
         assert_eq!(mesh.indices.len(), 36);
+    }
+
+    #[test]
+    fn every_face_winds_outward() {
+        // Regression guard for the greedy mesher's negative-face
+        // winding bug: each emitted triangle's geometric normal must
+        // match the face's declared outward normal, otherwise back-face
+        // culling drops the wrong direction. Build a single-block
+        // chunk and check every emitted triangle.
+        let mut c = DenseChunk::empty();
+        c.set(LocalPos(UVec3::new(10, 10, 10)), Block::Stone);
+        let r = BlockRegistry::new();
+        let n: [Option<&DenseChunk>; 6] = [None; 6];
+        let mesh = mesh_greedy(&c, &n, &r);
+        assert_eq!(mesh.vertices.len(), 24, "6 faces × 4 verts");
+
+        // Walk every triangle and confirm `(v1-v0) × (v2-v0)` aligns
+        // with the face's outward normal.
+        for tri in mesh.indices.chunks_exact(3) {
+            let v0 = mesh.vertices[tri[0] as usize];
+            let v1 = mesh.vertices[tri[1] as usize];
+            let v2 = mesh.vertices[tri[2] as usize];
+            let face = match v0.normal_face {
+                0 => Face::PosX,
+                1 => Face::NegX,
+                2 => Face::PosY,
+                3 => Face::NegY,
+                4 => Face::PosZ,
+                5 => Face::NegZ,
+                _ => panic!("bad face index"),
+            };
+            let expected = face.normal();
+            let a = [
+                v1.pos[0] as i32 - v0.pos[0] as i32,
+                v1.pos[1] as i32 - v0.pos[1] as i32,
+                v1.pos[2] as i32 - v0.pos[2] as i32,
+            ];
+            let b = [
+                v2.pos[0] as i32 - v0.pos[0] as i32,
+                v2.pos[1] as i32 - v0.pos[1] as i32,
+                v2.pos[2] as i32 - v0.pos[2] as i32,
+            ];
+            let cross = [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ];
+            // cross should be a positive scalar multiple of `expected`.
+            let dot = cross[0] * expected[0] + cross[1] * expected[1] + cross[2] * expected[2];
+            assert!(
+                dot > 0,
+                "{:?} triangle wound wrong: cross={:?} expected normal={:?}",
+                face,
+                cross,
+                expected
+            );
+        }
     }
 }
