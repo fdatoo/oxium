@@ -111,7 +111,9 @@ impl Jobs {
                     neighbor_dense[4].as_ref(),
                     neighbor_dense[5].as_ref(),
                 ];
-                crate::mesher::naive::mesh_chunk_with_neighbors(&dense, &n_refs, &registry)
+                // Greedy mesher (M4): same visual output as the naive
+                // mesher but typically 5-10x fewer vertices per chunk.
+                crate::mesher::greedy::mesh_greedy(&dense, &n_refs, &registry)
             }));
             match result {
                 Ok(mesh) => {

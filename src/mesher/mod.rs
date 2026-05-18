@@ -8,6 +8,8 @@
 //! The naive mesher is kept after M4 as a debug fallback / golden-test
 //! reference (a greedy mesh and a naive mesh should be visually identical).
 
+pub mod ao;
+pub mod greedy;
 pub mod naive;
 
 use bytemuck::{Pod, Zeroable};

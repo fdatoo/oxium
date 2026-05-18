@@ -37,6 +37,27 @@ pub enum Block {
 /// Number of distinct [`Block`] variants. Updated when adding new blocks.
 pub const BLOCK_COUNT: usize = 9;
 
+impl Block {
+    /// Inverse of `Block as u16`: returns the variant whose discriminant
+    /// matches `v`, or `None` if `v` is out of range. Cheap and exhaustive
+    /// so it stays correct as new variants are added.
+    pub fn from_repr(v: u16) -> Option<Block> {
+        use Block::*;
+        Some(match v {
+            0 => Air,
+            1 => Stone,
+            2 => Dirt,
+            3 => Grass,
+            4 => Sand,
+            5 => Water,
+            6 => Wood,
+            7 => Leaves,
+            8 => Torch,
+            _ => return None,
+        })
+    }
+}
+
 /// Per-block static properties. Cheap to copy; the registry stores these
 /// inline in a fixed-size array indexed by `Block as usize`.
 #[derive(Debug, Clone, Copy)]
