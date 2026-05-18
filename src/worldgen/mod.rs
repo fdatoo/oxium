@@ -35,6 +35,17 @@ const AMPLITUDE: f32 = 24.0;
 /// Lower values → more cave; higher values → fewer / smaller caves.
 const CAVE_THRESH: f64 = 0.55;
 
+/// World is partitioned into `CELL_SIZE × CELL_SIZE` (XZ) tree cells.
+/// Each cell rolls a deterministic hash to decide whether it contains a
+/// tree (and where in the cell). 8 blocks per cell + ~35 % spawn rate
+/// gives a forest density of roughly one tree per 180 blocks² — enough
+/// that hills look wooded without filling every meadow.
+const TREE_CELL_SIZE: i32 = 8;
+/// Maximum world-space radius (XZ + Y above surface) a tree's blocks can
+/// occupy. Used to decide which neighbouring tree cells could spill
+/// blocks into the chunk currently being generated.
+const TREE_MARGIN: i32 = 5;
+
 /// Pre-built noise fields for one world seed.
 ///
 /// The struct exists mainly so the noise fields are constructed *once*: the
@@ -135,7 +146,166 @@ impl Generator {
                 }
             }
         }
+        // After the terrain pass, lay trees on top. Cross-chunk trees
+        // (whose trunks live in a neighbouring chunk but whose leaves
+        // overlap this one) are placed too, because we scan every
+        // cell in a `TREE_MARGIN`-block ring around the chunk.
+        self.add_trees(coord, out);
     }
+
+    /// Re-derive the height noise's vertical pick for a single column.
+    /// Cheaper than running `fill_chunk` when all we need is a surface y.
+    fn column_height(&self, wx: i32, wz: i32) -> i32 {
+        let h = self.height_noise.get([wx as f64, wz as f64]) as f32;
+        (BASE_HEIGHT + h * AMPLITUDE) as i32
+    }
+
+    /// Place all trees whose blocks could overlap `coord`'s chunk
+    /// volume. Each tree is deterministic in `(seed, cell_x, cell_z)`,
+    /// so every chunk that touches the tree writes the same blocks —
+    /// no double-placement and no missing slices at chunk boundaries.
+    fn add_trees(&self, coord: ChunkCoord, out: &mut DenseChunk) {
+        let chunk_origin = coord.origin().0;
+        let cmin = chunk_origin;
+        let cmax = chunk_origin + glam::IVec3::splat(crate::voxel::coords::CHUNK_DIM);
+        // Cells whose interior could spill into the chunk's extended
+        // bounds, allowing for tree-block radius around the cell.
+        let xmin = cmin.x - TREE_MARGIN;
+        let xmax = cmax.x + TREE_MARGIN;
+        let zmin = cmin.z - TREE_MARGIN;
+        let zmax = cmax.z + TREE_MARGIN;
+        let cell_xmin = xmin.div_euclid(TREE_CELL_SIZE);
+        let cell_xmax = (xmax - 1).div_euclid(TREE_CELL_SIZE);
+        let cell_zmin = zmin.div_euclid(TREE_CELL_SIZE);
+        let cell_zmax = (zmax - 1).div_euclid(TREE_CELL_SIZE);
+        for cell_x in cell_xmin..=cell_xmax {
+            for cell_z in cell_zmin..=cell_zmax {
+                if let Some(tree) = self.tree_in_cell(cell_x, cell_z) {
+                    self.stamp_tree(tree, coord, out);
+                }
+            }
+        }
+    }
+
+    /// Return the tree (if any) belonging to the `(cell_x, cell_z)` tree
+    /// cell. Determined entirely by `(seed, cell coords)` so adjacent
+    /// chunks agree on which trees exist.
+    fn tree_in_cell(&self, cell_x: i32, cell_z: i32) -> Option<Tree> {
+        // Roll #0: does this cell have a tree at all?
+        let roll = tree_hash(self.seed, cell_x, cell_z, 0) % 100;
+        if roll < 65 {
+            return None;
+        }
+        // Roll #1, #2: tree's XZ offset inside the cell. Inset by 1 so
+        // the trunk never lands exactly on a cell boundary.
+        let off_x = (tree_hash(self.seed, cell_x, cell_z, 1) % 6) as i32 + 1;
+        let off_z = (tree_hash(self.seed, cell_x, cell_z, 2) % 6) as i32 + 1;
+        let wx = cell_x * TREE_CELL_SIZE + off_x;
+        let wz = cell_z * TREE_CELL_SIZE + off_z;
+        // Trees only grow on grass — above sea level and not on
+        // sand-tipped islands. (height <= SEA_LEVEL produces sand.)
+        let height = self.column_height(wx, wz);
+        if height <= SEA_LEVEL + 1 {
+            return None;
+        }
+        // Roll #3: trunk height in 4..=6 blocks.
+        let trunk_h = 4 + (tree_hash(self.seed, cell_x, cell_z, 3) % 3) as i32;
+        Some(Tree {
+            wx,
+            wz,
+            base_y: height,
+            trunk_h,
+        })
+    }
+
+    /// Write the trunk + leaf blocks of `tree` into `out`. Blocks whose
+    /// world coordinates fall outside this chunk are silently ignored
+    /// (the neighbouring chunk's call to `stamp_tree` writes them
+    /// instead). Existing non-air voxels are preserved so the trunk
+    /// doesn't carve through hills.
+    fn stamp_tree(&self, tree: Tree, coord: ChunkCoord, out: &mut DenseChunk) {
+        // Trunk: vertical column of Wood blocks above the surface.
+        for dy in 1..=tree.trunk_h {
+            try_set_air(coord, out, tree.wx, tree.base_y + dy, tree.wz, Block::Wood);
+        }
+        // Leaves: a thick disc + slight cap around the top of the trunk.
+        let top_y = tree.base_y + tree.trunk_h;
+        // Round canopy. Radius² uses 6 so the corner cells are dropped
+        // and the silhouette stays roughly spherical instead of cubic.
+        for dy in -1..=2 {
+            for dz in -2..=2 {
+                for dx in -2..=2 {
+                    let r2 = dx * dx + dy * dy + dz * dz;
+                    if r2 > 6 {
+                        continue;
+                    }
+                    try_set_air(
+                        coord,
+                        out,
+                        tree.wx + dx,
+                        top_y + dy,
+                        tree.wz + dz,
+                        Block::Leaves,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Tree placement metadata for one cell.
+#[derive(Debug, Clone, Copy)]
+struct Tree {
+    /// World-space X coordinate of the trunk.
+    wx: i32,
+    /// World-space Z coordinate of the trunk.
+    wz: i32,
+    /// World-space Y of the surface block under the trunk (the trunk
+    /// itself starts at `base_y + 1`).
+    base_y: i32,
+    /// Number of Wood blocks above the surface, inclusive.
+    trunk_h: i32,
+}
+
+/// Write `b` at world coords `(wx, wy, wz)` if they fall inside
+/// `coord`'s 32³ volume *and* the existing block is Air. Both
+/// conditions are required so a tree's trunk doesn't cut through
+/// hills and adjacent chunks' calls don't overwrite each other.
+fn try_set_air(
+    coord: ChunkCoord,
+    out: &mut DenseChunk,
+    wx: i32,
+    wy: i32,
+    wz: i32,
+    b: Block,
+) {
+    use crate::voxel::coords::CHUNK_DIM;
+    let chunk_origin = coord.origin().0;
+    let lx = wx - chunk_origin.x;
+    let ly = wy - chunk_origin.y;
+    let lz = wz - chunk_origin.z;
+    if lx < 0 || ly < 0 || lz < 0 || lx >= CHUNK_DIM || ly >= CHUNK_DIM || lz >= CHUNK_DIM {
+        return;
+    }
+    let lp = LocalPos(UVec3::new(lx as u32, ly as u32, lz as u32));
+    if out.get(lp) != Block::Air {
+        return;
+    }
+    out.set(lp, b);
+}
+
+/// Deterministic mixer: `(seed, x, z, salt) → u32`. Uses the same
+/// xor-shift / golden-ratio multiply pattern as the Wang/Mix hashes
+/// commonly stamped into shader noise functions. Good enough for
+/// tree placement; not cryptographic.
+fn tree_hash(seed: u64, x: i32, z: i32, salt: u32) -> u32 {
+    let mut h = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    h ^= (x as i64 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    h = h.rotate_left(13);
+    h ^= (z as i64 as u64).wrapping_mul(0x1656_67B1_9E37_79F9);
+    h = h.rotate_left(17);
+    h ^= (salt as u64).wrapping_mul(0xCC9E_2D51_1B87_3593);
+    ((h ^ (h >> 33)) as u32) ^ ((h >> 16) as u32)
 }
 
 #[cfg(test)]
@@ -179,9 +349,11 @@ mod tests {
     /// future runs catch unintentional behavioural drift.
     #[test]
     fn golden_seed42_chunk_0_2_0() {
-        // Hash captured after Task 39's visual confirmation; lock here so
-        // any future change to noise/parameters surfaces immediately.
-        const GOLDEN_42_002: u64 = 0x879DF2E78400E716;
+        // Hash captured after Task 39's visual confirmation; updated
+        // again after the v0.1.10 tree-placement pass changed chunk
+        // contents. Locks here so any future change to noise/parameters
+        // surfaces immediately.
+        const GOLDEN_42_002: u64 = 0x20E3_B24B_BDCE_1F0C;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);
