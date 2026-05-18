@@ -46,6 +46,31 @@ fn hash2(p: vec2<f32>) -> f32 {
     return fract(h);
 }
 
+// Star field: hash the upper-hemisphere view ray and stamp bright
+// pinpoints where the hash crosses a high threshold. Sampling on
+// (ray.x, ray.z) / ray.y projects the hemisphere onto a flat plane,
+// so star density and size stay roughly uniform with altitude.
+fn star_field(ray: vec3<f32>) -> f32 {
+    if (ray.y < 0.05) {
+        return 0.0;
+    }
+    // Project the hemisphere onto an XZ plane and sample at a high
+    // frequency — each unit corresponds to one potential star cell.
+    let p = vec2<f32>(ray.x, ray.z) / ray.y * 140.0;
+    let cell = floor(p);
+    let f = fract(p) - 0.5;
+    let h = hash2(cell);
+    // ~3 % of cells host a star; the brightest stars come from cells
+    // whose hash crosses well above the threshold.
+    let star = step(0.97, h);
+    let d = length(f);
+    // Tight glow: sharp pinpoint with a tiny falloff so stars are
+    // crisp rather than blurry.
+    let glow = pow(max(0.0, 1.0 - d * 2.0), 8.0);
+    let bright = (h - 0.97) / 0.03;
+    return star * glow * bright;
+}
+
 // Bilinear value noise on a unit grid, with Perlin-style smooth-step
 // interpolation between cell corners.
 fn value_noise(p: vec2<f32>) -> f32 {
@@ -117,8 +142,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             // Larger noise scale (smaller per-unit value) so clouds
             // span tens of blocks each rather than fragmenting into
             // pixel-sized speckle.
-            let n = fbm((cloud_pos + wind) * 0.012);
-            cloud_density = smoothstep(0.42, 0.62, n);
+            let n = fbm((cloud_pos + wind) * 0.025);
+            // Threshold range positioned just above fbm's mean (~0.47)
+            // so roughly 30-50 % of sky is cloud, the rest is clear.
+            cloud_density = smoothstep(0.50, 0.70, n);
             let horiz_falloff = smoothstep(0.02, 0.20, ray_dir.y);
             cloud_density = cloud_density * horiz_falloff;
             let sun_lean = max(0.0, dot(ray_dir, normalize(camera.sun_dir.xyz)));
@@ -140,7 +167,30 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                  * smoothstep(0.0, 0.15, i);
     let sun_visible = sun_glow * (1.0 - cloud_density * 0.85);
 
-    // Mix the cloud over the sky-lit background; add sun_visible on top.
+    // Night factor: zero at noon, ramps in as the sun drops. The moon
+    // and stars both fade in with this so they don't fight the day sky.
+    let night_factor = 1.0 - smoothstep(0.05, 0.35, i);
+
+    // Moon: same disc shape as the sun but in the anti-sun direction
+    // and tinted cool. A touch larger (smoothstep at 0.9988) so it
+    // reads as the moon's apparent size.
+    let moon_axis = -sun_axis;
+    let cos_moon = dot(ray_dir, moon_axis);
+    let moon_disc = smoothstep(0.9988, 0.9996, cos_moon);
+    let moon_halo = smoothstep(0.985, 0.9996, cos_moon);
+    let moon_glow = (moon_disc * vec3<f32>(0.95, 0.96, 1.00)
+                  +  moon_halo * vec3<f32>(0.45, 0.50, 0.70) * 0.20)
+                  * night_factor;
+    let moon_visible = moon_glow * (1.0 - cloud_density * 0.85);
+
+    // Stars: high-frequency pinpoint field on the upper hemisphere,
+    // multiplied by `night` so they invisible during the day, and by
+    // `(1 - cloud_density)` so dense clouds occlude them.
+    let s = star_field(ray_dir);
+    let stars_rgb = vec3<f32>(0.95, 0.96, 1.00) * s * 2.0 * night_factor * (1.0 - cloud_density);
+
+    // Mix the cloud over the sky-lit background; add the celestial
+    // bodies + stars on top.
     sky_lit = mix(sky_lit, cloud_color, cloud_density);
-    return vec4<f32>(sky_lit + sun_visible, 1.0);
+    return vec4<f32>(sky_lit + sun_visible + moon_visible + stars_rgb, 1.0);
 }

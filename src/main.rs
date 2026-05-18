@@ -47,6 +47,10 @@ struct CliOptions {
     /// "show me the water" screenshots without having to compute a
     /// coordinate by hand. `--find-water`.
     find_water: bool,
+    /// Override the `TimeOfDay.t` value, 0..=1. 0/1 = midnight,
+    /// 0.25 = sunrise, 0.5 = noon, 0.75 = sunset. `--time 0.85` would
+    /// show the night sky with stars + moon.
+    time_of_day: Option<f32>,
 }
 
 impl CliOptions {
@@ -56,6 +60,7 @@ impl CliOptions {
         let mut spawn = None;
         let mut look = None;
         let mut find_water = false;
+        let mut time_of_day: Option<f32> = None;
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--screenshot-and-exit" => {
@@ -79,6 +84,10 @@ impl CliOptions {
                 "--find-water" => {
                     find_water = true;
                 }
+                "--time" => {
+                    let v = args.next().expect("--time requires a 0..=1 value");
+                    time_of_day = Some(v.parse().unwrap());
+                }
                 _ => {}
             }
         }
@@ -92,6 +101,7 @@ impl CliOptions {
             spawn,
             look,
             find_water,
+            time_of_day,
         }
     }
 }
@@ -166,6 +176,18 @@ impl ApplicationHandler for App {
             Some(p) => AppState::new_with_spawn(window.clone(), p),
             None => AppState::new(window.clone()),
         };
+        // CLI `--time` overrides the TimeOfDay sun-cycle value. Apply
+        // after spawn so the Sun entity already exists.
+        if let Some(t) = self.cli.time_of_day {
+            for (_, tod) in state
+                .ecs
+                .world
+                .query::<&mut crate::ecs::components::TimeOfDay>()
+                .iter()
+            {
+                tod.t = t;
+            }
+        }
 
         // Skip cursor grab when running in screenshot mode so the helper
         // doesn't steal cursor focus on the host system.
