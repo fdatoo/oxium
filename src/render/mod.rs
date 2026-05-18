@@ -256,7 +256,8 @@ impl Renderer {
 
     /// Draw a single frame. `sun_dir` is the (unit-length) world-space sun
     /// direction and `sun_intensity` is its brightness `[0, 1]`; both come
-    /// from the time-of-day system.
+    /// from the time-of-day system. `time` is seconds since startup and
+    /// drives shader-side animation (e.g. water shimmer).
     pub fn render(
         &self,
         eye: Vec3,
@@ -264,6 +265,7 @@ impl Renderer {
         pitch: f32,
         sun_dir: [f32; 3],
         sun_intensity: f32,
+        time: f32,
     ) -> Result<(), wgpu::SurfaceError> {
         let aspect =
             self.gpu.surface_cfg.width as f32 / self.gpu.surface_cfg.height.max(1) as f32;
@@ -279,7 +281,7 @@ impl Renderer {
                 view_proj: vp.to_cols_array_2d(),
                 sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.0],
                 sun_intensity,
-                _pad0: 0.0,
+                time,
                 _pad1: 0.0,
                 _pad2: 0.0,
                 eye: [eye.x, eye.y, eye.z, 0.0],
@@ -394,6 +396,7 @@ impl Renderer {
         aspect: f32,
         sun_dir: [f32; 3],
         sun_intensity: f32,
+        time: f32,
     ) {
         let vp = view_proj(eye, yaw, pitch, 70f32.to_radians(), aspect);
         let inv_vp = vp.inverse();
@@ -404,7 +407,7 @@ impl Renderer {
                 view_proj: vp.to_cols_array_2d(),
                 sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.0],
                 sun_intensity,
-                _pad0: 0.0,
+                time,
                 _pad1: 0.0,
                 _pad2: 0.0,
                 eye: [eye.x, eye.y, eye.z, 0.0],

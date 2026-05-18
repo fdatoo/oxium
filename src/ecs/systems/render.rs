@@ -13,7 +13,11 @@ use crate::render::Renderer;
 /// Push the cursor target into the renderer and then draw a frame.
 /// The renderer needs `&mut self` for the cursor write — the caller is
 /// expected to already hold a `&mut Renderer`.
-pub fn render(ecs: &GameEcs, renderer: &mut Renderer) -> Result<(), wgpu::SurfaceError> {
+pub fn render(
+    ecs: &GameEcs,
+    renderer: &mut Renderer,
+    time: f32,
+) -> Result<(), wgpu::SurfaceError> {
     let target = ecs
         .world
         .query_one::<&CursorTarget>(ecs.player)
@@ -30,5 +34,5 @@ pub fn render(ecs: &GameEcs, renderer: &mut Renderer) -> Result<(), wgpu::Surfac
     let (pos, cam) = q.get().unwrap();
     let eye = pos.0 + cam.eye_offset;
     let (sun_dir, intensity) = crate::ecs::systems::time_of_day::sun_state(ecs);
-    renderer.render(eye, cam.yaw, cam.pitch, sun_dir, intensity)
+    renderer.render(eye, cam.yaw, cam.pitch, sun_dir, intensity, time)
 }

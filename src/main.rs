@@ -130,6 +130,7 @@ impl ApplicationHandler for App {
                     let (eye, yaw, pitch) = camera_from_ecs(&state.ecs);
                     let (sun_dir, sun_intensity) =
                         ecs::systems::time_of_day::sun_state(&state.ecs);
+                    let time = state.start_time.elapsed().as_secs_f32();
                     match capture_offscreen(
                         &state.renderer,
                         &path,
@@ -138,6 +139,7 @@ impl ApplicationHandler for App {
                         pitch,
                         sun_dir,
                         sun_intensity,
+                        time,
                     ) {
                         Ok(()) => log::info!(
                             "screenshot saved to {} ({} entries; lod counts={:?})",
@@ -185,6 +187,7 @@ fn camera_from_ecs(ecs: &crate::ecs::GameEcs) -> (Vec3, f32, f32) {
 
 /// Render one frame to an offscreen texture matching the surface format
 /// and save it as a PNG.
+#[allow(clippy::too_many_arguments)]
 fn capture_offscreen(
     renderer: &render::Renderer,
     path: &std::path::Path,
@@ -193,6 +196,7 @@ fn capture_offscreen(
     pitch: f32,
     sun_dir: [f32; 3],
     sun_intensity: f32,
+    time: f32,
 ) -> anyhow::Result<()> {
     let width = renderer.gpu.surface_cfg.width;
     let height = renderer.gpu.surface_cfg.height;
@@ -214,7 +218,7 @@ fn capture_offscreen(
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     let aspect = width as f32 / height.max(1) as f32;
-    renderer.render_to_view(&view, eye, yaw, pitch, aspect, sun_dir, sun_intensity);
+    renderer.render_to_view(&view, eye, yaw, pitch, aspect, sun_dir, sun_intensity, time);
 
     render::screenshot::capture_texture_to_png(
         &renderer.gpu.device,

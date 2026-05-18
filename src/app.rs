@@ -52,6 +52,9 @@ pub struct AppState {
     pub input_buf: InputBuf,
     /// Wall-clock time of the previous `step`; used to derive `dt`.
     pub last_tick: Instant,
+    /// Real time when AppState was created — used to compute `time`
+    /// for shader animation (water shimmer, etc).
+    pub start_time: Instant,
 }
 
 /// How often the autosave system flushes modified chunks to disk.
@@ -88,6 +91,7 @@ impl AppState {
             last_autosave: Instant::now(),
             input_buf: InputBuf::default(),
             last_tick: Instant::now(),
+            start_time: Instant::now(),
         }
     }
 
@@ -165,7 +169,10 @@ impl AppState {
             self.flush_modified();
         }
 
-        if let Err(e) = crate::ecs::systems::render::render(&self.ecs, &mut self.renderer) {
+        let time = self.start_time.elapsed().as_secs_f32();
+        if let Err(e) =
+            crate::ecs::systems::render::render(&self.ecs, &mut self.renderer, time)
+        {
             log::warn!("render error: {e:?}");
         }
         self.input_buf.clear_per_frame();

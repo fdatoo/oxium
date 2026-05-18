@@ -23,7 +23,7 @@ struct CameraUniform {
     view_proj:     mat4x4<f32>,
     sun_dir:       vec4<f32>,
     sun_intensity: f32,
-    _pad0:         f32,
+    time:          f32,
     _pad1:         f32,
     _pad2:         f32,
     eye:           vec4<f32>,
@@ -87,16 +87,40 @@ fn horizon_color(sun_intensity: f32) -> vec3<f32> {
     return mix(night, day, smoothstep(0.0, 0.7, i)) + dusk * dusk_w * 0.6;
 }
 
+// Two-octave sin/cos wave used to animate water surfaces. Driven by
+// world-space x/z and `camera.time` so adjacent quads stay coherent as
+// the camera moves.
+fn water_shimmer(world: vec3<f32>, t: f32) -> f32 {
+    let a = sin(world.x * 0.45 + t * 1.30) * cos(world.z * 0.37 + t * 1.10);
+    let b = sin(world.x * 0.18 + world.z * 0.21 + t * 0.55);
+    return a * 0.5 + b * 0.5;
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let ao = mix(0.45, 1.0, in.v_ao);
     let lit = max(0.05, in.v_light);
     let shade = ao * lit;
-    let lit_rgb = in.v_color.rgb * shade;
+    var lit_rgb = in.v_color.rgb * shade;
 
-    // Distance fog: linear ramp between FOG_START and FOG_END. The end
-    // distance is tuned so it sits just inside the LOD2 boundary so the
-    // chunky LOD silhouettes fade out before they read as artefacts.
+    // Water shimmer: any fragment whose vertex alpha came in below
+    // ~0.95 is non-opaque material — water in v0. Modulate brightness
+    // and lightly bias the colour toward a cooler tint with the
+    // shimmer factor. Only affects translucent fragments so opaque
+    // chunks render exactly as before.
+    if (in.v_color.a < 0.95) {
+        let s = water_shimmer(in.v_world, camera.time);
+        // Brightness ripple: ±15 % around the lit colour.
+        lit_rgb = lit_rgb * (1.0 + 0.15 * s);
+        // Hue lean: bright crests get a touch of foam-cyan, troughs
+        // a touch of deeper blue. Mix is tiny so it reads as motion
+        // not as colour discoloration.
+        let crest = vec3<f32>(0.55, 0.85, 1.00);
+        let trough = vec3<f32>(0.05, 0.15, 0.45);
+        lit_rgb = mix(lit_rgb, mix(trough, crest, s * 0.5 + 0.5), 0.10);
+    }
+
+    // Distance fog: linear ramp between FOG_START and FOG_END.
     let dist = length(in.v_world - camera.eye.xyz);
     let fog_start = 96.0;
     let fog_end   = 360.0;

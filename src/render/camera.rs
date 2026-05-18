@@ -36,7 +36,12 @@ pub struct CameraUniform {
     /// Scalar sun brightness, 0..=1. The shader multiplies the per-vertex
     /// sky-light channel by this so torches still glow in the dark.
     pub sun_intensity: f32,
-    pub _pad0: f32,
+    /// Seconds since startup. Drives shader-side animation (currently the
+    /// water-surface shimmer in the opaque fragment shader). f32 has
+    /// enough precision for the first ~hour of play before the
+    /// fractional part loses resolution — that's plenty for "subtle
+    /// ripples" detail.
+    pub time: f32,
     pub _pad1: f32,
     pub _pad2: f32,
     /// Camera (eye) world-space position. `w` unused. Used by:
@@ -57,7 +62,7 @@ impl CameraUniform {
             view_proj: Mat4::IDENTITY.to_cols_array_2d(),
             sun_dir: [0.0, 1.0, 0.0, 0.0],
             sun_intensity: 1.0,
-            _pad0: 0.0,
+            time: 0.0,
             _pad1: 0.0,
             _pad2: 0.0,
             eye: [0.0; 4],
