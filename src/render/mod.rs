@@ -226,6 +226,20 @@ impl Renderer {
         self.chunk_meshes.len()
     }
 
+    /// Per-LOD entry counts. Debug helper to see whether LOD jobs are
+    /// keeping up with streaming.
+    pub fn chunk_mesh_lod_counts(&self) -> [usize; 3] {
+        let mut counts = [0; 3];
+        for slots in self.chunk_meshes.values() {
+            for (i, s) in slots.iter().enumerate() {
+                if s.is_some() {
+                    counts[i] += 1;
+                }
+            }
+        }
+        counts
+    }
+
     /// Pick a LOD level for a chunk at world-space center `chunk_center`
     /// given a camera at `eye`. Closer chunks get LOD0 (full res); the
     /// boundaries (6 / 12 chunks) match the spec's defaults.

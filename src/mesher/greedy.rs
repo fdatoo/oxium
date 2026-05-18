@@ -64,10 +64,24 @@ pub fn mesh_greedy(
 
     // Helper closure: read a block at `(x, y, z)`, looking it up in the
     // appropriate neighbour chunk when exactly one axis is one step out of
-    // range. AO sampling can ask for diagonal "corner" voxels that are
-    // simultaneously off the chunk on two axes — we don't have a "corner
-    // neighbour" chunk for those, so we return `None` (the AO calc treats
-    // unknown as unoccluded, which is the gentler artefact).
+    // range.
+    //
+    // For *visibility* purposes (the mesher's "should I emit this face?"
+    // check), an unloaded neighbour or a multi-axis corner sample is
+    // treated as **opaque** (returning `Some(Block::Stone)` here is the
+    // cheapest opaque sentinel). This hides boundary faces at the edge
+    // of the loaded set — without it we'd see the bottom-of-chunk
+    // negative-Y faces shining through as gray "underside" shelves once
+    // a chunk's downward neighbour is outside the loaded radius. The
+    // adjacent chunks (when they exist) provide the missing geometry
+    // from their side; when they don't exist, they're outside the
+    // render distance anyway and the player can't see the hidden hole.
+    //
+    // AO sampling reads via the same closure but only cares whether the
+    // sample is solid (Stone qualifies). Treating multi-axis corners as
+    // opaque does cause AO darkening at chunk corners; the result is
+    // *more* AO at the world edges, which is barely visible and far
+    // better than the wrong-shading artefacts of returning Air.
     let block_at = |x: i32, y: i32, z: i32| -> Option<Block> {
         let dim = D as i32;
         let out_x = (x < 0) as i32 + (x >= dim) as i32;
@@ -78,11 +92,13 @@ pub fn mesh_greedy(
             return Some(chunk.get(LocalPos(UVec3::new(x as u32, y as u32, z as u32))));
         }
         if off_axes >= 2 {
-            // Multi-axis corner sample; no neighbour chunk holds this voxel
-            // (would need an 8-corner-neighbour map). Treat as missing.
-            return None;
+            // Multi-axis corner; no neighbour chunk holds this voxel.
+            // Return a solid sentinel so the AO/visibility checks treat
+            // it as opaque rather than air.
+            return Some(Block::Stone);
         }
-        // Exactly one axis is one step out of range.
+        // Exactly one axis is one step out of range — consult the
+        // matching neighbour. If absent, treat as opaque.
         let (face, lx, ly, lz) = if x < 0 {
             (Face::NegX, (dim - 1) as u32, y as u32, z as u32)
         } else if x >= dim {
@@ -96,8 +112,10 @@ pub fn mesh_greedy(
         } else {
             (Face::PosZ, x as u32, y as u32, 0u32)
         };
-        let n = neighbors[face as usize]?;
-        Some(n.get(LocalPos(UVec3::new(lx, ly, lz))))
+        match neighbors[face as usize] {
+            Some(n) => Some(n.get(LocalPos(UVec3::new(lx, ly, lz)))),
+            None => Some(Block::Stone), // unloaded neighbour → opaque
+        }
     };
 
     for face in Face::all() {
@@ -370,14 +388,44 @@ mod tests {
     }
 
     #[test]
-    fn solid_chunk_produces_six_merged_quads() {
-        // A fully-solid chunk with no neighbours: each of the 6 boundary
-        // faces is greedy-merged into a single 32×32 quad → 6 × 4 verts.
+    fn solid_chunk_produces_outer_faces() {
+        // A fully-solid chunk surrounded by Air neighbours emits only its
+        // 6 outer surfaces (all internal faces are culled). The exact
+        // vertex count depends on how the AO mask splits the merged
+        // 32×32 quad at the chunk's geometric corners (corner cells
+        // have different AO from edge cells from interior cells), so we
+        // assert bounds rather than an exact figure.
+        let c = DenseChunk::new_filled(Block::Stone);
+        let air = DenseChunk::empty();
+        let air_ref: &DenseChunk = &air;
+        let r = BlockRegistry::new();
+        let n: [Option<&DenseChunk>; 6] = [Some(air_ref); 6];
+        let mesh = mesh_greedy(&c, &n, &r);
+        // Lower bound: at least 6 quads (one per face).
+        // Upper bound: the naive mesher would emit 6 × 32 × 32 × 4 verts
+        // = 24576; greedy must come in well below that.
+        assert!(
+            mesh.vertices.len() >= 24,
+            "should emit at least one quad per face"
+        );
+        assert!(
+            mesh.vertices.len() <= 24 * 16,
+            "greedy should still merge most cells; got {}",
+            mesh.vertices.len()
+        );
+        assert_eq!(mesh.indices.len(), mesh.vertices.len() / 4 * 6);
+    }
+
+    #[test]
+    fn solid_chunk_unloaded_neighbours_hides_all() {
+        // Same fully-solid chunk but with `None` for every neighbour.
+        // Under the opaque-on-None rule, every boundary face is
+        // suppressed — the adjacent (currently-unloaded) chunk will
+        // paint those faces from its side when it streams in.
         let c = DenseChunk::new_filled(Block::Stone);
         let r = BlockRegistry::new();
         let n: [Option<&DenseChunk>; 6] = [None; 6];
         let mesh = mesh_greedy(&c, &n, &r);
-        assert_eq!(mesh.vertices.len(), 24, "expected 6 merged 32x32 quads");
-        assert_eq!(mesh.indices.len(), 36);
+        assert_eq!(mesh.vertices.len(), 0);
     }
 }

@@ -140,9 +140,10 @@ impl ApplicationHandler for App {
                         sun_intensity,
                     ) {
                         Ok(()) => log::info!(
-                            "screenshot saved to {} ({} chunks)",
+                            "screenshot saved to {} ({} entries; lod counts={:?})",
                             path.display(),
-                            state.renderer.chunk_mesh_count()
+                            state.renderer.chunk_mesh_count(),
+                            state.renderer.chunk_mesh_lod_counts(),
                         ),
                         Err(e) => log::error!("screenshot failed: {e:?}"),
                     }

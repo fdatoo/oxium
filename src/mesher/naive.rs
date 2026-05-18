@@ -210,9 +210,14 @@ fn face_visible_with_neighbors(
     }
 
     // Boundary case: consult the neighbour chunk on the face's side.
+    // When the neighbour isn't loaded we treat the boundary as opaque
+    // (i.e. *don't* emit the face). The neighbour chunk, when it
+    // streams in, will paint its own boundary face from its side; in
+    // the meantime hiding our face avoids the "underside shelves" that
+    // appear when the bottom-of-loaded chunk's NegY face is visible.
     let neighbor_chunk = match neighbors[face as usize] {
         Some(c) => c,
-        None => return true, // unloaded neighbour → emit
+        None => return false,
     };
     // Wrap the out-of-bounds coordinate around to the neighbour's local
     // space. `+ dim) % dim` handles both `-1 → dim-1` and `dim → 0`.
@@ -263,23 +268,51 @@ mod tests {
     }
 
     #[test]
-    fn with_solid_neighbor_no_boundary_face() {
-        // Single stone block at (0,0,0). With a fully-solid neighbour on
-        // the -X side, the -X face of (0,0,0) must be culled.
+    fn unloaded_neighbors_hide_boundary_faces() {
+        // Single stone block at (0,0,0) — sits on the chunk's `-X`, `-Y`,
+        // `-Z` edges. The `+X`, `+Y`, `+Z` neighbours are *inside* the
+        // chunk (at local (1,0,0) etc.) and are Air, so those faces are
+        // visible. The `-X` direction goes through the loaded solid
+        // neighbour and is hidden. The `-Y` and `-Z` directions go
+        // through unloaded neighbours, which (under the new
+        // opaque-on-None rule) suppress those boundary faces.
         let mut center = DenseChunk::empty();
         center.set(LocalPos(UVec3::new(0, 0, 0)), Block::Stone);
         let neighbor = DenseChunk::new_filled(Block::Stone);
         let neighbors: [Option<&DenseChunk>; 6] = [
-            None,            // PosX
-            Some(&neighbor), // NegX
-            None,
-            None,
-            None,
-            None,
+            None,            // PosX (in-bounds neighbour is Air; unused here)
+            Some(&neighbor), // NegX (solid → face hidden)
+            None,            // PosY (in-bounds is Air; unused)
+            None,            // NegY (unloaded → opaque → face hidden)
+            None,            // PosZ (in-bounds is Air; unused)
+            None,            // NegZ (unloaded → opaque → face hidden)
         ];
         let r = BlockRegistry::new();
         let mesh = mesh_chunk_with_neighbors(&center, &neighbors, &r);
-        // 6 total minus 1 hidden face = 5 quads = 20 verts.
+        // Visible: PosX, PosY, PosZ (3 in-chunk faces against Air).
+        // Hidden: NegX (solid neighbour), NegY/NegZ (unloaded → opaque).
+        assert_eq!(mesh.vertices.len(), 12);
+    }
+
+    #[test]
+    fn loaded_air_neighbor_emits_face() {
+        // Same setup but with explicit Air neighbours on every side.
+        // Now every face IS visible (5 outward, NegX still hidden).
+        let mut center = DenseChunk::empty();
+        center.set(LocalPos(UVec3::new(0, 0, 0)), Block::Stone);
+        let solid = DenseChunk::new_filled(Block::Stone);
+        let air = DenseChunk::empty();
+        let neighbors: [Option<&DenseChunk>; 6] = [
+            Some(&air),   // PosX
+            Some(&solid), // NegX (solid → face hidden)
+            Some(&air),   // PosY
+            Some(&air),   // NegY
+            Some(&air),   // PosZ
+            Some(&air),   // NegZ
+        ];
+        let r = BlockRegistry::new();
+        let mesh = mesh_chunk_with_neighbors(&center, &neighbors, &r);
+        // 6 faces, 1 hidden by solid neighbour = 5 emitted = 20 verts.
         assert_eq!(mesh.vertices.len(), 20);
     }
 }

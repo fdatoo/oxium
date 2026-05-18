@@ -27,10 +27,22 @@ pub struct LodChunk {
 }
 
 /// Build an `LodChunk` from a `DenseChunk` by collapsing each `factor³`
-/// voxel group into one block (majority-vote, excluding air; ties broken
-/// by `HashMap` order, which is fine for v0).
+/// voxel group into one block. `factor` must be 2 (L1) or 4 (L2).
 ///
-/// `factor` must be 2 (L1) or 4 (L2).
+/// **Surface-aware vote.** Each `(dx, dz)` column inside the group
+/// contributes its *topmost non-air block within the cell*. That
+/// contribution is classified as either a **surface** vote (the block
+/// directly above it is air — i.e. it's actually visible from outside)
+/// or a **bulk** vote (it has a solid neighbour above, so this cell sits
+/// underneath the terrain in that column).
+///
+/// Surface votes win over bulk votes for the cell's representative block.
+/// This stops the "stone roof" tiling — where one column's bulk-stone
+/// vote was outvoting the grass surface from neighbouring columns — and
+/// preserves the visible top across the LOD0/LOD1/LOD2 boundary.
+///
+/// Light is averaged across the whole group — the eye can't distinguish
+/// per-cell light at LOD distances anyway.
 pub fn downsample(src: &DenseChunk, factor: u32) -> LodChunk {
     assert!(factor == 2 || factor == 4, "factor must be 2 or 4");
     let dim = CHUNK_DIM_U / factor;
@@ -41,30 +53,60 @@ pub fn downsample(src: &DenseChunk, factor: u32) -> LodChunk {
     for z in 0..dim {
         for y in 0..dim {
             for x in 0..dim {
-                // Majority vote across the `factor³` group, excluding air.
-                let mut counts: HashMap<Block, u32> = HashMap::new();
+                let mut surface_counts: HashMap<Block, u32> = HashMap::new();
+                let mut bulk_counts: HashMap<Block, u32> = HashMap::new();
                 let mut sky_sum: u32 = 0;
                 let mut blk_sum: u32 = 0;
+
+                // Walk each column inside the cell top-to-bottom.
                 for dz in 0..factor {
-                    for dy in 0..factor {
-                        for dx in 0..factor {
+                    for dx in 0..factor {
+                        let mut found_top = false;
+                        for dy_top in 0..factor {
+                            let dy = factor - 1 - dy_top;
+                            let yl = y * factor + dy;
                             let lp = LocalPos(UVec3::new(
                                 x * factor + dx,
-                                y * factor + dy,
+                                yl,
                                 z * factor + dz,
                             ));
                             let b = src.blocks[lp.to_index()];
-                            if b != Block::Air {
-                                *counts.entry(b).or_insert(0) += 1;
-                            }
                             sky_sum += src.sky_light[lp.to_index()] as u32;
                             blk_sum += src.block_light[lp.to_index()] as u32;
+                            if !found_top && b != Block::Air {
+                                found_top = true;
+                                // Determine surface vs bulk by looking one
+                                // block higher. Outside the chunk we treat
+                                // the above-block as air (so a column whose
+                                // surface coincides with the chunk's top
+                                // counts as a surface, not as bulk).
+                                let above = if yl + 1 < CHUNK_DIM_U {
+                                    src.blocks[LocalPos(UVec3::new(
+                                        x * factor + dx,
+                                        yl + 1,
+                                        z * factor + dz,
+                                    ))
+                                    .to_index()]
+                                } else {
+                                    Block::Air
+                                };
+                                if above == Block::Air {
+                                    *surface_counts.entry(b).or_insert(0) += 1;
+                                } else {
+                                    *bulk_counts.entry(b).or_insert(0) += 1;
+                                }
+                            }
                         }
                     }
                 }
-                let chosen = counts
+
+                // Surface votes always win when any exist; bulk votes
+                // only matter for cells entirely below the visible
+                // terrain.
+                let chosen = surface_counts
                     .into_iter()
                     .max_by_key(|(_, c)| *c)
+                    .or_else(|| bulk_counts.into_iter().max_by_key(|(_, c)| *c))
                     .map(|(b, _)| b)
                     .unwrap_or(Block::Air);
                 let n = factor * factor * factor;
@@ -94,9 +136,19 @@ pub fn mesh_lod(
     let mut mesh = ChunkMesh::empty();
     let dim = lod.dim as i32;
 
+    // Inside the LOD chunk we read real cells. *Outside* we treat the
+    // neighbour as **opaque** instead of air — this is the
+    // load-bearing trick of mesh_lod. The job doesn't have neighbour
+    // chunks to consult, and the old "out-of-bounds = air" rule was
+    // emitting spurious +Y/+X/+Z faces at every chunk boundary, showing
+    // up as stone-coloured "shelves" across the rendered landscape.
+    // Calling out-of-bounds opaque hides those boundary faces; the
+    // neighbouring LOD chunk's own geometry covers the void from its
+    // side. At LOD distance the player can't see the tiny single-cell
+    // gaps this leaves where adjacent topographies differ.
     let block_at = |x: i32, y: i32, z: i32| -> Block {
         if x < 0 || y < 0 || z < 0 || x >= dim || y >= dim || z >= dim {
-            return Block::Air;
+            return Block::Stone;
         }
         lod.blocks[(x + y * dim + z * dim * dim) as usize]
     };
