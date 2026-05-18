@@ -1,0 +1,16 @@
+[package]
+name = "oxium"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+
+[dependencies]
+# Filled in over time. Empty for now.
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+opt-level = 1   # debug builds are slow without this for graphics work
