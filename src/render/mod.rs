@@ -60,9 +60,11 @@ pub struct Renderer {
     cursor_bg: wgpu::BindGroup,
     cursor_visible: bool,
 
-    /// One GPU mesh + a per-chunk uniform buffer per loaded chunk (LOD0
-    /// only — LODs 1 and 2 arrive in M8).
-    chunk_meshes: HashMap<ChunkCoord, ChunkGpu>,
+    /// Up to three GPU meshes per loaded chunk — one per LOD level
+    /// (`[L0, L1, L2]`). The render loop picks which slot to draw based
+    /// on the chunk's distance to the camera, falling back to the
+    /// nearest available LOD if a job hasn't finished yet.
+    chunk_meshes: HashMap<ChunkCoord, [Option<ChunkGpu>; 3]>,
 }
 
 /// Per-chunk GPU resources: the mesh buffers, the chunk-origin uniform, and
@@ -163,12 +165,23 @@ impl Renderer {
         self.depth_view = make_depth_texture(&self.gpu.device, w, h);
     }
 
-    /// Upload (or replace) the GPU mesh for chunk `coord`. If the mesh is
-    /// empty (no visible faces), removes any existing entry — useful so
-    /// remeshing an all-air chunk doesn't leave a stale draw call behind.
-    pub fn upload_chunk_mesh(&mut self, coord: ChunkCoord, mesh: &ChunkMesh) {
+    /// Upload (or replace) the GPU mesh for chunk `coord` at LOD `lod`
+    /// (0 = full resolution, 1 = 2× downsample, 2 = 4× downsample).
+    /// An empty mesh clears just that one LOD slot.
+    pub fn upload_chunk_mesh(&mut self, coord: ChunkCoord, lod: u8, mesh: &ChunkMesh) {
+        let lod = lod as usize;
+        debug_assert!(lod < 3);
+        let slots = self
+            .chunk_meshes
+            .entry(coord)
+            .or_insert_with(|| [None, None, None]);
         let Some(gpu_mesh) = upload_mesh(&self.gpu.device, mesh) else {
-            self.chunk_meshes.remove(&coord);
+            slots[lod] = None;
+            // If every slot is empty (e.g. all-air chunk), drop the
+            // hashmap entry entirely so iteration stays cheap.
+            if slots.iter().all(|s| s.is_none()) {
+                self.chunk_meshes.remove(&coord);
+            }
             return;
         };
         let origin = coord.origin().0;
@@ -194,26 +207,37 @@ impl Renderer {
                 }),
             }],
         });
-        self.chunk_meshes.insert(
-            coord,
-            ChunkGpu {
-                mesh: gpu_mesh,
-                _ubuf: ubuf,
-                bg,
-            },
-        );
+        slots[lod] = Some(ChunkGpu {
+            mesh: gpu_mesh,
+            _ubuf: ubuf,
+            bg,
+        });
     }
 
-    /// Drop the GPU mesh + uniform for `coord`. Called by `world_unload`
-    /// after a chunk leaves the load radius.
+    /// Drop *all* LOD meshes for `coord`. Called by `world_unload` after a
+    /// chunk leaves the load radius.
     pub fn remove_chunk_mesh(&mut self, coord: ChunkCoord) {
         self.chunk_meshes.remove(&coord);
     }
 
-    /// Number of chunk meshes currently held by the GPU. Exposed for the
-    /// debug HUD (M10).
+    /// Number of chunk hashmap entries (one per coord, regardless of how
+    /// many LOD slots are filled). Exposed for the debug HUD (M10).
     pub fn chunk_mesh_count(&self) -> usize {
         self.chunk_meshes.len()
+    }
+
+    /// Pick a LOD level for a chunk at world-space center `chunk_center`
+    /// given a camera at `eye`. Closer chunks get LOD0 (full res); the
+    /// boundaries (6 / 12 chunks) match the spec's defaults.
+    fn pick_lod(eye: Vec3, chunk_center: Vec3) -> usize {
+        let d = (chunk_center - eye).length();
+        if d < 6.0 * 32.0 {
+            0
+        } else if d < 12.0 * 32.0 {
+            1
+        } else {
+            2
+        }
     }
 
     /// Draw a single frame. `sun_dir` is the (unit-length) world-space sun
@@ -249,7 +273,7 @@ impl Renderer {
             .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        self.encode_opaque_pass(&mut enc, &view);
+        self.encode_opaque_pass(&mut enc, &view, eye);
         self.gpu.queue.submit(std::iter::once(enc.finish()));
         frame.present();
         Ok(())
@@ -258,7 +282,15 @@ impl Renderer {
     /// Encode the sky + opaque passes into `enc` against the given color
     /// view + the renderer's depth view. Reused by both the live `render`
     /// and the offscreen screenshot path.
-    fn encode_opaque_pass(&self, enc: &mut wgpu::CommandEncoder, color_view: &wgpu::TextureView) {
+    ///
+    /// `eye` is used to pick a LOD level per chunk: closer chunks render
+    /// at full resolution, distant ones at LOD1/LOD2.
+    fn encode_opaque_pass(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        color_view: &wgpu::TextureView,
+        eye: Vec3,
+    ) {
         let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("sky+opaque-pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -289,15 +321,33 @@ impl Renderer {
         pass.set_bind_group(0, &self.camera_bg, &[]);
         pass.draw(0..3, 0..1);
 
-        // 2) Opaque chunks. M3 doesn't sort or frustum-cull yet — both
-        // arrive in M8 — so we iterate the hashmap in arbitrary order.
+        // 2) Opaque chunks. Pick a LOD per chunk by camera distance;
+        // fall back to a nearby LOD if the preferred one hasn't been
+        // built yet (a freshly-streamed chunk may have L0 ready before
+        // L1/L2, or vice versa).
         pass.set_pipeline(&self.opaque_pipe.pipeline);
         pass.set_bind_group(0, &self.camera_bg, &[]);
-        for cg in self.chunk_meshes.values() {
-            pass.set_bind_group(1, &cg.bg, &[0]);
-            pass.set_vertex_buffer(0, cg.mesh.vbuf.slice(..));
-            pass.set_index_buffer(cg.mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..cg.mesh.index_count, 0, 0..1);
+        for (coord, slots) in &self.chunk_meshes {
+            let center = coord.origin().0;
+            let center_f = Vec3::new(
+                center.x as f32 + 16.0,
+                center.y as f32 + 16.0,
+                center.z as f32 + 16.0,
+            );
+            let preferred = Self::pick_lod(eye, center_f);
+            // Try preferred → lower-detail neighbour → higher-detail
+            // neighbour so the chunk is never invisible when *some* LOD
+            // is ready.
+            let chosen = slots[preferred]
+                .as_ref()
+                .or_else(|| slots[preferred.saturating_sub(1)].as_ref())
+                .or_else(|| slots[(preferred + 1).min(2)].as_ref());
+            if let Some(cg) = chosen {
+                pass.set_bind_group(1, &cg.bg, &[0]);
+                pass.set_vertex_buffer(0, cg.mesh.vbuf.slice(..));
+                pass.set_index_buffer(cg.mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..cg.mesh.index_count, 0, 0..1);
+            }
         }
 
         // 3) Cursor wireframe (12 line segments, no vertex buffer).
@@ -338,7 +388,7 @@ impl Renderer {
             .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        self.encode_opaque_pass(&mut enc, target);
+        self.encode_opaque_pass(&mut enc, target, eye);
         self.gpu.queue.submit(std::iter::once(enc.finish()));
     }
 }

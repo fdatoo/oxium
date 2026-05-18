@@ -132,6 +132,31 @@ impl Jobs {
         });
     }
 
+    /// Spawn a neighbour-free LOD1 or LOD2 mesh job for `coord`.
+    ///
+    /// LOD1 downsamples by 2 (16³ cells), LOD2 by 4 (8³ cells). Neither
+    /// uses neighbour data — distant chunks don't need precise boundary
+    /// face culling because the visual difference is invisible at range.
+    /// LOD0 still goes through `spawn_mesh_lod0` because it does need
+    /// neighbours for clean chunk boundaries.
+    pub fn spawn_mesh_lod(
+        &self,
+        coord: ChunkCoord,
+        lod: u8,
+        data: Arc<PalettedChunk>,
+        registry: Arc<BlockRegistry>,
+    ) {
+        debug_assert!(lod == 1 || lod == 2, "use spawn_mesh_lod0 for LOD0");
+        let tx = self.tx.clone();
+        self.pool.spawn(move || {
+            let dense = data.decompress();
+            let factor: u32 = if lod == 1 { 2 } else { 4 };
+            let lod_chunk = crate::mesher::lod::downsample(&dense, factor);
+            let mesh = crate::mesher::lod::mesh_lod(&lod_chunk, factor, &registry);
+            let _ = tx.send(JobResult::Meshed { coord, lod, mesh });
+        });
+    }
+
     /// Spawn a neighbor-aware LOD0 mesh job for `coord`.
     ///
     /// The 6-element `neighbors` array is ordered by [`crate::mesher::Face`]

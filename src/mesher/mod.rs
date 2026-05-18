@@ -10,6 +10,7 @@
 
 pub mod ao;
 pub mod greedy;
+pub mod lod;
 pub mod naive;
 
 use bytemuck::{Pod, Zeroable};

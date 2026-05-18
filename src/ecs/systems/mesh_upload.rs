@@ -46,9 +46,9 @@ pub fn drain_jobs(
                 // see it.
                 world.insert(coord, data);
 
-                // Spawn a mesh job for this chunk plus any neighbour that's
-                // already loaded — generating a new chunk can reveal
-                // previously-hidden faces on its already-meshed neighbours.
+                // Spawn a LOD0 mesh job for this chunk plus any neighbour
+                // that's already loaded — generating a new chunk can
+                // reveal previously-hidden faces on its neighbours.
                 for c in std::iter::once(coord).chain(neighbor_coords(coord)) {
                     if let Some(ChunkSlot::Stored { data, .. }) = world.chunks.get(&c) {
                         let data_arc = Arc::new(data.clone());
@@ -56,13 +56,18 @@ pub fn drain_jobs(
                         jobs.spawn_mesh_lod0(c, data_arc, neighbors, registry.clone());
                     }
                 }
+                // Also spawn LOD1 and LOD2 jobs for the new chunk so the
+                // far-distance render has something to draw. These don't
+                // need neighbours (boundary precision is invisible at
+                // distance), so they run independently.
+                if let Some(ChunkSlot::Stored { data, .. }) = world.chunks.get(&coord) {
+                    let data_arc = Arc::new(data.clone());
+                    jobs.spawn_mesh_lod(coord, 1, data_arc.clone(), registry.clone());
+                    jobs.spawn_mesh_lod(coord, 2, data_arc, registry.clone());
+                }
             }
-            JobResult::Meshed {
-                coord,
-                lod: _,
-                mesh,
-            } => {
-                renderer.upload_chunk_mesh(coord, &mesh);
+            JobResult::Meshed { coord, lod, mesh } => {
+                renderer.upload_chunk_mesh(coord, lod, &mesh);
             }
             JobResult::Relit { coord, data } => {
                 // Swap the freshly-relit chunk into the World and reset

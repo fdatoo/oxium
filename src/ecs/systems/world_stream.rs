@@ -21,9 +21,9 @@ use crate::worldgen::Generator;
 use glam::IVec3;
 use std::sync::Arc;
 
-/// Horizontal load radius in chunks. M3 keeps this small (6); M8 raises it
-/// to 16+ once LODs let us afford the extra mesh count.
-pub const RENDER_RADIUS: i32 = 6;
+/// Horizontal load radius in chunks. M8 raises this from 6 → 12 once
+/// LODs are in: the far chunks render as L1/L2 with far fewer triangles.
+pub const RENDER_RADIUS: i32 = 12;
 /// Vertical load radius in chunks.
 pub const VERTICAL_RADIUS: i32 = 4;
 /// Unload radius slightly larger than the load radius so a tiny step doesn't
