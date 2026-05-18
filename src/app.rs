@@ -80,6 +80,7 @@ impl AppState {
         crate::ecs::systems::input::apply_input(&mut self.ecs, &self.input_buf);
         crate::ecs::systems::time_of_day::advance(&mut self.ecs, dt);
         crate::ecs::systems::movement::movement(&mut self.ecs, dt);
+        crate::ecs::systems::physics::physics(&mut self.ecs, &self.world, dt);
         crate::ecs::systems::world_stream::world_stream(
             &self.ecs,
             &mut self.world,

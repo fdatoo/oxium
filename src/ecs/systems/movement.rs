@@ -62,14 +62,34 @@ pub fn movement(ecs: &mut GameEcs, dt: f32) {
             pos.0 += vel.0 * dt;
         }
         MovementMode::Walk => {
-            // M2 stub: behave like flight but on the XZ-plane forward only,
-            // so the milestone is fun to fly + walk-toggle test even before
-            // M6 lands the real walking simulation.
-            let wish = right * input.wishdir.x
-                + forward_horiz * input.wishdir.z
-                + Vec3::Y * input.wishdir.y;
-            vel.0 = wish.normalize_or_zero() * speed;
-            pos.0 += vel.0 * dt;
+            // Quake-style ground accel + friction.
+            //
+            // The horizontal velocity moves toward `wish × speed`, gated
+            // by a per-frame acceleration cap so changes feel responsive
+            // without snapping. Y velocity is *not* touched here — the
+            // physics system applies gravity and the swept-AABB collision.
+            use crate::physics::sweep::GRAVITY;
+
+            let wish = right * input.wishdir.x + forward_horiz * input.wishdir.z;
+            let target = wish.normalize_or_zero() * speed;
+            let horiz = Vec3::new(vel.0.x, 0.0, vel.0.z);
+            // Move toward target by at most `accel * dt` units per frame.
+            let accel: f32 = 60.0;
+            let mut new_horiz = horiz + (target - horiz).clamp_length_max(accel * dt);
+            // Friction when no horizontal input is given (the "stop tap"
+            // is what makes WASD release feel snappy).
+            if input.wishdir.x.abs() < 1e-4 && input.wishdir.z.abs() < 1e-4 {
+                let friction: f32 = 12.0;
+                new_horiz *= (1.0 - friction * dt).max(0.0);
+            }
+            vel.0.x = new_horiz.x;
+            vel.0.z = new_horiz.z;
+
+            // Gravity. Jumping is detected by the physics system once
+            // `grounded` is known (otherwise we'd double-jump in air).
+            vel.0.y += GRAVITY * dt;
+            // Integration is handled by `physics::physics` — don't `pos.0
+            // += vel.0 * dt` here, or the player will move twice.
         }
     }
 }

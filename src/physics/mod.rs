@@ -4,3 +4,5 @@
 //! velocity axis independently — rather than resolving all three at once —
 //! avoids the classic corner-snag bug where a player coming at a wall on a
 //! diagonal trajectory gets stuck on an inside edge.
+
+pub mod sweep;

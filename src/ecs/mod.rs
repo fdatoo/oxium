@@ -42,8 +42,11 @@ impl GameEcs {
                 half: glam::Vec3::new(0.3, 0.9, 0.3),
             },
             Movement {
-                mode: MovementMode::Fly,
-                speed: 10.0,
+                // Walk by default — the player experiences gravity + the
+                // 5 m/s walk speed from M6 onward. F toggles to flight
+                // for free movement when exploring.
+                mode: MovementMode::Walk,
+                speed: 5.0,
                 jump_v: 8.4,
             },
             Camera {

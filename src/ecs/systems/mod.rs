@@ -8,6 +8,7 @@
 pub mod input;
 pub mod mesh_upload;
 pub mod movement;
+pub mod physics;
 pub mod render;
 pub mod time_of_day;
 pub mod world_stream;
