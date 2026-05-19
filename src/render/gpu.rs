@@ -176,12 +176,12 @@ pub fn make_depth_texture(
 }
 
 /// Reflection texture downsample factor relative to the main
-/// framebuffer. Half-resolution gives bilinear filtering across
+/// framebuffer. 1/3 resolution gives bilinear filtering across
 /// fewer pixels, which naturally smooths the reflection content
-/// and damps the per-frame "sliding" that appears as the camera
-/// moves through a sharp full-res reflection. Cuts reflection-pass
-/// fragment + fill cost to 1/4 too.
-pub const REFLECTION_SCALE: u32 = 2;
+/// to a believable "real water" softness — a perfectly sharp
+/// reflection reads as a mirror, not a water surface. Cuts
+/// reflection-pass fragment + fill cost by 9× too.
+pub const REFLECTION_SCALE: u32 = 3;
 
 /// Allocate the sampleable single-sample colour texture the water
 /// shader reads to sample the planar reflection. The reflection pass

@@ -379,12 +379,26 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // without making the reflected content slosh around.
     let distort = surface_n.xz * 0.012;
     let refl_uv = clamp(base_uv + distort, vec2<f32>(0.0), vec2<f32>(1.0));
-    let sky_reflection = textureSampleLevel(
-        reflection_tex,
-        reflection_sampler,
-        refl_uv,
-        0.0,
-    ).rgb;
+    // Five-tap box blur on the reflection sample. Real water
+    // reflections aren't crisp mirrors — there are fine surface
+    // capillary waves that scatter light, plus the water column
+    // itself diffuses what passes through it. The blur happens
+    // *here* (not in the source render) so the cheaper low-res
+    // reflection pass stays cheap, and we still control the
+    // perceived softness from one place.
+    let refl_size = vec2<f32>(textureDimensions(reflection_tex));
+    let texel = vec2<f32>(1.0) / refl_size;
+    let blur = 1.2; // radius in source-texels — 1.2 ≈ ~3.6 dest pixels
+    var refl_sum = textureSampleLevel(reflection_tex, reflection_sampler, refl_uv, 0.0).rgb;
+    refl_sum = refl_sum + textureSampleLevel(reflection_tex, reflection_sampler,
+        clamp(refl_uv + vec2<f32>( texel.x * blur,  0.0), vec2<f32>(0.0), vec2<f32>(1.0)), 0.0).rgb;
+    refl_sum = refl_sum + textureSampleLevel(reflection_tex, reflection_sampler,
+        clamp(refl_uv + vec2<f32>(-texel.x * blur,  0.0), vec2<f32>(0.0), vec2<f32>(1.0)), 0.0).rgb;
+    refl_sum = refl_sum + textureSampleLevel(reflection_tex, reflection_sampler,
+        clamp(refl_uv + vec2<f32>( 0.0,  texel.y * blur), vec2<f32>(0.0), vec2<f32>(1.0)), 0.0).rgb;
+    refl_sum = refl_sum + textureSampleLevel(reflection_tex, reflection_sampler,
+        clamp(refl_uv + vec2<f32>( 0.0, -texel.y * blur), vec2<f32>(0.0), vec2<f32>(1.0)), 0.0).rgb;
+    let sky_reflection = refl_sum * 0.2;
     // Fallback for the still-handy horizon colour (used by the
     // distance-fog blend below).
     let horizon = vec3<f32>(0.65, 0.80, 1.00) * camera.sun_intensity
