@@ -488,11 +488,13 @@ impl AppState {
 }
 
 impl Drop for AppState {
-    /// On a clean shutdown, push any modified chunks out to disk and
-    /// politely tell the persistence thread to exit. We send a
-    /// `Shutdown` *after* the saves so the channel drains in order.
+    /// On a clean shutdown, push any modified chunks out to disk. The
+    /// `persistence` field's own `Drop` (see
+    /// [`crate::persistence::thread::Persistence`]) sends `Shutdown`
+    /// and joins the I/O thread once this method returns and field
+    /// teardown reaches it — that join is what guarantees every
+    /// queued save reaches disk before the process exits.
     fn drop(&mut self) {
         self.flush_modified();
-        let _ = self.persistence.req_tx.send(PersistRequest::Shutdown);
     }
 }
