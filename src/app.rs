@@ -59,6 +59,7 @@ pub struct AppState {
     /// `AUTOSAVE_INTERVAL` seconds.
     pub last_autosave: Instant,
     pub input_buf: InputBuf,
+    pub input_state: crate::ecs::systems::input::InputState,
     /// Wall-clock time of the previous `step`; used to derive `dt`.
     pub last_tick: Instant,
     /// Real time when AppState was created — used to compute `time`
@@ -217,6 +218,7 @@ impl AppState {
             saves_dir,
             last_autosave: Instant::now(),
             input_buf: InputBuf::default(),
+            input_state: crate::ecs::systems::input::InputState::default(),
             last_tick: Instant::now(),
             start_time: Instant::now(),
             fps_meter: FpsMeter::new(60),
@@ -255,7 +257,9 @@ impl AppState {
             let prof = self.profiler.as_ref();
 
             time(prof, "input", || {
-                crate::ecs::systems::input::apply_input(&mut self.ecs, &self.input_buf)
+                crate::ecs::systems::input::apply_input(
+                    &mut self.ecs, &self.input_buf, &mut self.input_state,
+                )
             });
             time(prof, "time_of_day", || {
                 crate::ecs::systems::time_of_day::advance(&mut self.ecs, dt)

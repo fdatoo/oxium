@@ -14,6 +14,7 @@
 use crate::ecs::components::{Camera, MovementMode, Movement, PlayerInput};
 use crate::ecs::GameEcs;
 use glam::Vec3;
+use std::time::{Duration, Instant};
 use winit::event::{ElementState, MouseButton};
 use winit::keyboard::KeyCode;
 
@@ -37,6 +38,9 @@ pub struct InputBuf {
     /// Signed scroll-wheel delta this frame (positive = wheel up =
     /// previous hotbar slot, matching Minecraft's convention).
     pub scroll_delta: f32,
+    /// Continuous held state (set on press, cleared on release).
+    pub lmb_down: bool,
+    pub rmb_down: bool,
 }
 
 impl InputBuf {
@@ -83,18 +87,29 @@ impl InputBuf {
         }
     }
 
-    /// Record a mouse-button press. We only care about pressed transitions
-    /// for v0 (no held-down detection needed yet).
+    /// Record a mouse-button press or release. Edge flags are set on press;
+    /// continuous held state is set on press and cleared on release.
     pub fn on_mouse_button(&mut self, btn: MouseButton, state: ElementState) {
-        if state == ElementState::Pressed {
-            match btn {
-                MouseButton::Left => self.lmb_pressed = true,
-                MouseButton::Right => self.rmb_pressed = true,
-                _ => {}
-            }
+        match (btn, state) {
+            (MouseButton::Left,  ElementState::Pressed)  => { self.lmb_pressed = true; self.lmb_down = true;  }
+            (MouseButton::Left,  ElementState::Released) => { self.lmb_down = false; }
+            (MouseButton::Right, ElementState::Pressed)  => { self.rmb_pressed = true; self.rmb_down = true;  }
+            (MouseButton::Right, ElementState::Released) => { self.rmb_down = false; }
+            _ => {}
         }
     }
 }
+
+/// Cross-frame input bookkeeping. Held in `AppState` so it survives
+/// across `apply_input` calls.
+#[derive(Debug, Default)]
+pub struct InputState {
+    pub last_break_at:       Option<Instant>,
+    pub last_place_at:       Option<Instant>,
+    pub last_space_press_at: Option<Instant>,
+}
+
+const ACTION_REPEAT: Duration = Duration::from_millis(200);
 
 /// Mouse sensitivity factor — radians per pixel of raw mouse delta. Picked
 /// for a typical 1000 DPI mouse; would graduate to a setting in v0.2.
@@ -102,7 +117,7 @@ const MOUSE_SENS: f32 = 0.0025;
 
 /// Drive the player's `Camera`, `PlayerInput`, and `Movement` components
 /// from the current [`InputBuf`].
-pub fn apply_input(ecs: &mut GameEcs, buf: &InputBuf) {
+pub fn apply_input(ecs: &mut GameEcs, buf: &InputBuf, state: &mut InputState) {
     // Single composite query: cheap with hecs's archetype storage.
     let mut q = ecs
         .world
@@ -150,8 +165,21 @@ pub fn apply_input(ecs: &mut GameEcs, buf: &InputBuf) {
         };
     }
 
-    input.break_ = buf.lmb_pressed;
-    input.place = buf.rmb_pressed;
+    // Hold-to-act with `ACTION_REPEAT` cooldown. Press fires immediately
+    // (edge flag), then while still held, fires once every cooldown.
+    // Release resets the timer so the *next* tap fires immediately too.
+    let now = Instant::now();
+    let break_fired = buf.lmb_pressed
+        || (buf.lmb_down && state.last_break_at.map_or(true, |t| now - t >= ACTION_REPEAT));
+    input.break_ = break_fired;
+    if break_fired { state.last_break_at = Some(now); }
+    if !buf.lmb_down { state.last_break_at = None; }
+
+    let place_fired = buf.rmb_pressed
+        || (buf.rmb_down && state.last_place_at.map_or(true, |t| now - t >= ACTION_REPEAT));
+    input.place = place_fired;
+    if place_fired { state.last_place_at = Some(now); }
+    if !buf.rmb_down { state.last_place_at = None; }
 
     // Number-row 1..8 + scroll wheel cycle the currently-selected
     // block. Held in its own query so the borrow above can release
@@ -214,5 +242,66 @@ pub fn apply_input(ecs: &mut GameEcs, buf: &InputBuf) {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ecs::GameEcs;
+    use glam::Vec3;
+    use std::thread::sleep;
+
+    fn ecs() -> GameEcs { GameEcs::new(Vec3::new(0.0, 64.0, 0.0)) }
+
+    fn read_pi(e: &mut GameEcs) -> crate::ecs::components::PlayerInput {
+        let mut q = e.world.query_one::<&crate::ecs::components::PlayerInput>(e.player).unwrap();
+        *q.get().unwrap()
+    }
+
+    #[test]
+    fn lmb_press_fires_break_once() {
+        let mut e = ecs();
+        let mut buf = InputBuf::default();
+        let mut st = InputState::default();
+        buf.lmb_pressed = true;
+        buf.lmb_down = true;
+        apply_input(&mut e, &buf, &mut st);
+        let pi = read_pi(&mut e);
+        assert!(pi.break_);
+    }
+
+    #[test]
+    fn lmb_held_repeats_after_cooldown() {
+        let mut e = ecs();
+        let mut buf = InputBuf::default();
+        let mut st = InputState::default();
+        buf.lmb_pressed = true;
+        buf.lmb_down = true;
+        apply_input(&mut e, &buf, &mut st);
+        // Clear edge flag (frame boundary), hold stays.
+        buf.lmb_pressed = false;
+        apply_input(&mut e, &buf, &mut st);
+        let pi = read_pi(&mut e);
+        assert!(!pi.break_, "should not fire within cooldown window");
+        // Wait past cooldown.
+        sleep(ACTION_REPEAT + Duration::from_millis(20));
+        apply_input(&mut e, &buf, &mut st);
+        let pi = read_pi(&mut e);
+        assert!(pi.break_, "should fire after cooldown");
+    }
+
+    #[test]
+    fn lmb_release_resets_timer() {
+        let mut e = ecs();
+        let mut buf = InputBuf::default();
+        let mut st = InputState::default();
+        buf.lmb_pressed = true;
+        buf.lmb_down = true;
+        apply_input(&mut e, &buf, &mut st);
+        buf.lmb_pressed = false;
+        buf.lmb_down = false;
+        apply_input(&mut e, &buf, &mut st);
+        assert!(st.last_break_at.is_none());
     }
 }
