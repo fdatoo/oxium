@@ -318,20 +318,19 @@ impl ApplicationHandler for App {
 
                 if state.ui.cursor_state_changed {
                     state.ui.cursor_state_changed = false;
+                    // Snap to centre on every Playing⇄!Playing transition,
+                    // BEFORE changing grab mode. On resume this becomes
+                    // the position CursorGrabMode::Locked pins to; on
+                    // pause this is the position the cursor will appear
+                    // at when we show it. Doing the warp first also
+                    // avoids macOS quirks where set_cursor_position on a
+                    // freshly-grabbed window sometimes silently no-ops.
+                    let (w, h) = state.renderer.framebuffer_size();
+                    let _ = state.window.set_cursor_position(
+                        winit::dpi::PhysicalPosition::new(w as f64 / 2.0, h as f64 / 2.0),
+                    );
                     if state.ui.is_playing() {
                         grab_cursor(&state.window);
-                        // Snap the cursor to centre on the resume frame
-                        // only. Re-centering every frame breaks mouse-
-                        // look on macOS because winit's
-                        // DeviceEvent::MouseMotion is computed from
-                        // cursor deltas; a warp's negative delta
-                        // cancels the player's motion. CursorGrabMode::
-                        // Locked (set by grab_cursor) is the actual
-                        // pinning mechanism during gameplay.
-                        let (w, h) = state.renderer.framebuffer_size();
-                        let _ = state.window.set_cursor_position(
-                            winit::dpi::PhysicalPosition::new(w as f64 / 2.0, h as f64 / 2.0),
-                        );
                     } else {
                         release_cursor(&state.window);
                     }
