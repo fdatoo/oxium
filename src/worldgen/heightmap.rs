@@ -107,18 +107,37 @@ impl HeightmapNoise {
         gx.max(gz)
     }
 
-    /// True if any of the ±4-block stencil samples around `(wx, wz)`
+    /// True if any of a wider stencil's samples around `(wx, wz)`
     /// dips below sea level. Used by the subsurface block selector
     /// to extend the dirt cap of coastal columns down to sea level
     /// so their water-facing sides don't reveal the underlying
     /// stone bedrock.
+    ///
+    /// Samples 8 directions at distances of 8 and 20 blocks so we
+    /// catch columns whose water is up to ~20 blocks away — wide
+    /// enough for low coastal hills but narrow enough that inland
+    /// mountains far from any shoreline still get the normal
+    /// thin-dirt + stone subsurface (no giant dirt walls on
+    /// mountain sides).
     pub fn is_coastal(&self, seed: u64, wx: f32, wz: f32) -> bool {
-        let step = 4.0;
         let sea = SEA_LEVEL as f32;
-        self.h_pre(seed, wx + step, wz) < sea
-            || self.h_pre(seed, wx - step, wz) < sea
-            || self.h_pre(seed, wx, wz + step) < sea
-            || self.h_pre(seed, wx, wz - step) < sea
+        for step in [8.0_f32, 20.0] {
+            for (dx, dz) in [
+                (step, 0.0),
+                (-step, 0.0),
+                (0.0, step),
+                (0.0, -step),
+                (step * 0.71, step * 0.71),
+                (-step * 0.71, step * 0.71),
+                (step * 0.71, -step * 0.71),
+                (-step * 0.71, -step * 0.71),
+            ] {
+                if self.h_pre(seed, wx + dx, wz + dz) < sea {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// True if the column is steep enough to expose bare rock.

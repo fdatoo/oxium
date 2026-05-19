@@ -259,6 +259,7 @@ impl Generator {
         let h_pre = self.heightmap.h_pre(self.seed, wx as f32, wz as f32);
         // Slope-driven cliff classification on the *unmodified* h_pre.
         let is_cliff = self.heightmap.is_cliff(self.seed, wx as f32, wz as f32);
+        let is_coastal = self.heightmap.is_coastal(self.seed, wx as f32, wz as f32);
 
         // Valley carve over the chunk's pre-fetched 3 × 3 region
         // neighbourhood. Slightly larger ring than strictly correct
@@ -293,6 +294,7 @@ impl Generator {
         ColumnData {
             height,
             is_cliff,
+            is_coastal,
             desertness,
             biome,
             lake_rim,
@@ -449,22 +451,23 @@ impl Generator {
                                 }
                             }
                         } else {
-                            // Subsurface block selection. Cliff faces
-                            // skip the dirt cap (sheer rock). Every
-                            // other column's dirt cap extends down
-                            // to one block below sea level (with a
-                            // 3-block floor for sub-sea-level
-                            // columns), so any block above the
-                            // waterline reads as soil rather than
-                            // bedrock. Stone takes over below that
-                            // line. Visible result: hills and
-                            // mountain *flanks* look like earth
-                            // banks; cliffs still show stone where
-                            // the slope rule has fired.
+                            // Subsurface block selection:
+                            //
+                            //   * Cliff column → 0 dirt cap (sheer
+                            //     stone all the way down).
+                            //   * Coastal column → dirt cap extends
+                            //     down toward sea level (capped at
+                            //     24) so the water-facing side
+                            //     reads as earth bank.
+                            //   * Inland column → standard 3-block
+                            //     dirt cap, then stone — the
+                            //     natural mountain-side look.
                             let dirt_cap = if col.is_cliff {
                                 0
+                            } else if col.is_coastal {
+                                (height - SEA_LEVEL + 2).max(3).min(24)
                             } else {
-                                (height - SEA_LEVEL + 2).max(3)
+                                3
                             };
                             if depth <= dirt_cap {
                                 Block::Dirt
@@ -655,6 +658,14 @@ struct ColumnData {
     /// elevation gate means low / coastal terrain never cliff-
     /// exposes, regardless of slope.
     is_cliff: bool,
+    /// True if any sample within the wider coastal stencil
+    /// (8 directions, distances 8 and 20 blocks) is below sea
+    /// level. Drives the subsurface block selector: coastal
+    /// columns extend their dirt cap down toward sea level so
+    /// their water-facing sides read as earth banks. Inland
+    /// columns get the standard 3-block dirt cap → stone face,
+    /// which is the natural mountain-side look.
+    is_coastal: bool,
     /// Jitter-perturbed `desertness` noise value. Used by the
     /// sand/grass transition band: inside the band on the grass side
     /// of the desert boundary, the surface block is rolled
@@ -973,11 +984,12 @@ mod tests {
     /// future runs catch unintentional behavioural drift.
     #[test]
     fn golden_seed42_chunk_0_2_0() {
-        // Hash re-baselined for the dirt-cap fix: subsurface dirt
-        // now extends down toward sea level for every column (up to
-        // 24 blocks) so coastal hills don't expose stone above the
-        // waterline as a continuous gray wall.
-        const GOLDEN_42_002: u64 = 0xD918_5955_6748_ACBB;
+        // Hash re-baselined: dirt cap is now coastal-gated (width-
+        // 20 stencil). Inland mountains get the standard 3-block
+        // dirt cap → stone (no more giant dirt-strip mountain
+        // sides); only columns near actual coastlines extend their
+        // dirt cap down to sea level.
+        const GOLDEN_42_002: u64 = 0x5A35_1A50_9B25_A5CC;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);
