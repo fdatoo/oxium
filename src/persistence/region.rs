@@ -1,12 +1,12 @@
-//! Minecraft-style "region" file format: one file per 16 × 16 grid of
-//! chunks.
+//! Minecraft-style "region" file format: one file per 16 × 16 × 16 grid
+//! of chunks.
 //!
 //! Layout (4 KB sector granularity):
 //!
 //! ```text
-//! +-------- header (4 KB) --------+-----------------------------+
-//! | 256 × u32 LE slot entries     | chunk blobs (zstd(bincode)) |
-//! +-------------------------------+-----------------------------+
+//! +-------- header (16 KB, 4 sectors) --------+-----------------------+
+//! | 4096 × u32 LE slot entries                | chunk blobs (zstd)    |
+//! +-------------------------------------------+-----------------------+
 //! ```
 //!
 //! Each slot entry packs `(offset_in_sectors: u24, len_sectors: u8)`. A
@@ -14,9 +14,14 @@
 //! Newly-saved chunks always go to EOF (we accept fragmentation in v0;
 //! a future `compact` subcommand will rewrite).
 //!
-//! Slot index is `(local_cx << 4) | local_cz`, taking the `rem_euclid 16`
-//! of the chunk coordinate. Y is *not* a region-axis: every chunk in a
-//! given XZ column lives in the same region file.
+//! Slot index is `(local_cx, local_cy, local_cz)` packed as
+//! `(lx * 256 + ly * 16 + lz)` where each component is the
+//! `rem_euclid 16` of the chunk coordinate — Y is a real region axis,
+//! so chunks stacked vertically (e.g., the surface chunk and the cave
+//! chunk underneath) live in distinct slots instead of overwriting
+//! each other. (v0 of this file had only the XZ axes in slot_index;
+//! that bug meant any block break poisoned every Y-chunk in the same
+//! XZ column on next load.)
 
 use crate::voxel::chunk::PalettedChunk;
 use crate::voxel::coords::ChunkCoord;
@@ -26,8 +31,15 @@ use std::path::PathBuf;
 
 /// On-disk sector size. Slot offsets and lengths are measured in sectors.
 const SECTOR: u64 = 4096;
-/// Edge length of the region grid, in chunks.
+/// Edge length of the region grid, in chunks. The region cube is
+/// `REGION_DIM ³ = 4096` slots, which is exactly the size of the
+/// 16 KB (= 4 sector) header.
 const REGION_DIM: i32 = 16;
+/// Header size in bytes: 4096 slots × 4-byte entries.
+const HEADER_BYTES: u64 = (REGION_DIM as u64).pow(3) * 4;
+/// Header size in sectors. Always >= 1, so the first chunk blob lives
+/// at `HEADER_SECTORS * SECTOR`.
+const HEADER_SECTORS: u64 = HEADER_BYTES.div_ceil(SECTOR);
 
 /// Errors that can arise while reading/writing a region file.
 #[derive(Debug, thiserror::Error)]
@@ -43,22 +55,26 @@ pub enum RegionError {
 }
 
 /// Path of the region file that owns `chunk_coord`. The file is in
-/// `saves_dir/regions/r.{rx}.{rz}.bin`; `rx`/`rz` are the region grid
-/// coordinates derived by floor-dividing the chunk coord by 16.
+/// `saves_dir/regions/r.{rx}.{ry}.{rz}.bin`; each component is the
+/// region grid coordinate derived by floor-dividing the chunk coord
+/// by [`REGION_DIM`]. A region file therefore covers exactly one
+/// `16×16×16` cube of chunks (4096 slots).
 pub fn region_path(saves_dir: &std::path::Path, chunk_coord: ChunkCoord) -> PathBuf {
     let rx = chunk_coord.0.x.div_euclid(REGION_DIM);
+    let ry = chunk_coord.0.y.div_euclid(REGION_DIM);
     let rz = chunk_coord.0.z.div_euclid(REGION_DIM);
     saves_dir
         .join("regions")
-        .join(format!("r.{rx}.{rz}.bin"))
+        .join(format!("r.{rx}.{ry}.{rz}.bin"))
 }
 
-/// Slot index for a given chunk coord (0..=255). Y is unused — see module
-/// docs.
+/// Slot index for a given chunk coord (0..4096). Includes Y so two
+/// chunks at the same XZ but different Y don't collide on disk.
 fn slot_index(chunk_coord: ChunkCoord) -> usize {
     let lx = chunk_coord.0.x.rem_euclid(REGION_DIM) as usize;
+    let ly = chunk_coord.0.y.rem_euclid(REGION_DIM) as usize;
     let lz = chunk_coord.0.z.rem_euclid(REGION_DIM) as usize;
-    (lx << 4) | lz
+    (lx * (REGION_DIM as usize) + ly) * (REGION_DIM as usize) + lz
 }
 
 /// Encode → compress → append at EOF → update the header. Creates the
@@ -78,15 +94,17 @@ pub fn write_chunk(
         .truncate(false)
         .open(path)?;
 
-    // Ensure the file is at least one sector long so the header exists.
+    // Ensure the file is at least one full header long so reads/writes
+    // don't truncate the slot table.
+    let header_total = HEADER_SECTORS * SECTOR;
     let len = f.metadata()?.len();
-    if len < SECTOR {
-        f.set_len(SECTOR)?;
+    if len < header_total {
+        f.set_len(header_total)?;
     }
 
     // Pull the current header. A brand-new file reads zeros, which means
     // every slot is "empty" — correct.
-    let mut header = [0u8; SECTOR as usize];
+    let mut header = vec![0u8; header_total as usize];
     f.seek(SeekFrom::Start(0))?;
     let _ = f.read(&mut header)?;
 
@@ -101,8 +119,11 @@ pub fn write_chunk(
     let needed_sectors = (with_prefix_len as u64).div_ceil(SECTOR).max(1);
 
     // Always append to EOF (v0 accepts fragmentation — a `compact`
-    // subcommand can rewrite the file later).
-    let end_sector = f.metadata()?.len().div_ceil(SECTOR).max(1);
+    // subcommand can rewrite the file later). Floor-divide here so the
+    // first blob lands just after the header, not stranded a sector
+    // beyond it.
+    let cur_end = f.metadata()?.len();
+    let end_sector = (cur_end / SECTOR).max(HEADER_SECTORS);
     f.seek(SeekFrom::Start(end_sector * SECTOR))?;
     f.write_all(&(blob.len() as u32).to_le_bytes())?;
     f.write_all(&blob)?;
@@ -129,7 +150,7 @@ pub fn read_chunk(
     coord: ChunkCoord,
 ) -> Result<PalettedChunk, RegionError> {
     let mut f = File::open(path)?;
-    let mut header = [0u8; SECTOR as usize];
+    let mut header = vec![0u8; (HEADER_SECTORS * SECTOR) as usize];
     f.read_exact(&mut header)?;
 
     let slot = slot_index(coord);
@@ -195,5 +216,40 @@ mod tests {
         let coord = ChunkCoord(IVec3::new(0, 0, 0));
         let r = read_chunk(&path, coord);
         assert!(matches!(r, Err(RegionError::NotPresent)));
+    }
+
+    /// Regression guard for the v0 region-format bug: two chunks at the
+    /// same XZ but different Y *must* live in distinct slots. Without
+    /// the Y axis in `slot_index`, writing the upper chunk overwrote
+    /// the lower one, and on reload every Y chunk in that XZ column
+    /// read back identical data — producing the "floating trees in
+    /// midair" artefact across an entire vertical column.
+    #[test]
+    fn distinct_y_does_not_collide() {
+        let td = tempfile::tempdir().unwrap();
+        let coord_low = ChunkCoord(IVec3::new(3, 0, 5));
+        let coord_high = ChunkCoord(IVec3::new(3, 4, 5));
+
+        // Both coords map to the same XZ region file (rx = 0, rz = 0),
+        // but different Y means a *different* region file too now.
+        // Validate that anyway, then exercise the slot index by putting
+        // two coords in the *same* region file with different ly.
+        let path_low = region_path(td.path(), coord_low);
+        let path_high = region_path(td.path(), coord_high);
+        // Coords 0..15 share ry=0; 4 vs 0 are both ly < 16 so same file.
+        assert_eq!(path_low, path_high);
+
+        let mut low = DenseChunk::empty();
+        low.set(LocalPos(UVec3::new(1, 1, 1)), Block::Stone);
+        let mut high = DenseChunk::empty();
+        high.set(LocalPos(UVec3::new(1, 1, 1)), Block::Wood);
+
+        write_chunk(&path_low, coord_low, &PalettedChunk::compress(&low)).unwrap();
+        write_chunk(&path_high, coord_high, &PalettedChunk::compress(&high)).unwrap();
+
+        let read_low = read_chunk(&path_low, coord_low).unwrap().decompress();
+        let read_high = read_chunk(&path_high, coord_high).unwrap().decompress();
+        assert_eq!(read_low.blocks[LocalPos(UVec3::new(1, 1, 1)).to_index()], Block::Stone);
+        assert_eq!(read_high.blocks[LocalPos(UVec3::new(1, 1, 1)).to_index()], Block::Wood);
     }
 }
