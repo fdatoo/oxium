@@ -7,14 +7,14 @@
 // to `sun_dir`.
 
 struct CameraUniform {
-    view_proj:     mat4x4<f32>,
-    sun_dir:       vec4<f32>,
-    sun_intensity: f32,
-    time:          f32,
-    _pad1:         f32,
-    _pad2:         f32,
-    eye:           vec4<f32>,
-    inv_view_proj: mat4x4<f32>,
+    view_proj:         mat4x4<f32>,
+    sun_dir:           vec4<f32>,
+    sun_intensity:     f32,
+    time:              f32,
+    underwater_factor: f32,
+    _pad2:             f32,
+    eye:               vec4<f32>,
+    inv_view_proj:     mat4x4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 
@@ -84,18 +84,39 @@ fn value_noise(p: vec2<f32>) -> f32 {
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 
-// 4-octave fractional Brownian motion. Gives the fluffy-edge cloud
-// silhouettes you want without needing real Perlin/Simplex code.
+// 5-octave fractional Brownian motion. One more octave than the previous
+// 4-octave version — the extra detail puts visible wisps on the edges of
+// the larger cloud masses so the silhouettes don't look airbrushed.
+// Gives the fluffy-edge cloud silhouettes you want without needing real
+// Perlin/Simplex code.
 fn fbm(p: vec2<f32>) -> f32 {
     var sum: f32 = 0.0;
     var amp: f32 = 0.5;
     var pp = p;
-    for (var i: i32 = 0; i < 4; i++) {
+    for (var i: i32 = 0; i < 5; i++) {
         sum += amp * value_noise(pp);
         pp = pp * 2.03;       // slightly non-integer scale → less grid lattice
         amp = amp * 0.5;
     }
     return sum;
+}
+
+// ACES filmic tonemap. Same constants as the opaque/water shaders so
+// the sky compresses highlights consistently with the rest of the
+// scene — without this the sun disc clipped to pure white and lost
+// any warm core.
+fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+fn underwater_tint(rgb: vec3<f32>, factor: f32) -> vec3<f32> {
+    let water_blue = vec3<f32>(0.10, 0.30, 0.45);
+    return mix(rgb, water_blue, factor * 0.65);
 }
 
 @fragment
@@ -143,27 +164,40 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             // span tens of blocks each rather than fragmenting into
             // pixel-sized speckle.
             let n = fbm((cloud_pos + wind) * 0.025);
-            // Threshold range positioned just above fbm's mean (~0.47)
-            // so roughly 30-50 % of sky is cloud, the rest is clear.
-            cloud_density = smoothstep(0.50, 0.70, n);
+            // Sharper threshold window (tighter 0.48..0.62) gives the
+            // clouds more defined silhouettes — the previous wider
+            // band faded them into uniform haze.
+            cloud_density = smoothstep(0.48, 0.62, n);
             let horiz_falloff = smoothstep(0.02, 0.20, ray_dir.y);
             cloud_density = cloud_density * horiz_falloff;
             let sun_lean = max(0.0, dot(ray_dir, normalize(camera.sun_dir.xyz)));
-            let lit_white = mix(vec3<f32>(0.78, 0.80, 0.85),
-                                vec3<f32>(1.00, 0.97, 0.90),
-                                pow(sun_lean, 1.5));
+            // Brighter sun-side highlight + slightly darker shaded
+            // side so clouds have visible volume rather than reading
+            // as a flat overlay.
+            let shaded   = vec3<f32>(0.68, 0.71, 0.78);
+            let lit_warm = vec3<f32>(1.05, 1.00, 0.92);
+            let lit_white = mix(shaded, lit_warm, pow(sun_lean, 1.2));
             cloud_color = lit_white * (0.4 + 0.6 * i);
         }
     }
 
-    // Sun disc (sharper) + warm halo (wider). Sun is occluded by
-    // clouds in front of it.
+    // Sun composition: a bright central disc + warm halo + a wide
+    // soft bloom that scatters light across half the sky on a clear
+    // day. The bloom is what makes the area around the sun feel
+    // "glowing" rather than just "yellow circle on blue gradient".
+    //
+    // - `disc`: tiny crisp solid sun (cos_sun ≈ 1).
+    // - `halo`: warm corona of a few degrees.
+    // - `bloom`: very wide low-intensity falloff (cos_sun > 0.5),
+    //   simulates atmospheric scatter around a bright source.
     let sun_axis = normalize(camera.sun_dir.xyz);
     let cos_sun = dot(ray_dir, sun_axis);
-    let disc = smoothstep(0.9994, 0.9998, cos_sun);
-    let halo = smoothstep(0.97, 1.0, cos_sun);
-    let sun_glow = (disc * vec3<f32>(1.00, 0.96, 0.88)
-                 +  halo * vec3<f32>(1.00, 0.80, 0.50) * 0.35)
+    let disc  = smoothstep(0.9994, 0.9998, cos_sun);
+    let halo  = smoothstep(0.97,  1.0,    cos_sun);
+    let bloom = pow(max(cos_sun, 0.0), 8.0);
+    let sun_glow = (disc  * vec3<f32>(1.20, 1.10, 0.95)
+                 +  halo  * vec3<f32>(1.00, 0.80, 0.50) * 0.35
+                 +  bloom * vec3<f32>(1.00, 0.85, 0.60) * 0.25)
                  * smoothstep(0.0, 0.15, i);
     let sun_visible = sun_glow * (1.0 - cloud_density * 0.85);
 
@@ -192,5 +226,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Mix the cloud over the sky-lit background; add the celestial
     // bodies + stars on top.
     sky_lit = mix(sky_lit, cloud_color, cloud_density);
-    return vec4<f32>(sky_lit + sun_visible + moon_visible + stars_rgb, 1.0);
+    var rgb = sky_lit + sun_visible + moon_visible + stars_rgb;
+    // Tonemap (compresses the sun-bloom highlights so they don't clip
+    // to flat white) then apply the underwater grade so the sky tints
+    // the same way as the rest of the scene when the camera dunks.
+    rgb = aces_tonemap(rgb);
+    rgb = underwater_tint(rgb, camera.underwater_factor);
+    return vec4<f32>(rgb, 1.0);
 }
