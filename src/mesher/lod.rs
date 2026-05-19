@@ -247,14 +247,46 @@ pub fn mesh_lod(
                 light,
             );
 
-            // Side skirts: one per cardinal direction where the
-            // neighbour column is shorter (or doesn't exist).
+            // Bottom cap (NegY) at the chunk floor. Without this the
+            // LOD chunk has only a top surface + side skirts, so a
+            // player looking up at it from deep underground (or down
+            // at it through a hole in the world) sees right through
+            // — the LOD top quad reads as a floating slab. The cap
+            // closes the volume into a solid extrusion of the
+            // heightfield: a single NegY quad per column, at the
+            // chunk's local y=0, coloured + textured with the bulk
+            // block so the underside matches the side skirts.
             let bulk_color = pack_color(reg.info(bulk).color);
             let bulk_tile = reg
                 .info(bulk)
                 .tile_for_face(Face::PosX)
                 .map(|t| t.index())
                 .unwrap_or(crate::mesher::UNTEXTURED_TILE);
+            let bulk_bottom_tile = reg
+                .info(bulk)
+                .tile_for_face(Face::NegY)
+                .map(|t| t.index())
+                .unwrap_or(crate::mesher::UNTEXTURED_TILE);
+            emit_quad(
+                &mut mesh,
+                Face::NegY,
+                // CCW from below (looking up in +Y direction). Same
+                // winding `naive::face_corners` uses for NegY so the
+                // back-face cull keeps the cap visible from outside.
+                [
+                    [x0, 0, z0],
+                    [x0 + f, 0, z0],
+                    [x0 + f, 0, z0 + f],
+                    [x0, 0, z0 + f],
+                ],
+                // NegY UV mapping mirrors the greedy mesher's
+                // PosY/NegY table — `(0,0)/(f,0)/(f,f)/(0,f)` aligns
+                // texture U with world X and V with world Z.
+                [(0, 0), (f, 0), (f, f), (0, f)],
+                bulk_bottom_tile,
+                bulk_color,
+                light,
+            );
             for &(dx, dz, face) in &[
                 (1i32, 0i32, Face::PosX),
                 (-1, 0, Face::NegX),
@@ -389,20 +421,22 @@ mod tests {
     }
 
     #[test]
-    fn mesh_lod_solid_chunk_emits_top_plus_skirts() {
-        // Solid chunk at LOD2: 8×8 LOD columns. Each one emits one top
-        // quad. Edge columns also emit skirt quads dropping to y=0
-        // because their out-of-bounds neighbour is treated as "no
-        // column". Interior columns emit only the top.
+    fn mesh_lod_solid_chunk_emits_top_skirts_and_bottom() {
+        // Solid chunk at LOD2: 8×8 LOD columns. Per column:
+        //   - 1 top quad (PosY)
+        //   - 1 bottom cap (NegY) — closes the column's volume from
+        //     below so a player underground doesn't see through it
+        //   - 0..2 skirt quads (one per cardinal neighbour that's
+        //     shorter; out-of-bounds is treated as "no column")
+        // 64 columns × 2 closing quads = 128 (top + bottom).
+        // Edge skirts: 4 corner × 2 + 24 edge × 1 = 32.
+        // Total: 160 quads = 640 verts.
         let d = DenseChunk::new_filled(Block::Stone);
         let r = BlockRegistry::new();
         let lod = downsample(&d, 4);
         let mesh = mesh_lod(&lod, 4, &r);
 
-        // 8×8 = 64 columns × 1 top quad = 64 top quads.
-        // Edge columns: 4 corner × 2 skirts + 24 edge × 1 skirt = 32 skirt quads.
-        // Total: 96 quads = 384 verts.
-        let expected_quads = 64 + 32;
+        let expected_quads = 64 + 64 + 32;
         assert_eq!(mesh.vertices.len(), expected_quads * 4);
         assert_eq!(mesh.indices.len(), expected_quads * 6);
     }

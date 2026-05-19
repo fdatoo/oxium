@@ -191,7 +191,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let fog_start = 96.0;
     let fog_end   = 360.0;
     let fog_t = clamp((dist - fog_start) / (fog_end - fog_start), 0.0, 1.0);
-    let fog_col = horizon_color(camera.sun_intensity);
+    // Fog colour: a per-fragment blend between the horizon sky tint
+    // and a near-black "cave" colour. Picked by `in.v_light` — the
+    // fragment's own sky+block light — so deep-cave fragments fade
+    // into darkness instead of the bright sky horizon. Without this
+    // the sky-fog leaks into underground views and distant stone
+    // walls read as washed-out white. The min(0.05) floor avoids
+    // pure black, leaving a hint of colour to silhouette the bulk.
+    let sky_fog = horizon_color(camera.sun_intensity);
+    let cave_fog = vec3<f32>(0.02, 0.02, 0.03);
+    let fog_col = mix(cave_fog, sky_fog, max(in.v_light, 0.05));
     let out_rgb = mix(lit_rgb, fog_col, fog_t);
 
     return vec4<f32>(out_rgb, base_a);
