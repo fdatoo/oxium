@@ -18,11 +18,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::window::Window;
 
-use crate::ecs::systems::input::InputBuf;
 use crate::ecs::GameEcs;
+use crate::ecs::systems::input::InputBuf;
 use crate::jobs::Jobs;
-use crate::persistence::thread::{PersistRequest, Persistence};
 use crate::persistence::SaveIndex;
+use crate::persistence::thread::{PersistRequest, Persistence};
 use crate::render::Renderer;
 use crate::voxel::block::BlockRegistry;
 use crate::voxel::world::{ChunkSlot, World};
@@ -187,7 +187,23 @@ impl AppState {
         uncapped: bool,
         profile_path: Option<&std::path::Path>,
     ) -> Self {
-        let seed = 42;
+        // One save folder per binary; could grow into a world-picker UI.
+        let saves_dir = PathBuf::from("saves/default");
+        std::fs::create_dir_all(&saves_dir).ok();
+
+        // Load or initialise the world manifest. New worlds get a
+        // freshly-rolled seed; legacy saves get the synthetic
+        // legacy fallback so already-explored terrain stays in its
+        // original frame.
+        let manifest = crate::persistence::manifest::load_or_init(&saves_dir)
+            .expect("failed to load or initialise world manifest");
+        log::info!(
+            "world manifest loaded: seed={} version={}",
+            manifest.seed,
+            manifest.worldgen_version
+        );
+        let seed = manifest.seed;
+
         let present_mode = if uncapped {
             wgpu::PresentMode::Immediate
         } else {
@@ -200,9 +216,6 @@ impl AppState {
         let generator = Arc::new(Generator::new(seed));
         let registry = Arc::new(BlockRegistry::new());
 
-        // One save folder per binary; could grow into a world-picker UI.
-        let saves_dir = PathBuf::from("saves/default");
-        std::fs::create_dir_all(&saves_dir).ok();
         let persistence = Persistence::spawn(saves_dir.clone());
 
         Self {
@@ -258,7 +271,9 @@ impl AppState {
 
             time(prof, "input", || {
                 crate::ecs::systems::input::apply_input(
-                    &mut self.ecs, &self.input_buf, &mut self.input_state,
+                    &mut self.ecs,
+                    &self.input_buf,
+                    &mut self.input_state,
                 )
             });
             time(prof, "time_of_day", || {
@@ -295,12 +310,7 @@ impl AppState {
             // shows up in the next step's `WMS` reading instead.
             let edit_start = std::time::Instant::now();
             for c in &dirty_chunks {
-                Self::apply_edit_inline(
-                    &mut self.world,
-                    &mut self.renderer,
-                    &self.registry,
-                    *c,
-                );
+                Self::apply_edit_inline(&mut self.world, &mut self.renderer, &self.registry, *c);
             }
             if let Some(p) = self.profiler.as_ref() {
                 p.record(
@@ -425,7 +435,8 @@ impl AppState {
                 self.world.get_block(block_pos),
                 Some(crate::voxel::block::Block::Water)
             );
-            self.renderer.set_underwater(if in_water { 1.0 } else { 0.0 });
+            self.renderer
+                .set_underwater(if in_water { 1.0 } else { 0.0 });
         }
         time(prof, "render", || {
             if let Err(e) = crate::ecs::systems::render::render(
@@ -486,8 +497,7 @@ impl AppState {
         // Decompress chunk + neighbours up-front so the greedy mesher
         // and the BFS (if relighting) can share them.
         let mut dense = data_arc.decompress();
-        let neighbor_arcs =
-            crate::ecs::systems::mesh_upload::gather_neighbors(world, coord);
+        let neighbor_arcs = crate::ecs::systems::mesh_upload::gather_neighbors(world, coord);
         let neighbor_dense: Vec<Option<DenseChunk>> = neighbor_arcs
             .iter()
             .map(|opt| opt.as_ref().map(|p| p.decompress()))
@@ -518,11 +528,7 @@ impl AppState {
         // for this chunk gets discarded on completion.
         if needs_light {
             let new_data = std::sync::Arc::new(PalettedChunk::compress(&dense));
-            if let Some(ChunkSlot::Stored {
-                data: cur,
-                meta,
-            }) = world.chunks.get_mut(&coord)
-            {
+            if let Some(ChunkSlot::Stored { data: cur, meta }) = world.chunks.get_mut(&coord) {
                 *cur = new_data;
                 meta.dirty = ChunkDirty {
                     mesh: true,
@@ -552,7 +558,11 @@ impl AppState {
             UiEffect::Save => self.flush_modified(),
             UiEffect::Teleport(p) => {
                 use crate::ecs::components::{Position, Velocity};
-                if let Ok(mut q) = self.ecs.world.query_one::<(&mut Position, &mut Velocity)>(self.ecs.player) {
+                if let Ok(mut q) = self
+                    .ecs
+                    .world
+                    .query_one::<(&mut Position, &mut Velocity)>(self.ecs.player)
+                {
                     if let Some((pos, vel)) = q.get() {
                         pos.0 = p;
                         vel.0 = glam::Vec3::ZERO;
@@ -561,7 +571,9 @@ impl AppState {
             }
             UiEffect::SetTime(t) => {
                 let t = t.clamp(0.0, 1.0);
-                for (_, tod) in self.ecs.world
+                for (_, tod) in self
+                    .ecs
+                    .world
                     .query::<&mut crate::ecs::components::TimeOfDay>()
                     .iter()
                 {
@@ -574,7 +586,7 @@ impl AppState {
                     if let Some(mv) = q.get() {
                         mv.mode = match mv.mode {
                             MovementMode::Walk => MovementMode::Fly,
-                            MovementMode::Fly  => MovementMode::Walk,
+                            MovementMode::Fly => MovementMode::Walk,
                         };
                     }
                 }

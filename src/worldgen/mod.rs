@@ -43,6 +43,26 @@ use crate::voxel::coords::{ChunkCoord, LocalPos, CHUNK_DIM_U};
 use glam::UVec3;
 use noise::{Fbm, MultiFractal, NoiseFn, Simplex};
 
+// New worldgen modules. Most of them are PR 1 stubs that get filled
+// in by later PRs (PR 2 implements heightmap, PR 3 hydrology, PR 4
+// caves, PR 5 biomes/surface/trees). Two are fully implemented now
+// because everything else builds on them:
+//
+//   * `tuning`  — central constants table.
+//   * `plates`  — Voronoi plate decomposition.
+//   * `hash`    — deterministic mixer used by plates / trees / caves.
+//   * `region`  — LRU caches + region data structs.
+pub mod caves;
+pub mod climate;
+pub mod hash;
+pub mod heightmap;
+pub mod hydrology;
+pub mod plates;
+pub mod region;
+pub mod surface;
+pub mod trees;
+pub mod tuning;
+
 /// World-space Y at which the sea surface sits. Blocks above this with no
 /// solid above turn into air; air below this turns into water.
 pub const SEA_LEVEL: i32 = 62;
@@ -181,6 +201,15 @@ pub struct Generator {
     /// so a tunnel occasionally widens into a chamber.
     cavern_noise: Fbm<Simplex>,
     seed: u64,
+    /// LRU cache of pre-built fine regions. PR 1: present but not yet
+    /// consumed by `fill_chunk`; PRs 2–4 fill in the per-region
+    /// computation that chunk fill consults.
+    #[allow(dead_code)]
+    fine_cache: region::FineCache,
+    /// LRU cache of pre-built macro regions for the trunk-river pass.
+    /// PR 1: present but unused; PR 3 fills it.
+    #[allow(dead_code)]
+    macro_cache: region::MacroCache,
 }
 
 impl Generator {
@@ -273,6 +302,8 @@ impl Generator {
             tunnel_b,
             cavern_noise,
             seed,
+            fine_cache: region::fresh_fine_cache(),
+            macro_cache: region::fresh_macro_cache(),
         }
     }
 

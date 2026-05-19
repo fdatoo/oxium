@@ -33,6 +33,14 @@ toml = "0.8"
 # Bit packing
 bitvec = "1"
 
+# LRU cache for the worldgen region cache.
+lru = "0.12"
+
+# Random seed generation at world creation. Only used for the
+# `WorldManifest::seed` field — the generator itself is fully
+# seed-deterministic and does not invoke rand at runtime.
+rand = "0.8"
+
 # Errors / logging
 anyhow = "1"
 thiserror = "1"

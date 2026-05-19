@@ -6,8 +6,10 @@
 //! single chunk located in two seeks. Chunk payload is `bincode(PalettedChunk)`
 //! then `zstd`-compressed.
 
+pub mod manifest;
 pub mod region;
 pub mod save_index;
 pub mod thread;
 
+pub use manifest::{WorldManifest, CURRENT_VERSION as MANIFEST_CURRENT_VERSION};
 pub use save_index::SaveIndex;
