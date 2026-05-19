@@ -6,6 +6,7 @@
 //! that the *renderer* can grow more pipelines/passes without ECS systems
 //! turning into render-state ceremonies.
 
+use crate::app::PerfSnapshot;
 use crate::ecs::components::{Camera, CursorTarget, Position, Selected};
 use crate::ecs::GameEcs;
 use crate::render::hud::{build_hud, HOTBAR_BLOCKS};
@@ -21,6 +22,7 @@ pub fn render(
     registry: &BlockRegistry,
     fps: f32,
     time: f32,
+    perf: &PerfSnapshot,
 ) -> Result<(), wgpu::SurfaceError> {
     let target = ecs
         .world
@@ -48,7 +50,7 @@ pub fn render(
         .unwrap_or(0);
 
     let (sw, sh) = renderer.framebuffer_size();
-    let hud = build_hud((sw, sh), fps, eye, selected_slot, registry);
+    let hud = build_hud((sw, sh), fps, eye, selected_slot, registry, perf);
 
     renderer.render(
         eye,

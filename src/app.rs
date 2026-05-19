@@ -57,6 +57,25 @@ pub struct AppState {
     pub start_time: Instant,
     /// Rolling FPS meter — sampled every `step` and read by the HUD.
     pub fps_meter: FpsMeter,
+    /// Latest perf snapshot — what the HUD prints below FPS/XYZ. Set
+    /// once per step from the bookkeeping numbers the other systems
+    /// hand back (relight queue size, GPU-uploaded mesh count, etc).
+    pub perf: PerfSnapshot,
+}
+
+/// Per-frame counters shown in the debug HUD. Cheap to keep around;
+/// the values are recomputed every step from whatever the systems
+/// hand back, so there's no stale-data hazard.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PerfSnapshot {
+    /// Chunks currently flagged `dirty.light` and waiting for the
+    /// relight pump. Non-zero means lighting is still converging — a
+    /// number that holds steady (instead of trending toward zero) is
+    /// the smoking gun for a cascade that doesn't terminate.
+    pub light_queue: usize,
+    /// LOD0 mesh slots currently held by the renderer. Useful as a
+    /// proxy for "is the world fully streamed in yet."
+    pub chunks_rendered: usize,
 }
 
 /// How often the autosave system flushes modified chunks to disk.
@@ -139,6 +158,7 @@ impl AppState {
             last_tick: Instant::now(),
             start_time: Instant::now(),
             fps_meter: FpsMeter::new(60),
+            perf: PerfSnapshot::default(),
         }
     }
 
@@ -207,11 +227,15 @@ impl AppState {
         // loaded/generated chunks. Each frame queues a bounded number
         // of relight jobs; over a few seconds the world converges to
         // a fixed lighting state with correct cross-chunk propagation.
-        crate::ecs::systems::mesh_upload::relight_pump(
+        // The return value is the *total* (not just dispatched) count
+        // of `dirty.light` chunks, which the HUD prints so we can see
+        // whether the cascade is terminating.
+        self.perf.light_queue = crate::ecs::systems::mesh_upload::relight_pump(
             &mut self.world,
             &self.jobs,
             &self.registry,
         );
+        self.perf.chunks_rendered = self.renderer.chunk_mesh_count();
         crate::ecs::systems::world_stream::world_unload(
             &self.ecs,
             &mut self.world,
@@ -235,6 +259,7 @@ impl AppState {
             &self.registry,
             fps,
             time,
+            &self.perf,
         ) {
             log::warn!("render error: {e:?}");
         }

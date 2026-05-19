@@ -128,11 +128,15 @@ pub fn drain_jobs(
                         meta.dirty.light = true;
                     }
                 }
+                // Only re-mesh LOD0 — distant LOD chunks sample one
+                // light value per column (from the topmost air cell),
+                // which almost never changes meaningfully when a deep
+                // chunk re-lights itself. Re-meshing LOD1/LOD2 on
+                // every relight was ~3× the mesh work per cascade
+                // step with no visible benefit at distance.
                 let data_arc = Arc::new(data);
                 let neighbors = gather_neighbors(world, coord);
-                jobs.spawn_mesh_lod0(coord, data_arc.clone(), neighbors, registry.clone());
-                jobs.spawn_mesh_lod(coord, 1, data_arc.clone(), registry.clone());
-                jobs.spawn_mesh_lod(coord, 2, data_arc, registry.clone());
+                jobs.spawn_mesh_lod0(coord, data_arc, neighbors, registry.clone());
             }
         }
     }
@@ -153,19 +157,23 @@ pub fn relight_pump(
     world: &mut World,
     jobs: &Jobs,
     registry: &Arc<BlockRegistry>,
-) {
-    const RELIGHT_BUDGET: usize = 4;
+) -> usize {
+    const RELIGHT_BUDGET: usize = 16;
     // Snapshot the candidate coords up-front so we don't hold an
     // immutable borrow over the loop body's `get_mut` + `spawn`.
-    let candidates: Vec<ChunkCoord> = world
-        .chunks
-        .iter()
-        .filter_map(|(c, slot)| match slot {
-            ChunkSlot::Stored { meta, .. } if meta.dirty.light => Some(*c),
-            _ => None,
-        })
-        .take(RELIGHT_BUDGET)
-        .collect();
+    // Also count the *total* dirty set for the HUD perf readout.
+    let mut total_dirty = 0usize;
+    let mut candidates: Vec<ChunkCoord> = Vec::new();
+    for (c, slot) in world.chunks.iter() {
+        if let ChunkSlot::Stored { meta, .. } = slot
+            && meta.dirty.light
+        {
+            total_dirty += 1;
+            if candidates.len() < RELIGHT_BUDGET {
+                candidates.push(*c);
+            }
+        }
+    }
     for c in candidates {
         // Clone the chunk data + gather neighbour snapshots, then
         // clear the flag so the next frame's scan doesn't re-queue
@@ -178,6 +186,7 @@ pub fn relight_pump(
         let neighbors = gather_neighbors(world, c);
         jobs.spawn_relight(c, data_arc, neighbors, registry.clone());
     }
+    return total_dirty;
 }
 
 /// The six face-adjacent chunk coordinates, in [`crate::mesher::Face`]

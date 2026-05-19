@@ -352,12 +352,14 @@ fn capture_offscreen(
     // (the real metric requires multiple live frames; the screenshot
     // path runs in one shot after warmup).
     let registry = crate::voxel::block::BlockRegistry::new();
+    let perf = crate::app::PerfSnapshot::default();
     let hud = crate::render::hud::build_hud(
         (width, height),
         60.0,
         eye,
         0,
         &registry,
+        &perf,
     );
     renderer.render_to_view(
         &view,

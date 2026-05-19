@@ -147,6 +147,7 @@ impl HudFrame {
     }
 }
 
+use crate::app::PerfSnapshot;
 use crate::voxel::block::{Block, BlockRegistry};
 
 /// Blocks shown on the hotbar, in slot order. Slot 9 (index 8) is
@@ -177,6 +178,7 @@ pub fn build_hud(
     eye: glam::Vec3,
     selected_slot: usize,
     registry: &BlockRegistry,
+    perf: &PerfSnapshot,
 ) -> HudFrame {
     let mut frame = HudFrame::new();
     let (sw, sh) = (screen_px.0 as f32, screen_px.1 as f32);
@@ -193,15 +195,24 @@ pub fn build_hud(
 
     let fps_str = format!("FPS: {:.0}", fps);
     let xyz_str = format!("XYZ: {:.1}  {:.1}  {:.1}", eye.x, eye.y, eye.z);
-    // A semi-transparent dark backdrop behind the two text lines so
+    // Perf line: live counters for the debug HUD. "LQ" = light
+    // queue depth (chunks waiting for the relight pump); steady
+    // non-zero means cascade isn't terminating. "CH" = chunk meshes
+    // currently held by the renderer.
+    let perf_str = format!("LQ: {}  CH: {}", perf.light_queue, perf.chunks_rendered);
+    // A semi-transparent dark backdrop behind the three text lines so
     // the cyan/white glyphs stay readable against bright skies and
     // grass without us having to author per-character outlines. The
-    // panel width tracks the wider of the two strings; the icons
-    // batch draws first in the pass, so this lands beneath the text.
+    // panel width tracks the widest string; the icons batch draws
+    // first in the pass, so this lands beneath the text.
     let glyph_w = crate::render::font::CELL_W as f32 * text_scale;
-    let panel_w = fps_str.chars().count().max(xyz_str.chars().count()) as f32 * glyph_w
-        + inner_pad * 2.0;
-    let panel_h = line_h * 2.0 + inner_pad * 2.0;
+    let widest = fps_str
+        .chars()
+        .count()
+        .max(xyz_str.chars().count())
+        .max(perf_str.chars().count());
+    let panel_w = widest as f32 * glyph_w + inner_pad * 2.0;
+    let panel_h = line_h * 3.0 + inner_pad * 2.0;
     frame.icons.push_rect(
         pad - inner_pad,
         pad - inner_pad,
@@ -210,8 +221,10 @@ pub fn build_hud(
         [0, 0, 0, 0xA0],
     );
 
+    let yellow = [255, 220, 120, 255];
     frame.push_text(pad, pad, &fps_str, text_scale, white);
     frame.push_text(pad, pad + line_h, &xyz_str, text_scale, cyan);
+    frame.push_text(pad, pad + line_h * 2.0, &perf_str, text_scale, yellow);
 
     // ── Bottom-centre hotbar ────────────────────────────────────────
     // 9 cells, 48 px each, 4 px gap. Centred horizontally; 16 px
