@@ -11,7 +11,7 @@
 //!   the drain prevents a window where a chunk's mesh job completes for a
 //!   chunk we just evicted.
 
-use crate::ecs::components::Position;
+use crate::ecs::components::{Camera, Position};
 use crate::ecs::GameEcs;
 use crate::jobs::Jobs;
 use crate::persistence::region::region_path;
@@ -61,12 +61,33 @@ pub fn world_stream(
     persistence: &Persistence,
     saves_dir: &Path,
 ) {
-    let mut q = ecs.world.query_one::<&Position>(ecs.player).unwrap();
-    let pos = q.get().unwrap();
+    let mut q = ecs.world.query_one::<(&Position, &Camera)>(ecs.player).unwrap();
+    let (pos, cam) = q.get().unwrap();
     let pc = player_chunk(pos.0);
 
-    // Build the candidate list then sort by Manhattan distance so the
-    // closest gen-jobs go to the rayon pool first.
+    // Forward unit vector in world space, derived the same way the
+    // renderer's view matrix does. Used to weight the chunk-load
+    // sort: chunks the player is looking at load before chunks
+    // behind them.
+    let (sy, cy) = cam.yaw.sin_cos();
+    let (sp, cp) = cam.pitch.sin_cos();
+    let forward = glam::Vec3::new(cy * cp, sp, sy * cp);
+
+    // Build the candidate list. Sort key combines:
+    //   - Euclidean (squared) distance from the player — radial, so
+    //     each load-distance ring fills in symmetrically instead of
+    //     biasing toward whichever corner happened to come first in
+    //     the iteration order (the old Manhattan-distance sort had
+    //     thousands of ties that Rust's stable sort broke by
+    //     `dy → dz → dx` iteration — one specific world-coord
+    //     quadrant always loaded last).
+    //   - A forward-direction bonus: subtract a chunk's projection
+    //     along the forward vector from its priority key, so a
+    //     chunk in the look direction outranks an equidistant
+    //     chunk behind. The 0.5 weight is gentle enough not to
+    //     leave behind-chunks too far adrift but strong enough
+    //     that initial spawn sees the front of the world fill
+    //     first.
     let mut targets: Vec<ChunkCoord> = Vec::new();
     for dy in -VERTICAL_RADIUS..=VERTICAL_RADIUS {
         for dz in -RENDER_RADIUS..=RENDER_RADIUS {
@@ -76,8 +97,12 @@ pub fn world_stream(
         }
     }
     targets.sort_by_key(|c| {
-        let d = c.0 - pc.0;
-        d.x.abs() + d.y.abs() + d.z.abs()
+        let d = (c.0 - pc.0).as_vec3();
+        let dist_sq = d.length_squared();
+        let forward_bonus = forward.dot(d).max(0.0) * 0.5;
+        // Multiply by 1000 to keep ~3 decimal digits of precision
+        // when collapsing to integer for the sort key.
+        ((dist_sq - forward_bonus) * 1000.0) as i64
     });
 
     for c in targets {
