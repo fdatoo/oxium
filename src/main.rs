@@ -254,11 +254,10 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => state.renderer.resize(size.width, size.height),
             WindowEvent::KeyboardInput { event: ke, .. } => {
                 if let PhysicalKey::Code(code) = ke.physical_key {
-                    state.input_buf.on_key(code, ke.state);
-                    if code == winit::keyboard::KeyCode::Escape
-                        && ke.state == ElementState::Pressed
-                    {
-                        event_loop.exit();
+                    let text = ke.text.as_ref().map(|s| s.as_str());
+                    let disp = state.ui.on_key(code, ke.state, text);
+                    if disp == crate::ui::input::InputDisposition::Forward {
+                        state.input_buf.on_key(code, ke.state);
                     }
                 }
             }
@@ -267,7 +266,13 @@ impl ApplicationHandler for App {
                 state: bstate,
                 ..
             } => {
-                state.input_buf.on_mouse_button(button, bstate);
+                if state.ui.is_playing() {
+                    state.input_buf.on_mouse_button(button, bstate);
+                } else {
+                    // The UI consumes mouse clicks while paused/chatting
+                    // (menu activation is wired in Task 9).
+                    state.ui.on_mouse_button(button, bstate);
+                }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 // winit reports either lines (mouse wheel) or pixels
@@ -279,7 +284,10 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
                 };
-                state.input_buf.on_scroll(lines);
+                if state.ui.is_playing() {
+                    state.input_buf.on_scroll(lines);
+                }
+                // Discarded while paused/chatting — chat doesn't scroll yet.
             }
             WindowEvent::RedrawRequested => {
                 state.step();

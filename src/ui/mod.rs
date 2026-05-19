@@ -136,6 +136,14 @@ impl Ui {
     /// Handle non-toggle keys while the UI is open. Stub — later tasks
     /// fill in menu nav and chat editing.
     fn consume_in_ui(&mut self, _code: KeyCode, _text: Option<&str>) {}
+
+    pub fn on_mouse_button(&mut self, _button: winit::event::MouseButton, _state: ElementState) {
+        // Wired in Task 9.
+    }
+
+    pub fn on_mouse_move(&mut self, _x: f32, _y: f32, _screen_px: (u32, u32)) {
+        // Wired in Task 9.
+    }
 }
 
 #[cfg(test)]
