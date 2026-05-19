@@ -64,6 +64,13 @@ pub struct Camera {
     /// Translation from [`Position`] (feet) to the eye/lens. Player default
     /// is `(0, 1.6, 0)` — eye-height in blocks.
     pub eye_offset: Vec3,
+    /// Cumulative walk-bob phase in radians. Advances by horizontal
+    /// speed × dt while the player is grounded and moving on foot; held
+    /// otherwise. The render system reads this and adds a small
+    /// `sin(phase)` offset to the eye position for a head-bob feel —
+    /// interaction raycasts read the un-bobbed eye so block targeting
+    /// stays rock-solid.
+    pub bob_phase: f32,
 }
 
 /// Inputs gathered from the player this frame. Mostly direct copies of

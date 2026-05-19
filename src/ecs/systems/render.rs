@@ -39,7 +39,22 @@ pub fn render(
         .query_one::<(&Position, &Camera, &Selected)>(ecs.player)
         .unwrap();
     let (pos, cam, selected) = q.get().unwrap();
-    let eye = pos.0 + cam.eye_offset;
+    // Walk-bob: small `sin(phase)` oscillation on top of the eye
+    // offset. The Y term has 2× the rate (a full head-bob cycle
+    // = two foot-falls); the X term wobbles at the foot-fall rate
+    // to give the slight side-to-side sway real walking has.
+    // Amplitudes kept small — anything taller would feel motion-
+    // sicky in first-person. Phase advances only when the player is
+    // walking on the ground (see movement.rs), so flight + idle +
+    // mid-air all stay perfectly steady.
+    let bob_y = (cam.bob_phase * 2.0).sin() * 0.07;
+    let bob_x = cam.bob_phase.sin() * 0.05;
+    // Apply the bob in world space along the camera's right axis so
+    // the side-sway always reads as "side-to-side" regardless of
+    // facing.
+    let (sy, cy) = cam.yaw.sin_cos();
+    let right = glam::Vec3::new(-sy, 0.0, cy);
+    let eye = pos.0 + cam.eye_offset + right * bob_x + glam::Vec3::Y * bob_y;
     let (sun_dir, intensity) = crate::ecs::systems::time_of_day::sun_state(ecs);
 
     // Selected slot = index in the hotbar of the player's current

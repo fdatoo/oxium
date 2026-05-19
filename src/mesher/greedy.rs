@@ -171,7 +171,69 @@ pub fn mesh_greedy(
     for face in Face::all() {
         greedy_one_face(face, chunk, &block_at, &light_at, reg, &mut mesh);
     }
+    emit_water_tops_per_block(chunk, &block_at, &light_at, reg, &mut mesh);
     mesh
+}
+
+/// Walk every (x, y, z) and emit a 1-block-per-quad top face for any
+/// water column whose neighbour above is non-opaque (the same
+/// visibility rule the greedy pass would use). Per-block resolution
+/// is what enables the water shader's vertex wave displacement to
+/// produce visible undulation without creating chunk-boundary
+/// hairlines.
+fn emit_water_tops_per_block<F, L>(
+    chunk: &DenseChunk,
+    block_at: &F,
+    light_at: &L,
+    reg: &BlockRegistry,
+    mesh: &mut ChunkMesh,
+) where
+    F: Fn(i32, i32, i32) -> Option<Block>,
+    L: Fn(i32, i32, i32) -> u8,
+{
+    for y in 0..D as i32 {
+        for z in 0..D as i32 {
+            for x in 0..D as i32 {
+                let here = chunk.get(LocalPos(UVec3::new(x as u32, y as u32, z as u32)));
+                if here != Block::Water {
+                    continue;
+                }
+                let above = block_at(x, y + 1, z).unwrap_or(Block::Air);
+                // Only emit the topmost water block's top face — the
+                // ones below have water above them and would be
+                // visibility-culled by the greedy rule anyway.
+                if reg.info(above).opaque || above == Block::Water {
+                    continue;
+                }
+                let ao = corner_ao_at(Face::PosY, |dx, dy, dz| {
+                    block_at(x + dx, y + dy, z + dz)
+                });
+                let light = light_at(x, y + 1, z);
+                let cell = Cell {
+                    block: Block::Water as u16,
+                    ao,
+                    light,
+                };
+                // Emit a 1×1 quad at slice y, anchored at (u=x, v=z)
+                // in PosY's axis mapping. Reuses the existing
+                // greedy-quad emitter for vertex packing consistency.
+                emit_greedy_quad(
+                    mesh,
+                    Face::PosY,
+                    y as u8, // slice == y for PosY
+                    x as u8, // u_axis == X for PosY
+                    z as u8, // v_axis == Z for PosY
+                    1,
+                    1,
+                    1, // n_axis = Y
+                    0, // u_axis = X
+                    2, // v_axis = Z
+                    cell,
+                    reg,
+                );
+            }
+        }
+    }
 }
 
 /// Sweep slices for one face direction and emit greedy-merged quads.
@@ -215,9 +277,21 @@ fn greedy_one_face<F, L>(
                 // A face is visible when the block is not air, its neighbour
                 // is not opaque, and either we're an opaque block (so the
                 // face shows colour) or the two blocks differ visually.
-                let visible = here != Block::Air
+                let mut visible = here != Block::Air
                     && !reg.info(neighbor).opaque
                     && (reg.info(here).opaque || here != neighbor);
+
+                // Water TOP faces are excluded from greedy merging —
+                // they get re-emitted as 1-block quads by
+                // `emit_water_tops_per_block` after this pass. The
+                // vertex shader displaces each quad's corners by the
+                // wave height, so at 1-block resolution the
+                // chunk-boundary slope discontinuities that plagued
+                // single-greedy-quad water surfaces become *part of
+                // the wave detail* instead of looking like seams.
+                if face == Face::PosY && here == Block::Water {
+                    visible = false;
+                }
 
                 let cell = if visible {
                     let ao = corner_ao_at(face, |dx, dy, dz| {

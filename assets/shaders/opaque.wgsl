@@ -36,7 +36,11 @@ struct CameraUniform {
     // toward a deep blue tint scaled by this; it's the cheap
     // alternative to a dedicated underwater post-process pass.
     underwater_factor: f32,
-    _pad2:             f32,
+    // Minimum world-space Y a fragment may have before being kept.
+    // The main pass sets this to a deep negative (no clip); the
+    // reflection pass sets it to SEA_LEVEL so anything under water
+    // is dropped from the reflected image.
+    clip_y_min:        f32,
     eye:               vec4<f32>,
     inv_view_proj:     mat4x4<f32>,
 };
@@ -116,13 +120,83 @@ fn vs_main(in: VsIn) -> VsOut {
 // Compute the colour of the sky at the horizon, used as the fog tint.
 // Mirrors the gradient logic in sky.wgsl so distant terrain dissolves
 // seamlessly into the sky's horizon band rather than into a flat grey.
+//
+// Sun-warming pulls the horizon toward a soft peach when the sun is
+// near the horizon (sin(angle) low → sun_intensity low but non-zero),
+// the same atmospheric-scattering cue that makes real sunsets read
+// as orange before turning into the dusk band proper.
 fn horizon_color(sun_intensity: f32) -> vec3<f32> {
     let day   = vec3<f32>(0.65, 0.80, 1.00);   // brighter than zenith
     let dusk  = vec3<f32>(0.98, 0.62, 0.35);
     let night = vec3<f32>(0.05, 0.06, 0.12);
+    let peach = vec3<f32>(1.00, 0.78, 0.62);
     let i = sun_intensity;
     let dusk_w = smoothstep(0.0, 0.25, i) - smoothstep(0.25, 0.7, i);
-    return mix(night, day, smoothstep(0.0, 0.7, i)) + dusk * dusk_w * 0.6;
+    // Peach warming peaks at low-but-positive intensity — same
+    // window as `dusk_w` but a touch wider so the warm cast extends
+    // into early morning / late afternoon, not just sunset proper.
+    let peach_w = smoothstep(0.05, 0.30, i) - smoothstep(0.30, 0.80, i);
+    return mix(night, day, smoothstep(0.0, 0.7, i))
+        + dusk * dusk_w * 0.6
+        + peach * peach_w * 0.25;
+}
+
+// Per-block colour-variation noise. Adds a small low-frequency tint
+// modulation to surfaces so large flat areas don't read as uniform
+// painted patches. Driven by world-space block coordinates (the
+// `floor` snaps the perturbation to block boundaries so neighbouring
+// blocks shift independently, mimicking how a stack of distinct
+// physical blocks would look). Output is centered on 0 so it can be
+// added directly to a tint without changing average brightness.
+fn block_variation_hash(p: vec3<f32>) -> f32 {
+    let q = floor(p);
+    var h = sin(dot(q, vec3<f32>(127.1, 311.7, 74.7))) * 43758.5453;
+    h = fract(h);
+    return (h - 0.5) * 2.0; // map [0,1) → [-1, 1)
+}
+
+// Smooth low-frequency value noise on world (x, z) — used to drive
+// biome-scale tint variation in `biome_tint_shift`. Output in [0, 1].
+fn biome_hash2(p: vec2<f32>) -> f32 {
+    let h = sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453;
+    return fract(h);
+}
+fn biome_noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = biome_hash2(i);
+    let b = biome_hash2(i + vec2<f32>(1.0, 0.0));
+    let c = biome_hash2(i + vec2<f32>(0.0, 1.0));
+    let d = biome_hash2(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// Continuous biome-scale tint shift. Computes a per-world-position
+// (humidity, temperature)-like signal from low-frequency noise — same
+// continuous structure the worldgen biome model has, just evaluated
+// here per fragment. Returns small `(r, g, b)` offsets to add to a
+// surface block's tint so grass / sand colour shifts smoothly across
+// climate zones instead of stepping at the discrete biome boundary.
+//
+// Lower-frequency than the per-block jitter so the variation is
+// "this whole valley is greener" rather than "this single block is
+// brighter" — biome-scale variation vs block-scale variation.
+fn biome_tint_shift(world_xz: vec2<f32>) -> vec3<f32> {
+    let h = biome_noise(world_xz * 0.0035);  // ~285 block period
+    let t = biome_noise(world_xz * 0.0035 + vec2<f32>(50.0, 50.0));
+    // h shifts the green/yellow axis (humidity proxy): wet=greener,
+    // dry=yellower. t shifts brightness slightly (temperature proxy).
+    // Magnitudes kept small (~10% / 5%) so the variation is "this
+    // patch reads as a different shade of green" rather than "the
+    // grass has gone weird colours".
+    let humidity_shift = (h - 0.5) * 0.10;
+    let temp_shift     = (t - 0.5) * 0.05;
+    return vec3<f32>(
+        -humidity_shift + temp_shift,
+         humidity_shift + temp_shift,
+        -humidity_shift * 0.4
+    );
 }
 
 // ACES filmic tone mapping — the cinematographer's go-to curve. Compresses
@@ -196,6 +270,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         discard;
     }
 
+    // Below-clip-plane cull. For the main pass `clip_y_min` is a
+    // deep negative (everything renders); for the reflection pass
+    // it's SEA_LEVEL, so anything underwater (which has no business
+    // appearing in the reflected image of the sky/upper world) gets
+    // dropped here.
+    if (in.v_world.y < camera.clip_y_min) {
+        discard;
+    }
+
     // ── Sample the atlas (or skip for untextured blocks). The tile
     // index is `flat`-interpolated so every fragment inside a quad
     // sees the same integer; rounding here is just defensive.
@@ -226,7 +309,27 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let ao = mix(0.45, 1.0, in.v_ao);
     let lit = max(0.05, in.v_light);
     let shade = ao * lit;
-    let lit_rgb = base_rgb * shade;
+    // Per-block brightness jitter: a small ±6% modulation keyed off
+    // the world-space block coordinate. Neighbouring blocks (whole
+    // integer steps in any axis) get a different jitter; cells
+    // *within* a block share the same value, so the variation reads
+    // as block-level natural variance rather than per-pixel noise.
+    let variation = 1.0 + block_variation_hash(in.v_world) * 0.06;
+    // Biome-scale tint shift: low-frequency continuous signal that
+    // smoothly varies the hue across hundreds of blocks — the
+    // shader-side approximation of "blend biome properties instead
+    // of biome IDs". Detected by atlas tile so the rule fires
+    // exclusively on grass-top and sand surfaces (not the same-tinted
+    // leaves, which would otherwise come along for the ride and look
+    // unnaturally pink/yellow).
+    //
+    // Tile indices must stay in lockstep with `voxel::block::Tile`:
+    //   2 = GrassTop, 4 = Sand
+    var lit_rgb = base_rgb * shade * variation;
+    let is_blendable = in.v_tile_index == 2u || in.v_tile_index == 4u;
+    if (is_blendable) {
+        lit_rgb = lit_rgb + biome_tint_shift(in.v_world.xz) * shade;
+    }
 
     // Distance fog: linear ramp between FOG_START and FOG_END.
     let dist = length(in.v_world - camera.eye.xyz);

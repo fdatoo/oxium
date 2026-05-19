@@ -35,7 +35,7 @@ struct CameraUniform {
     sun_intensity:     f32,
     time:              f32,
     underwater_factor: f32,
-    _pad2:             f32,
+    clip_y_min:        f32,
     eye:               vec4<f32>,
     inv_view_proj:     mat4x4<f32>,
 };
@@ -48,6 +48,20 @@ struct ChunkUniform {
 
 @group(2) @binding(0) var atlas_tex:     texture_2d<f32>;
 @group(2) @binding(1) var atlas_sampler: sampler;
+
+// Group 3: sampleable copy of the opaque pass's MSAA depth buffer.
+// `multisampled` because our world pass runs at 4× MSAA; we read
+// sample 0 via `textureLoad` — pixel-art-style shorelines don't
+// gain meaningfully from a 4-sample resolve.
+@group(3) @binding(0) var scene_depth: texture_depth_multisampled_2d;
+
+// Group 4: the planar-reflection texture. The reflection pass renders
+// the world from a virtual camera mirrored across the water plane;
+// here we sample the result at screen-space UVs distorted by the
+// wave normal so the reflected image actually wobbles with the
+// waves instead of reading as a perfect mirror.
+@group(4) @binding(0) var reflection_tex:     texture_2d<f32>;
+@group(4) @binding(1) var reflection_sampler: sampler;
 
 // Atlas geometry — keep in sync with `render::atlas`. The water
 // shader samples tile 8 (`water_still.png`) at scrolling UVs to put
@@ -69,6 +83,14 @@ struct VsOut {
     @location(2) v_light:           f32,
     @location(3) v_world:           vec3<f32>,
     @location(4) v_normal:          vec3<f32>,
+    /// Clip-space position of the vertex *before* wave displacement,
+    /// in `(x, y, w)` form. The fragment shader uses this for the
+    /// reflection lookup so the sampling UV stays locked to the
+    /// undisturbed water plane — using the displaced `clip_pos`
+    /// would let animated wave Y propagate into the screen-space
+    /// UV and shimmer the reflection content every frame even when
+    /// the camera was still.
+    @location(5) v_undisp_clip:     vec3<f32>,
 };
 
 // Multi-octave value-noise wave height. Driven by world-space xz and
@@ -92,13 +114,26 @@ struct VsOut {
 // interpolates between them, which reads as flat at any reasonable
 // camera distance.
 fn wave_height(world_xz: vec2<f32>, t: f32) -> f32 {
-    let big   = wnoise(world_xz * 0.05 + vec2<f32>( 0.30,  0.20) * t);
-    let med   = wnoise(world_xz * 0.13 + vec2<f32>(-0.18,  0.25) * t);
-    let small = wnoise(world_xz * 0.27 + vec2<f32>( 0.15, -0.22) * t);
-    // Each layer is centred around 0 (subtract 0.5) and weighted so
-    // the slow swell dominates and the fine chop is a small detail
-    // term on top.
-    return (big - 0.5) * 1.00 + (med - 0.5) * 0.55 + (small - 0.5) * 0.25;
+    // Three rotated plane-wave components. Using `sin(dot(p, dir))`
+    // produces axis-aligned crests only when `dir` is axis-aligned;
+    // we pick three non-orthogonal diagonal directions so the crest
+    // ridges run at three different angles and never line up into
+    // long parallel bands like the previous sin(x)·cos(z) version
+    // did.
+    //
+    // Frequencies tuned for visible per-block variation: 0.30
+    // gives a wavelength of ~21 blocks (long swell), 0.65 gives
+    // ~9.5 blocks (medium chop), 1.40 gives ~4.5 blocks (small
+    // surface detail). The per-block sampling step is well under
+    // Nyquist for all three so the waves don't alias into
+    // jagged stair-steps.
+    let dir1 = vec2<f32>( 0.71,  0.30);
+    let dir2 = vec2<f32>(-0.40,  0.85);
+    let dir3 = vec2<f32>( 0.55, -0.55);
+    let big   = sin(dot(world_xz, dir1) * 0.30 + t * 1.10);
+    let med   = sin(dot(world_xz, dir2) * 0.65 + t * 1.50);
+    let small = sin(dot(world_xz, dir3) * 1.40 + t * 2.20);
+    return big * 0.55 + med * 0.30 + small * 0.15;
 }
 
 // Numerical gradient of `wave_height` over `world_xz`. The two
@@ -158,6 +193,16 @@ fn fresnel_schlick(cos_theta: f32, f0: f32) -> f32 {
     return f0 + (1.0 - f0) * m5;
 }
 
+// Reconstruct linear-space view-distance from a normalised depth
+// value. wgpu uses `[0, 1]` depth (near = 0, far = 1) and our
+// camera matrix has `near = 0.05`, `far = 1000.0` — keep this in
+// sync with `view_proj` in `render::camera`.
+fn linear_depth(d: f32) -> f32 {
+    let near = 0.05;
+    let far  = 1000.0;
+    return near * far / (far - d * (far - near));
+}
+
 // ACES filmic tonemap — same curve as the opaque shader.
 fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
     let a = 2.51;
@@ -194,31 +239,48 @@ fn vs_main(in: VsIn) -> VsOut {
     // greedy-merged side quads would shear apart visibly. -Y bottom
     // faces also stay flat (you only see them while underwater
     // looking up, where the flat plane is fine).
-    // Note: NO vertex displacement.
-    //
-    // We used to push the +Y face up/down by `wave_height * 0.28`
-    // here. The wave function evaluates to the same value at any
-    // given (world x, world z), so adjacent chunks agreed on the
-    // *boundary vertex* Y exactly. But the surface inside each
-    // chunk is rasterised as TWO triangles meeting on a diagonal,
-    // and each triangle's plane equation interpolates Y inside the
-    // chunk from its three corners. The slope perpendicular to a
-    // shared chunk-boundary edge is determined by the chunk's
-    // *interior* corner, which differs between neighbours — so the
-    // surface has a *slope* discontinuity at every chunk seam,
-    // visible as a 1-2 pixel dark hairline under MSAA (the
-    // rasteriser leaves micro-coverage gaps at the crease because
-    // adjacent triangles in different draw calls don't share an
-    // edge equation).
-    //
-    // Real shader packs avoid this by faking waves entirely in the
-    // fragment shader's normal field (no vertex motion). We already
-    // compute `wave_normal` per-pixel below; that drives fresnel +
-    // sun reflection so the surface still reads as rippled. The
-    // geometry itself stays perfectly planar across chunks.
+    // Wave displacement on the +Y top face. Safe to re-enable now
+    // that the mesher emits water tops as 1-block-per-quad (see
+    // `emit_water_tops_per_block` in `mesher/greedy.rs`) — at
+    // 1-block resolution the slope discontinuities between adjacent
+    // quads are tiny and read as part of the wave detail rather
+    // than as chunk-boundary hairlines. The earlier 32-block
+    // greedy water quads produced visible MSAA seams when
+    // displaced; small quads don't.
+    // Vertex wave displacement on +Y top faces. Now safe because
+    // the mesher emits water tops as 1-block-per-quad
+    // (`emit_water_tops_per_block`) — the chunk-boundary slope
+    // discontinuities that broke the previous 32-block-greedy
+    // version are gone at this resolution, and what was a "seam
+    // hairline" becomes part of the wave detail.
+    // Capture the *undisplaced* clip-space position now, BEFORE the
+    // wave displacement modifies world_pos.y. Used by the fragment
+    // shader to compute the screen-space UV for the reflection
+    // texture — sampling at the displaced clip position would let
+    // animated wave Y propagate into the reflection UV, causing the
+    // reflected content to shimmer every frame regardless of camera
+    // motion. Keying the lookup off the undisplaced plane keeps the
+    // reflection geometrically locked to the world.
+    let undisp_clip = camera.view_proj * vec4<f32>(world_pos, 1.0);
+
+    if (face == 2u) {
+        // Wave displacement is biased so the *crest* sits at the
+        // water-block top and the surface only dips DOWN from
+        // there. Otherwise crests rose above the block plane and
+        // popped visibly above the surrounding sand bank — you
+        // could see the sky between the wave top and the shore.
+        //
+        // `wave_height` returns roughly [-1, 1]; `(h - 1)` maps
+        // that into [-2, 0], scaled by 0.22 → [-0.44, 0] block
+        // displacement. Always non-positive, so the surface never
+        // exceeds its authoring height.
+        let h = wave_height(world_pos.xz, camera.time);
+        world_pos.y = world_pos.y + (h - 1.0) * 0.22;
+    }
 
     var out: VsOut;
     out.clip_pos = camera.view_proj * vec4<f32>(world_pos, 1.0);
+    out.v_undisp_clip = vec3<f32>(undisp_clip.x, undisp_clip.y, undisp_clip.w);
     out.v_world = world_pos;
     out.v_color = in.color;
     out.v_face = f32(face);
@@ -250,6 +312,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         discard;
     }
 
+    // DEBUG: visualise actual vertex displacement by colour-coding
+    // by world Y. If vertices are displaced, we should see Y vary
+    // across the surface.
+    if (camera.underwater_factor > 0.4 && camera.underwater_factor < 0.6) {
+        let dy = in.v_world.y - 62.0;
+        let t = (dy + 2.0) * 0.25; // map [-2, 2] -> [0, 1]
+        return vec4<f32>(t, 1.0 - t, 0.5, 1.0);
+    }
+
     let view_dir = normalize(camera.eye.xyz - in.v_world);
 
     // Per-pixel surface normal from the wave gradient. Sampled in
@@ -261,8 +332,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var surface_n = in.v_normal;
     if (in.v_face == 2.0) {
         // Only top faces get wave-perturbed normals — side faces of
-        // exposed water columns shouldn't pretend to be wavy.
-        surface_n = wave_normal(in.v_world.xz, camera.time, 0.45);
+        // exposed water columns shouldn't pretend to be wavy. The
+        // amplitude here is the *normal-perturbation* strength,
+        // separate from the vertex-displacement amplitude.
+        // 0.20 gives readable surface ripple without making the
+        // reflection content visibly slosh on small camera moves.
+        surface_n = wave_normal(in.v_world.xz, camera.time, 0.20);
     }
     let cos_theta = clamp(dot(view_dir, surface_n), 0.0, 1.0);
 
@@ -278,18 +353,56 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // angles; only really visible when looking nearly straight down.
     let water_body = vec3<f32>(0.04, 0.20, 0.38) * max(in.v_light, 0.10);
 
-    // Sky reflection: read the horizon colour for the lower half of
-    // the visible sky and the zenith for the upper. Tonemapping
-    // earlier in the shader doesn't apply here — these values feed
-    // into the final tonemap pass at the end.
+    // Planar reflection sample. The reflection texture was rendered
+    // by a virtual camera mirrored across the water plane (see
+    // `Renderer::encode_reflection_pass`); the screen-space pixel
+    // we're shading corresponds to the same screen-space pixel in
+    // the reflection texture. Wave-normal-distorted UVs make the
+    // reflection wobble with the surface ripples — without the
+    // distortion the reflection would read as a perfect static
+    // mirror.
+    //
+    // `surface_n.xz` carries the wave-induced lateral tilt of the
+    // surface normal. Project it through the view space scaled by a
+    // small factor to get the distortion vector in NDC.
+    // Reflection UV is derived from the *undisplaced* clip-space
+    // position so wave Y animation doesn't shimmer the sample point
+    // each frame. NDC -> [0,1] UV; Y is flipped because wgpu's NDC
+    // has +Y up while texture v=0 is at the top.
+    let ndc = in.v_undisp_clip.xy / in.v_undisp_clip.z;
+    let base_uv = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
+    // Distortion magnitude is intentionally small. Wave normals are
+    // time-animated, so a large distortion factor multiplied by a
+    // changing normal injects a per-frame wobble that reads as a
+    // shimmering, motion-amplifying reflection. ~1% of screen width
+    // gives just enough ripple to break the perfect-mirror look
+    // without making the reflected content slosh around.
+    let distort = surface_n.xz * 0.012;
+    let refl_uv = clamp(base_uv + distort, vec2<f32>(0.0), vec2<f32>(1.0));
+    // Five-tap box blur on the reflection sample. Real water
+    // reflections aren't crisp mirrors — there are fine surface
+    // capillary waves that scatter light, plus the water column
+    // itself diffuses what passes through it. The blur happens
+    // *here* (not in the source render) so the cheaper low-res
+    // reflection pass stays cheap, and we still control the
+    // perceived softness from one place.
+    let refl_size = vec2<f32>(textureDimensions(reflection_tex));
+    let texel = vec2<f32>(1.0) / refl_size;
+    let blur = 1.2; // radius in source-texels — 1.2 ≈ ~3.6 dest pixels
+    var refl_sum = textureSampleLevel(reflection_tex, reflection_sampler, refl_uv, 0.0).rgb;
+    refl_sum = refl_sum + textureSampleLevel(reflection_tex, reflection_sampler,
+        clamp(refl_uv + vec2<f32>( texel.x * blur,  0.0), vec2<f32>(0.0), vec2<f32>(1.0)), 0.0).rgb;
+    refl_sum = refl_sum + textureSampleLevel(reflection_tex, reflection_sampler,
+        clamp(refl_uv + vec2<f32>(-texel.x * blur,  0.0), vec2<f32>(0.0), vec2<f32>(1.0)), 0.0).rgb;
+    refl_sum = refl_sum + textureSampleLevel(reflection_tex, reflection_sampler,
+        clamp(refl_uv + vec2<f32>( 0.0,  texel.y * blur), vec2<f32>(0.0), vec2<f32>(1.0)), 0.0).rgb;
+    refl_sum = refl_sum + textureSampleLevel(reflection_tex, reflection_sampler,
+        clamp(refl_uv + vec2<f32>( 0.0, -texel.y * blur), vec2<f32>(0.0), vec2<f32>(1.0)), 0.0).rgb;
+    let sky_reflection = refl_sum * 0.2;
+    // Fallback for the still-handy horizon colour (used by the
+    // distance-fog blend below).
     let horizon = vec3<f32>(0.65, 0.80, 1.00) * camera.sun_intensity
                 + vec3<f32>(0.05, 0.07, 0.12) * (1.0 - camera.sun_intensity);
-    let zenith  = vec3<f32>(0.30, 0.50, 0.95) * camera.sun_intensity
-                + vec3<f32>(0.02, 0.03, 0.07) * (1.0 - camera.sun_intensity);
-    // The "reflected up direction" — how vertical the surface is at
-    // this fragment — picks how much zenith vs horizon shows.
-    let sky_t = clamp(surface_n.y, 0.0, 1.0);
-    let sky_reflection = mix(horizon, zenith, sky_t * sky_t);
 
     // Sun reflection: reflect the view direction across the surface
     // normal, dot against the "to-sun" direction. A *wide* exponent
@@ -309,11 +422,23 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // 32) and a much wider glow (exponent 8) that bleeds the sun's
     // colour out across the surrounding water like real
     // atmospheric scatter on a water plane at sunset.
-    let trail = pow(sun_align, 32.0) * 1.30 * camera.sun_intensity;
-    let halo  = pow(sun_align,  8.0) * 0.25 * camera.sun_intensity;
-    let sun_color  = vec3<f32>(1.00, 0.92, 0.70);
-    let sun_warm   = vec3<f32>(1.00, 0.78, 0.45);
-    let sun_glint  = sun_color * trail + sun_warm * halo;
+    // Three terms layered for a richer reflection:
+    //   - `core`:  tight bright centre (exponent 200), the "the sun
+    //              is literally reflected here" pixel
+    //   - `trail`: medium-width primary trail (exponent 48)
+    //   - `halo`:  wide warm glow that scatters the sun's colour
+    //              across the surrounding water
+    // Tightening `trail` from 32 → 48 and adding the high-exponent
+    // core gives the reflection a clear "burning bright in the
+    // middle, soft warm edges" shape — much closer to a real
+    // shader-pack water glint.
+    let core  = pow(sun_align, 200.0) * 2.50 * camera.sun_intensity;
+    let trail = pow(sun_align,  48.0) * 1.20 * camera.sun_intensity;
+    let halo  = pow(sun_align,   8.0) * 0.25 * camera.sun_intensity;
+    let sun_core_color = vec3<f32>(1.00, 0.98, 0.90);
+    let sun_color      = vec3<f32>(1.00, 0.92, 0.70);
+    let sun_warm       = vec3<f32>(1.00, 0.78, 0.45);
+    let sun_glint = sun_core_color * core + sun_color * trail + sun_warm * halo;
 
     // Compose: water body → blend toward sky reflection by fresnel,
     // then add the sun trail on top. The trail is bright enough
@@ -328,6 +453,50 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let fog_end   = 360.0;
     let fog_t = clamp((dist - fog_start) / (fog_end - fog_start), 0.0, 1.0);
     rgb = mix(rgb, horizon, fog_t);
+
+    // Depth-buffer driven effects. `clip_pos.xy` are already in
+    // framebuffer pixel coordinates by the time fs_main runs (wgpu
+    // `@builtin(position)` semantics); convert to integer texel
+    // coords for `textureLoad`. Sample 0 is fine — pixel-art
+    // shorelines don't gain from a 4-sample resolve.
+    let pix = vec2<i32>(in.clip_pos.xy);
+    let scene_d   = textureLoad(scene_depth, pix, 0);
+    let water_d   = in.clip_pos.z;
+    let scene_lin = linear_depth(scene_d);
+    let water_lin = linear_depth(water_d);
+    // `depth_diff` is the world-space distance the camera's view ray
+    // travels through water before hitting the bottom. Zero where
+    // the water surface IS the bottom (i.e., the camera is grazing
+    // a shoreline), grows with depth toward open water.
+    let depth_diff = max(0.0, scene_lin - water_lin);
+
+    // Shoreline foam: brighten the surface toward white in a thin
+    // ribbon where water meets a shallow bottom. The smoothstep
+    // window (0.05..0.6 blocks of vertical separation) is tight on
+    // purpose — a wider window flooded shallow rivers entirely
+    // (RIVER_CARVE = 3 blocks total, so the whole river center
+    // would have been in the foam range). 0.6 blocks gives a fringe
+    // about one block wide at the shore, fading cleanly into the
+    // depth-tinted body.
+    let foam_mask = (1.0 - smoothstep(0.05, 0.6, depth_diff))
+                  * (1.0 - fog_t); // fade foam out in the distance
+    let foam_color = vec3<f32>(0.95, 0.98, 1.00);
+    rgb = mix(rgb, foam_color, foam_mask * 0.85);
+
+    // Depth tint: deeper water reads progressively darker and more
+    // saturated, the cheap stand-in for real light absorption.
+    //
+    // The depth range is tight on purpose. Rivers carve only 3
+    // blocks deep and lakes 5 (see `worldgen` constants), so a
+    // 14-block range left the tint barely visible. 6 blocks gives
+    // the river center a clear shift and the lake center a strong
+    // saturated blue. `pow(depth_t, 0.7)` brightens the curve so
+    // shallow water leans into the tint earlier without losing the
+    // top-out at full depth.
+    let depth_t = clamp(depth_diff / 6.0, 0.0, 1.0);
+    let depth_curve = pow(depth_t, 0.7);
+    let deep_tint = vec3<f32>(0.04, 0.18, 0.32);
+    rgb = mix(rgb, deep_tint, depth_curve * 0.75);
 
     rgb = aces_tonemap(rgb);
     rgb = underwater_tint(rgb, in.v_world, camera.time, camera.underwater_factor);

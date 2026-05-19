@@ -206,9 +206,14 @@ impl BlockRegistry {
             // pre-coloured dirt / grass_side textures…
             color: [1.0, 1.0, 1.0, 1.0],
             // …but `grass_block_top.png` ships **grayscale** so the
-            // engine can tint it per-biome. The green here multiplies
-            // the texel and lands close to vanilla Minecraft grass.
-            top_color: Some([0.49, 0.78, 0.32, 1.0]),
+            // engine can tint it per-biome. Pre-multiplication
+            // brightness: `grass_block_top.png` averages around 0.55
+            // brightness, so the final lit colour is roughly `tint *
+            // 0.55 * shade`. Using a vivid green tint here gives us
+            // headroom for the ACES tonemap to compress without the
+            // grass reading olive/gray — the earlier `[0.49, 0.78,
+            // 0.32]` tint was too red-shifted and came out muddy.
+            top_color: Some([0.32, 0.95, 0.28, 1.0]),
             tile_side: Some(Tile::GrassSide),
             tile_top: Some(Tile::GrassTop),
             tile_bottom: Some(Tile::Dirt),

@@ -17,6 +17,18 @@ use crate::render::gpu::{DEPTH_FORMAT, MSAA_SAMPLES};
 
 pub struct WaterPipeline {
     pub pipeline: wgpu::RenderPipeline,
+    /// Bind-group layout for the sampleable depth texture the water
+    /// shader uses to read terrain depth (group 3). Stored on the
+    /// pipeline so the renderer can build a bind group against it
+    /// whenever the depth-sample texture is (re)allocated.
+    pub depth_bgl: wgpu::BindGroupLayout,
+    /// Bind-group layout for the planar reflection texture + its
+    /// sampler (group 4). The reflection pass renders the world
+    /// from a mirrored virtual camera into a single-sample
+    /// `Rgba8UnormSrgb` colour target; the water shader then
+    /// samples it at screen-space UVs (with wave-normal distortion)
+    /// to composite a real reflected image of the upper world.
+    pub reflection_bgl: wgpu::BindGroupLayout,
 }
 
 const SHADER_SRC: &str = include_str!(concat!(
@@ -36,9 +48,54 @@ pub fn build(
         source: wgpu::ShaderSource::Wgsl(SHADER_SRC.into()),
     });
 
+    // Group 3: scene-depth sampler the fragment shader uses to read
+    // terrain depth at this pixel for foam + depth-tint computation.
+    // `multisampled: true` because our depth attachment is 4× MSAA
+    // — the water shader reads sample 0 via `textureLoad` (a real
+    // resolve across all 4 samples would give cleaner shorelines
+    // but adds complexity for marginal pixel-art-fidelity gain).
+    let depth_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("water-depth-bgl"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Depth,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: true,
+            },
+            count: None,
+        }],
+    });
+
+    // Group 4: planar reflection texture + sampler. Filterable
+    // float sample type because we want linear filtering across the
+    // distorted reflection lookup.
+    let reflection_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("water-reflection-bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("water-layout"),
-        bind_group_layouts: &[camera_bgl, chunk_bgl, atlas_bgl],
+        bind_group_layouts: &[camera_bgl, chunk_bgl, atlas_bgl, &depth_bgl, &reflection_bgl],
         push_constant_ranges: &[],
     });
 
@@ -125,5 +182,9 @@ pub fn build(
         cache: None,
     });
 
-    WaterPipeline { pipeline }
+    WaterPipeline {
+        pipeline,
+        depth_bgl,
+        reflection_bgl,
+    }
 }

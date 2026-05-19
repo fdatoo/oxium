@@ -11,6 +11,25 @@ pub struct OpaquePipeline {
     pub pipeline: wgpu::RenderPipeline,
 }
 
+/// Which face winding the pipeline treats as "front-facing" for
+/// back-face culling. The reflection pass needs the opposite of the
+/// main pass because mirroring the camera flips the apparent
+/// chirality of every triangle.
+#[derive(Debug, Clone, Copy)]
+pub enum FrontFace {
+    Ccw,
+    Cw,
+}
+
+impl FrontFace {
+    fn to_wgpu(self) -> wgpu::FrontFace {
+        match self {
+            FrontFace::Ccw => wgpu::FrontFace::Ccw,
+            FrontFace::Cw => wgpu::FrontFace::Cw,
+        }
+    }
+}
+
 /// Compile-time-embedded WGSL source for the opaque shader. Using
 /// `CARGO_MANIFEST_DIR` makes the path independent of the binary's runtime
 /// working directory.
@@ -20,12 +39,22 @@ const SHADER_SRC: &str = include_str!(concat!(
 ));
 
 /// Build the opaque render pipeline. Called once at startup.
+///
+/// `front_face` lets the caller request the reflection-pass variant
+/// (`FrontFace::Cw`). Because mirroring the camera across the water
+/// plane flips the apparent handedness of every triangle, what was
+/// CCW from the main camera's POV is CW from the mirror eye's POV —
+/// so a Ccw-cull-back pipeline used for the reflection would cull
+/// every mountain top face and the reflection would only contain
+/// the sky. The reflection variant uses Cw winding to keep top
+/// faces visible.
 pub fn build(
     device: &wgpu::Device,
     surface_format: wgpu::TextureFormat,
     camera_bgl: &wgpu::BindGroupLayout,
     chunk_bgl: &wgpu::BindGroupLayout,
     atlas_bgl: &wgpu::BindGroupLayout,
+    front_face: FrontFace,
 ) -> OpaquePipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("opaque-shader"),
@@ -97,9 +126,10 @@ pub fn build(
         }),
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
-            // Quads emitted by the mesher are CCW from outside — back-face
-            // cull then hides the inner side.
-            front_face: wgpu::FrontFace::Ccw,
+            // Mesher emits CCW-from-outside quads. The reflection pass
+            // wants Cw because its mirror camera sees the world from
+            // the opposite side.
+            front_face: front_face.to_wgpu(),
             cull_mode: Some(wgpu::Face::Back),
             ..Default::default()
         },
