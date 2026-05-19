@@ -76,6 +76,68 @@ pub fn mesh_greedy(
     // because the alternative (treat None as opaque) hides *all* side
     // faces of edge chunks, leaving large sky-visible holes in the
     // foreground.
+    // Read the packed `(sky << 4) | block` light byte at the cell one
+    // step outside our chunk's face. Mirrors `block_at`'s neighbour-
+    // resolution logic but for light arrays.
+    //
+    // The previous version of the mesher hard-coded a `0xFF` fallback
+    // here (sky=15, block=15) for any out-of-range cell. That worked
+    // by coincidence during the day — the sky channel was scaled by
+    // `sun_intensity ≈ 1` in the shader, and full-bright sky matched
+    // what most exposed surfaces would have anyway. At night
+    // `sun_intensity = 0` kills the sky channel, leaving the
+    // block=15 fallback to render every chunk-boundary vertex as a
+    // fully torch-lit pixel — visible as scattered orange specks on
+    // every tree, dug-out cave face, and chunk-seam edge. The proper
+    // fix is to read from the actual neighbouring chunk when one is
+    // loaded, and fall back to a sensible direction-specific default
+    // only when no neighbour data exists.
+    let light_at = |x: i32, y: i32, z: i32| -> u8 {
+        let dim = D as i32;
+        let in_range = x >= 0 && y >= 0 && z >= 0 && x < dim && y < dim && z < dim;
+        if in_range {
+            let idx = LocalPos(UVec3::new(x as u32, y as u32, z as u32)).to_index();
+            return (chunk.sky_light[idx] & 0x0F) << 4 | (chunk.block_light[idx] & 0x0F);
+        }
+        let out_x = (x < 0) as i32 + (x >= dim) as i32;
+        let out_y = (y < 0) as i32 + (y >= dim) as i32;
+        let out_z = (z < 0) as i32 + (z >= dim) as i32;
+        if out_x + out_y + out_z >= 2 {
+            // Multi-axis corner — no single neighbour owns this cell.
+            // Light's only consumed on face cells (1-axis-out), so
+            // this branch shouldn't fire in practice; pick the
+            // gentlest default just in case.
+            return 0x00;
+        }
+        let (face_idx, lx, ly, lz) = if x < 0 {
+            (Face::NegX as usize, (dim - 1) as u32, y as u32, z as u32)
+        } else if x >= dim {
+            (Face::PosX as usize, 0u32, y as u32, z as u32)
+        } else if y < 0 {
+            (Face::NegY as usize, x as u32, (dim - 1) as u32, z as u32)
+        } else if y >= dim {
+            (Face::PosY as usize, x as u32, 0u32, z as u32)
+        } else if z < 0 {
+            (Face::NegZ as usize, x as u32, y as u32, (dim - 1) as u32)
+        } else {
+            (Face::PosZ as usize, x as u32, y as u32, 0u32)
+        };
+        if let Some(n) = neighbors[face_idx] {
+            let idx = LocalPos(UVec3::new(lx, ly, lz)).to_index();
+            return (n.sky_light[idx] & 0x0F) << 4 | (n.block_light[idx] & 0x0F);
+        }
+        // Truly no neighbour data (chunk not loaded yet). Pick a
+        // direction-specific default:
+        //   - +Y face → assume open sky above, full sky-light. Worst
+        //     case the surface temporarily reads bright during
+        //     stream-in; the chunk re-meshes once the +Y neighbour
+        //     arrives.
+        //   - All other faces → 0 (dark). Cave faces a player digs
+        //     out and chunk-boundary side faces no longer bloom
+        //     bright at night.
+        if face_idx == Face::PosY as usize { 0xF0 } else { 0x00 }
+    };
+
     let block_at = |x: i32, y: i32, z: i32| -> Option<Block> {
         let dim = D as i32;
         let in_range = x >= 0 && y >= 0 && z >= 0 && x < dim && y < dim && z < dim;
@@ -107,20 +169,22 @@ pub fn mesh_greedy(
     };
 
     for face in Face::all() {
-        greedy_one_face(face, chunk, &block_at, reg, &mut mesh);
+        greedy_one_face(face, chunk, &block_at, &light_at, reg, &mut mesh);
     }
     mesh
 }
 
 /// Sweep slices for one face direction and emit greedy-merged quads.
-fn greedy_one_face<F>(
+fn greedy_one_face<F, L>(
     face: Face,
     chunk: &DenseChunk,
     block_at: &F,
+    light_at: &L,
     reg: &BlockRegistry,
     mesh: &mut ChunkMesh,
 ) where
     F: Fn(i32, i32, i32) -> Option<Block>,
+    L: Fn(i32, i32, i32) -> u8,
 {
     // Axis mapping per face. `n_axis` is the axis perpendicular to the
     // face's plane; `u_axis`/`v_axis` are the in-plane axes. `normal_sign`
@@ -159,23 +223,12 @@ fn greedy_one_face<F>(
                     let ao = corner_ao_at(face, |dx, dy, dz| {
                         block_at(x + dx, y + dy, z + dz)
                     });
-                    // Light is read from the *outside* (the air-side
-                    // neighbour). For now sky/block default to fully bright
-                    // when out of range; M5 will populate the real values.
-                    let n = neighbor_pos;
-                    let light = if n.0 >= 0
-                        && n.1 >= 0
-                        && n.2 >= 0
-                        && n.0 < D as i32
-                        && n.1 < D as i32
-                        && n.2 < D as i32
-                    {
-                        let idx = LocalPos(UVec3::new(n.0 as u32, n.1 as u32, n.2 as u32))
-                            .to_index();
-                        (chunk.sky_light[idx] & 0x0F) << 4 | (chunk.block_light[idx] & 0x0F)
-                    } else {
-                        0xFF
-                    };
+                    // Sample the air-side neighbour's light (sky in
+                    // the high nibble, block in the low nibble).
+                    // `light_at` handles in-chunk reads, cross-chunk
+                    // reads via the `neighbors` array, and the truly-
+                    // no-data fallback.
+                    let light = light_at(neighbor_pos.0, neighbor_pos.1, neighbor_pos.2);
                     Cell {
                         block: here as u16,
                         ao,
