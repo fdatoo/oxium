@@ -18,6 +18,7 @@ use crate::ui::chat::{ChatInput, ChatLog};
 use crate::ui::commands::Registry;
 use crate::ui::effect::UiEffect;
 use crate::ui::input::InputDisposition;
+use crate::ui::menu::TOP_MENU;
 use crate::ui::state::{MenuNav, UiState};
 
 pub struct Ui {
@@ -133,9 +134,54 @@ impl Ui {
         }
     }
 
-    /// Handle non-toggle keys while the UI is open. Stub — later tasks
-    /// fill in menu nav and chat editing.
-    fn consume_in_ui(&mut self, _code: KeyCode, _text: Option<&str>) {}
+    /// Handle non-toggle keys while the UI is open.
+    fn consume_in_ui(&mut self, code: KeyCode, _text: Option<&str>) {
+        let action: Option<crate::ui::menu::MenuAction> = match &mut self.state {
+            UiState::Paused { menu: MenuNav::Top { hovered } } => {
+                match code {
+                    KeyCode::ArrowUp | KeyCode::KeyW => {
+                        *hovered = (*hovered + TOP_MENU.len() - 1) % TOP_MENU.len();
+                        None
+                    }
+                    KeyCode::ArrowDown | KeyCode::KeyS => {
+                        *hovered = (*hovered + 1) % TOP_MENU.len();
+                        None
+                    }
+                    KeyCode::Enter | KeyCode::Space | KeyCode::NumpadEnter => {
+                        Some(TOP_MENU[*hovered].activate())
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(a) = action {
+            self.apply_menu_action(a);
+        }
+    }
+
+    fn apply_menu_action(&mut self, action: crate::ui::menu::MenuAction) {
+        use crate::ui::menu::MenuAction;
+        match action {
+            MenuAction::Resume => {
+                self.state = UiState::Playing;
+                self.cursor_state_changed = true;
+            }
+            MenuAction::Save => {
+                self.push_effect(UiEffect::Save);
+                self.log.push_system("Saved.");
+            }
+            MenuAction::OpenSettings => {
+                self.state = UiState::Paused { menu: MenuNav::Settings };
+            }
+            MenuAction::BackToTop => {
+                self.state = UiState::Paused { menu: MenuNav::Top { hovered: 0 } };
+            }
+            MenuAction::Quit => {
+                self.push_effect(UiEffect::Quit);
+            }
+        }
+    }
 
     pub fn on_mouse_button(&mut self, _button: winit::event::MouseButton, _state: ElementState) {
         // Wired in Task 9.
@@ -230,5 +276,77 @@ mod tests {
         ui.on_key(KeyCode::Escape, Pressed, None);
         let d = ui.on_key(KeyCode::KeyW, Pressed, None);
         assert_eq!(d, InputDisposition::Consumed);
+    }
+
+    #[test]
+    fn arrow_down_advances_hover() {
+        let mut ui = Ui::new();
+        ui.on_key(KeyCode::Escape, Pressed, None);
+        ui.on_key(KeyCode::ArrowDown, Pressed, None);
+        match ui.state {
+            UiState::Paused { menu: MenuNav::Top { hovered } } => assert_eq!(hovered, 1),
+            _ => panic!("expected paused top"),
+        }
+    }
+
+    #[test]
+    fn arrow_up_wraps_at_top() {
+        let mut ui = Ui::new();
+        ui.on_key(KeyCode::Escape, Pressed, None);
+        ui.on_key(KeyCode::ArrowUp, Pressed, None);
+        match ui.state {
+            UiState::Paused { menu: MenuNav::Top { hovered } } => {
+                assert_eq!(hovered, crate::ui::menu::TOP_MENU.len() - 1);
+            }
+            _ => panic!("expected paused top"),
+        }
+    }
+
+    #[test]
+    fn enter_on_resume_returns_to_playing() {
+        let mut ui = Ui::new();
+        ui.on_key(KeyCode::Escape, Pressed, None);
+        ui.on_key(KeyCode::Enter, Pressed, None);
+        assert!(ui.is_playing());
+    }
+
+    #[test]
+    fn enter_on_quit_emits_effect() {
+        let mut ui = Ui::new();
+        ui.on_key(KeyCode::Escape, Pressed, None);
+        for _ in 0..3 { ui.on_key(KeyCode::ArrowDown, Pressed, None); }
+        ui.on_key(KeyCode::Enter, Pressed, None);
+        let effs = ui.drain_effects();
+        assert!(effs.contains(&UiEffect::Quit));
+    }
+
+    #[test]
+    fn enter_on_save_emits_effect_and_stays() {
+        let mut ui = Ui::new();
+        ui.on_key(KeyCode::Escape, Pressed, None);
+        ui.on_key(KeyCode::ArrowDown, Pressed, None);
+        ui.on_key(KeyCode::Enter, Pressed, None);
+        assert!(matches!(ui.state, UiState::Paused { .. }));
+        let effs = ui.drain_effects();
+        assert!(effs.contains(&UiEffect::Save));
+    }
+
+    #[test]
+    fn enter_on_settings_opens_sub_menu() {
+        let mut ui = Ui::new();
+        ui.on_key(KeyCode::Escape, Pressed, None);
+        for _ in 0..2 { ui.on_key(KeyCode::ArrowDown, Pressed, None); }
+        ui.on_key(KeyCode::Enter, Pressed, None);
+        assert!(matches!(ui.state, UiState::Paused { menu: MenuNav::Settings }));
+    }
+
+    #[test]
+    fn esc_from_settings_goes_to_top_not_play() {
+        let mut ui = Ui::new();
+        ui.on_key(KeyCode::Escape, Pressed, None);
+        for _ in 0..2 { ui.on_key(KeyCode::ArrowDown, Pressed, None); }
+        ui.on_key(KeyCode::Enter, Pressed, None);
+        ui.on_key(KeyCode::Escape, Pressed, None);
+        assert!(matches!(ui.state, UiState::Paused { menu: MenuNav::Top { hovered: 0 } }));
     }
 }

@@ -37,3 +37,14 @@ pub enum MenuAction {
     BackToTop,
     Quit,
 }
+
+impl MenuItem {
+    pub fn activate(self) -> MenuAction {
+        match self {
+            MenuItem::Resume   => MenuAction::Resume,
+            MenuItem::SaveNow  => MenuAction::Save,
+            MenuItem::Settings => MenuAction::OpenSettings,
+            MenuItem::Quit     => MenuAction::Quit,
+        }
+    }
+}
