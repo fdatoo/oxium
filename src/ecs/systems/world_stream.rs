@@ -87,13 +87,28 @@ pub fn world_stream(
     }
     targets.sort_by_key(|c| {
         let d = c.0 - pc.0;
-        // i64 keeps the full squared range; sorts naturally
-        // smallest-first. Equidistant chunks still tie — Rust's
-        // stable sort keeps iteration order then, but the previous
-        // "iteration order = world coord quadrant" bias is now
-        // mostly invisible because Euclidean rings have far fewer
-        // ties than Manhattan rings did.
-        (d.x as i64).pow(2) + (d.y as i64).pow(2) + (d.z as i64).pow(2)
+        // Euclidean squared as the primary key.
+        let dist_sq =
+            (d.x as i64).pow(2) + (d.y as i64).pow(2) + (d.z as i64).pow(2);
+        // Symmetric tie-breaker. Without it, equidistant chunks
+        // resolve in iteration order (dy → dz → dx), which puts the
+        // +X+Z corner of every distance ring at the very tail of
+        // the rayon queue. With ~10 000 chunks to dispatch on
+        // spawn, those tail chunks waited multiple seconds to even
+        // *start* gen — visible as a whole quadrant of the load
+        // radius staying blank long after the others filled in.
+        // A small Wang-style coord hash spreads ties evenly across
+        // all 8 spatial octants. `dist_sq * 1024` keeps the
+        // distance term dominant; only the low 10 bits of the hash
+        // contribute, so two chunks at different distances never
+        // swap order — only ties.
+        let hash = c
+            .0
+            .x
+            .wrapping_mul(73856093)
+            .wrapping_add(c.0.y.wrapping_mul(19349663))
+            .wrapping_add(c.0.z.wrapping_mul(83492791));
+        dist_sq * 1024 + ((hash & 1023) as i64)
     });
 
     for c in targets {
