@@ -71,10 +71,18 @@ struct VsOut {
     @location(4) v_normal:          vec3<f32>,
 };
 
-// Multi-octave wave height. Driven by world-space xz and `camera.time`
-// so adjacent chunks ripple coherently as the camera moves. Three
-// octaves at incommensurate frequencies — slow rolling swell + medium
-// chop + fine high-frequency detail.
+// Multi-octave value-noise wave height. Driven by world-space xz and
+// `camera.time` so adjacent chunks ripple coherently as the camera
+// moves.
+//
+// We use value noise rather than the more obvious `sin(x) * cos(z)`
+// because the product-of-sines approach produces wave crests that
+// run parallel to the world axes — when the sun catches those
+// crests, the reflection spreads into long parallel stripes across
+// the entire surface (the visible artefact a player will read as
+// "lines on the water"). Noise has no axis-aligned structure, so
+// the wave normals decorrelate over distance and the sun reflection
+// breaks into the chaotic shimmer real water produces.
 //
 // Sampled per-pixel by the fragment shader to derive a fake surface
 // normal — the actual mesh geometry stays nearly flat. Doing this
@@ -84,10 +92,13 @@ struct VsOut {
 // interpolates between them, which reads as flat at any reasonable
 // camera distance.
 fn wave_height(world_xz: vec2<f32>, t: f32) -> f32 {
-    let big   = sin(world_xz.x * 0.20 + t * 0.60) * cos(world_xz.y * 0.17 + t * 0.50);
-    let med   = sin(world_xz.x * 0.45 + t * 1.30) * cos(world_xz.y * 0.37 + t * 1.10);
-    let small = sin(world_xz.x * 0.95 + world_xz.y * 1.05 + t * 2.40);
-    return big * 0.50 + med * 0.35 + small * 0.15;
+    let big   = wnoise(world_xz * 0.05 + vec2<f32>( 0.30,  0.20) * t);
+    let med   = wnoise(world_xz * 0.13 + vec2<f32>(-0.18,  0.25) * t);
+    let small = wnoise(world_xz * 0.27 + vec2<f32>( 0.15, -0.22) * t);
+    // Each layer is centred around 0 (subtract 0.5) and weighted so
+    // the slow swell dominates and the fine chop is a small detail
+    // term on top.
+    return (big - 0.5) * 1.00 + (med - 0.5) * 0.55 + (small - 0.5) * 0.25;
 }
 
 // Numerical gradient of `wave_height` over `world_xz`. The two
@@ -183,14 +194,28 @@ fn vs_main(in: VsIn) -> VsOut {
     // greedy-merged side quads would shear apart visibly. -Y bottom
     // faces also stay flat (you only see them while underwater
     // looking up, where the flat plane is fine).
-    if (face == 2u) {
-        // Amplitude 0.28 makes the swell visibly roll without
-        // breaking the illusion of water sitting at the block grid —
-        // anything taller and the wave crests pop above neighbouring
-        // sand banks, which reads as broken geometry.
-        let h = wave_height(world_pos.xz, camera.time);
-        world_pos.y = world_pos.y + h * 0.28;
-    }
+    // Note: NO vertex displacement.
+    //
+    // We used to push the +Y face up/down by `wave_height * 0.28`
+    // here. The wave function evaluates to the same value at any
+    // given (world x, world z), so adjacent chunks agreed on the
+    // *boundary vertex* Y exactly. But the surface inside each
+    // chunk is rasterised as TWO triangles meeting on a diagonal,
+    // and each triangle's plane equation interpolates Y inside the
+    // chunk from its three corners. The slope perpendicular to a
+    // shared chunk-boundary edge is determined by the chunk's
+    // *interior* corner, which differs between neighbours — so the
+    // surface has a *slope* discontinuity at every chunk seam,
+    // visible as a 1-2 pixel dark hairline under MSAA (the
+    // rasteriser leaves micro-coverage gaps at the crease because
+    // adjacent triangles in different draw calls don't share an
+    // edge equation).
+    //
+    // Real shader packs avoid this by faking waves entirely in the
+    // fragment shader's normal field (no vertex motion). We already
+    // compute `wave_normal` per-pixel below; that drives fresnel +
+    // sun reflection so the surface still reads as rippled. The
+    // geometry itself stays perfectly planar across chunks.
 
     var out: VsOut;
     out.clip_pos = camera.view_proj * vec4<f32>(world_pos, 1.0);
