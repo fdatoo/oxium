@@ -78,26 +78,40 @@ pub fn drain_jobs(
                 // `changed_faces` path, so light propagation
                 // through tunnels still works after player edits.
 
-                // Spawn a LOD0 mesh job for this chunk plus any neighbour
-                // that's already loaded — generating a new chunk can
-                // reveal previously-hidden faces on its neighbours.
-                for c in std::iter::once(coord).chain(neighbor_coords(coord)) {
-                    if let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get(&c) {
-                        let data_arc = data.clone();
-                        let version = meta.mesh_version;
-                        let neighbors = gather_neighbors(world, c);
-                        jobs.spawn_mesh_lod0(c, data_arc, neighbors, registry.clone(), version);
-                    }
-                }
-                // Also spawn LOD1 and LOD2 jobs for the new chunk so the
-                // far-distance render has something to draw. These don't
-                // need neighbours (boundary precision is invisible at
-                // distance), so they run independently.
+                // Spawn ONLY the LOD0 mesh job for this chunk —
+                // not the 6 neighbours' meshes, and not the LOD1/2
+                // jobs for self. The previous version spawned 9
+                // mesh jobs per generated chunk (self + 6 neighbours
+                // + LOD1 + LOD2); with ~10 000 chunks streaming in
+                // at world load that's 90 000 mesh jobs flooding the
+                // rayon pool, and the actual chunks the player was
+                // looking at had their initial mesh queued so far
+                // back that they took multiple seconds to appear —
+                // the visible "physics works but the chunk is a
+                // sky-shader void" symptom.
+                //
+                // What we lose: if a neighbour was meshed *before*
+                // this chunk arrived, its boundary face toward us
+                // is conservatively emitted (we don't know yet that
+                // we'll be solid here). That face overlaps our
+                // mesh's matching boundary face once we draw, but
+                // back-face culling hides whichever one is facing
+                // away from the camera — so visually it's correct
+                // from any viewpoint. The cost is some wasted
+                // vertex work on those overlap faces, which is
+                // cheap compared to actually running the mesh job.
+                //
+                // LOD1/2 for self also skipped — they'll get
+                // spawned the first time the player moves far
+                // enough away to need them, via a separate
+                // distance-based scheduler (TODO; for now the
+                // chunk falls back to LOD0 which the renderer
+                // already accepts).
                 if let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get(&coord) {
                     let data_arc = data.clone();
                     let version = meta.mesh_version;
-                    jobs.spawn_mesh_lod(coord, 1, data_arc.clone(), registry.clone(), version);
-                    jobs.spawn_mesh_lod(coord, 2, data_arc, registry.clone(), version);
+                    let neighbors = gather_neighbors(world, coord);
+                    jobs.spawn_mesh_lod0(coord, data_arc, neighbors, registry.clone(), version);
                 }
             }
             JobResult::Meshed { coord, lod, mesh, version } => {
@@ -282,15 +296,17 @@ pub fn drain_persistence(
                             _ => None,
                         })
                         .unwrap_or(0);
+                    // Same reasoning as the Generated handler: only
+                    // LOD0 is spawned eagerly. LOD1/2 land lazily
+                    // when needed; the renderer falls back to
+                    // whatever LOD is loaded.
                     jobs.spawn_mesh_lod0(
                         coord,
-                        data_arc.clone(),
+                        data_arc,
                         neighbors,
                         registry.clone(),
                         version,
                     );
-                    jobs.spawn_mesh_lod(coord, 1, data_arc.clone(), registry.clone(), version);
-                    jobs.spawn_mesh_lod(coord, 2, data_arc, registry.clone(), version);
                 }
                 None => {
                     // Region file existed but the slot was empty —
