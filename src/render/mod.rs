@@ -90,6 +90,10 @@ pub struct Renderer {
     /// on the chunk's distance to the camera, falling back to the
     /// nearest available LOD if a job hasn't finished yet.
     chunk_meshes: HashMap<ChunkCoord, [Option<ChunkGpu>; 3]>,
+    /// Number of `draw_indexed` calls the last opaque pass issued.
+    /// Updated by `encode_opaque_pass`, read by the perf HUD. `Cell`
+    /// so the render path can stay `&self` while still recording.
+    last_draw_calls: std::cell::Cell<u32>,
 }
 
 /// Per-chunk GPU resources: the mesh buffers, the chunk-origin uniform, and
@@ -288,6 +292,7 @@ impl Renderer {
             _hud_font_view: font_view,
             _hud_sampler: hud_sampler,
             chunk_meshes: HashMap::new(),
+            last_draw_calls: std::cell::Cell::new(0),
         }
     }
 
@@ -390,6 +395,12 @@ impl Renderer {
     /// many LOD slots are filled). Exposed for the debug HUD (M10).
     pub fn chunk_mesh_count(&self) -> usize {
         self.chunk_meshes.len()
+    }
+
+    /// Number of `draw_indexed` calls the last opaque pass issued.
+    /// Updated by `encode_opaque_pass` so the HUD can see it.
+    pub fn last_draw_calls(&self) -> u32 {
+        self.last_draw_calls.get()
     }
 
     /// Per-LOD entry counts. Debug helper to see whether LOD jobs are
@@ -606,6 +617,7 @@ impl Renderer {
         // outside the per-chunk loop. Per-chunk uniform (group 1) still
         // varies per draw and is set inside the loop below.
         pass.set_bind_group(2, &self.atlas.bind_group, &[]);
+        let mut draws: u32 = 0;
         for (coord, slots) in &self.chunk_meshes {
             let center = coord.origin().0;
             let center_f = Vec3::new(
@@ -626,8 +638,10 @@ impl Renderer {
                 pass.set_vertex_buffer(0, cg.mesh.vbuf.slice(..));
                 pass.set_index_buffer(cg.mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..cg.mesh.index_count, 0, 0..1);
+                draws += 1;
             }
         }
+        self.last_draw_calls.set(draws);
 
         // 3) Cursor wireframe (12 line segments, no vertex buffer).
         if self.cursor_visible {

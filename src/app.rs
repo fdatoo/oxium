@@ -84,6 +84,12 @@ pub struct PerfSnapshot {
     /// after a burst of activity even when the app's per-step work
     /// is still well under 8ms.
     pub work_ms: f32,
+    /// Number of chunk draws issued in the last opaque pass. With no
+    /// frustum culling we draw every chunk in the load radius, so this
+    /// tracks roughly `chunks_rendered` — but it's the actual count
+    /// the renderer fed to wgpu, useful for spotting "the CPU is
+    /// spending most of the frame in `wgpu::draw_indexed` overhead".
+    pub draw_calls: u32,
 }
 
 /// How often the autosave system flushes modified chunks to disk.
@@ -256,12 +262,7 @@ impl AppState {
             &self.registry,
         );
         self.perf.chunks_rendered = self.renderer.chunk_mesh_count();
-        // Sample work-time just before the render call so the metric
-        // captures every system except the GPU present (which is
-        // where vsync blocks). On vsync-capped frames this number
-        // will be much lower than `1000 / FPS`; on perf-bound frames
-        // they'll be roughly equal.
-        self.perf.work_ms = work_start.elapsed().as_secs_f32() * 1000.0;
+        self.perf.draw_calls = self.renderer.last_draw_calls();
         crate::ecs::systems::world_stream::world_unload(
             &self.ecs,
             &mut self.world,
@@ -290,6 +291,12 @@ impl AppState {
             log::warn!("render error: {e:?}");
         }
         self.input_buf.clear_per_frame();
+        // Sample full per-step time AFTER the render call so WMS
+        // captures GPU command encoding + the present (or whatever
+        // wgpu blocks on under Immediate present mode). The HUD on
+        // the *next* step reads this — 1 frame stale, which is
+        // imperceptible for perf debugging.
+        self.perf.work_ms = work_start.elapsed().as_secs_f32() * 1000.0;
     }
 
     /// Send every currently-modified chunk through the persistence thread.
