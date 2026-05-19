@@ -78,40 +78,33 @@ pub fn drain_jobs(
                 // `changed_faces` path, so light propagation
                 // through tunnels still works after player edits.
 
-                // Spawn ONLY the LOD0 mesh job for this chunk —
-                // not the 6 neighbours' meshes, and not the LOD1/2
-                // jobs for self. The previous version spawned 9
-                // mesh jobs per generated chunk (self + 6 neighbours
-                // + LOD1 + LOD2); with ~10 000 chunks streaming in
-                // at world load that's 90 000 mesh jobs flooding the
-                // rayon pool, and the actual chunks the player was
-                // looking at had their initial mesh queued so far
-                // back that they took multiple seconds to appear —
-                // the visible "physics works but the chunk is a
-                // sky-shader void" symptom.
+                // Spawn LOD0 mesh for this chunk AND any already-
+                // loaded neighbours — when an out-of-order arrival
+                // (common with parallel `spawn_load`) plugs a gap
+                // between two existing chunks, the neighbours need
+                // to re-mesh so their boundary faces toward us get
+                // hidden by face culling. Without this, a surface
+                // chunk that meshed before its `Y-1` neighbour
+                // loaded keeps a giant bottom quad at the chunk
+                // floor — which back-face culling can't hide
+                // because there's no other side to draw, and shows
+                // as a flat fog-coloured plain.
                 //
-                // What we lose: if a neighbour was meshed *before*
-                // this chunk arrived, its boundary face toward us
-                // is conservatively emitted (we don't know yet that
-                // we'll be solid here). That face overlaps our
-                // mesh's matching boundary face once we draw, but
-                // back-face culling hides whichever one is facing
-                // away from the camera — so visually it's correct
-                // from any viewpoint. The cost is some wasted
-                // vertex work on those overlap faces, which is
-                // cheap compared to actually running the mesh job.
+                // The `if let Some(Stored)` gate means we don't
+                // re-mesh chunks that are still `Pending`; during
+                // initial stream-in most neighbours are Pending so
+                // the actual fan-out is small (~1-3 jobs per
+                // arrival instead of always 7).
                 //
-                // LOD1/2 for self also skipped — they'll get
-                // spawned the first time the player moves far
-                // enough away to need them, via a separate
-                // distance-based scheduler (TODO; for now the
-                // chunk falls back to LOD0 which the renderer
-                // already accepts).
-                if let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get(&coord) {
-                    let data_arc = data.clone();
-                    let version = meta.mesh_version;
-                    let neighbors = gather_neighbors(world, coord);
-                    jobs.spawn_mesh_lod0(coord, data_arc, neighbors, registry.clone(), version);
+                // LOD1/2 still skipped — the renderer falls back
+                // to LOD0 via `slots.iter().flatten().next()`.
+                for c in std::iter::once(coord).chain(neighbor_coords(coord)) {
+                    if let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get(&c) {
+                        let data_arc = data.clone();
+                        let version = meta.mesh_version;
+                        let neighbors = gather_neighbors(world, c);
+                        jobs.spawn_mesh_lod0(c, data_arc, neighbors, registry.clone(), version);
+                    }
                 }
             }
             JobResult::Meshed { coord, lod, mesh, version } => {
@@ -200,26 +193,26 @@ pub fn drain_jobs(
             }
             JobResult::LoadedFromDisk { coord, data } => match data {
                 Some(data) => {
-                    // Same handling as `PersistResult::Loaded` used
-                    // to do (still does, for the few cases that
-                    // route through the persistence thread). The
-                    // load path moved to rayon so per-region chunk
-                    // loads parallelise instead of serialising
-                    // behind one I/O thread.
                     world.insert(coord, data);
-                    if let Some(ChunkSlot::Stored { data, meta }) =
-                        world.chunks.get(&coord)
-                    {
-                        let data_arc = data.clone();
-                        let version = meta.mesh_version;
-                        let neighbors = gather_neighbors(world, coord);
-                        jobs.spawn_mesh_lod0(
-                            coord,
-                            data_arc,
-                            neighbors,
-                            registry.clone(),
-                            version,
-                        );
+                    // Same neighbour-remesh strategy as Generated.
+                    // The parallel `spawn_load` was the trigger for
+                    // the out-of-order arrival bug, and Loaded is
+                    // where most of those arrivals come from.
+                    for c in std::iter::once(coord).chain(neighbor_coords(coord)) {
+                        if let Some(ChunkSlot::Stored { data, meta }) =
+                            world.chunks.get(&c)
+                        {
+                            let data_arc = data.clone();
+                            let version = meta.mesh_version;
+                            let neighbors = gather_neighbors(world, c);
+                            jobs.spawn_mesh_lod0(
+                                c,
+                                data_arc,
+                                neighbors,
+                                registry.clone(),
+                                version,
+                            );
+                        }
                     }
                 }
                 None => {
