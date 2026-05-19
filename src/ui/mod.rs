@@ -11,10 +11,14 @@ pub mod state;
 
 use std::collections::VecDeque;
 
-use crate::ui::chat::ChatLog;
+use winit::event::ElementState;
+use winit::keyboard::KeyCode;
+
+use crate::ui::chat::{ChatInput, ChatLog};
 use crate::ui::commands::Registry;
 use crate::ui::effect::UiEffect;
-use crate::ui::state::UiState;
+use crate::ui::input::InputDisposition;
+use crate::ui::state::{MenuNav, UiState};
 
 pub struct Ui {
     pub state: UiState,
@@ -64,24 +68,18 @@ impl Ui {
     pub(crate) fn push_effect(&mut self, e: UiEffect) {
         self.effects.push_back(e);
     }
-}
 
-use winit::event::ElementState;
-use winit::keyboard::KeyCode;
-
-use crate::ui::chat::ChatInput;
-use crate::ui::input::InputDisposition;
-use crate::ui::state::MenuNav;
-
-impl Ui {
     /// Route a key event. Returns `Consumed` if the UI handled it (in
     /// which case `main.rs` does NOT forward the key to `InputBuf`),
     /// `Forward` otherwise.
     pub fn on_key(&mut self, code: KeyCode, state: ElementState, text: Option<&str>) -> InputDisposition {
-        // Only react to press transitions for toggles; let release through
-        // so the existing InputBuf can clean up `keys_down`.
+        // Always forward release events so `InputBuf` can clean up its
+        // `keys_down` set. A press → pause → release sequence (W held
+        // when the player Escs, then W released while paused) must not
+        // leave W stuck as "down" or apply_input will phantom-walk on
+        // resume.
         if state != ElementState::Pressed {
-            return if self.is_playing() { InputDisposition::Forward } else { InputDisposition::Consumed };
+            return InputDisposition::Forward;
         }
 
         // Toggle keys: Esc / T / Slash. These are handled regardless of

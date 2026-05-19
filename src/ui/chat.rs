@@ -30,9 +30,6 @@ impl ChatLog {
     pub fn new() -> Self {
         Self { lines: VecDeque::with_capacity(LOG_CAP) }
     }
-}
-
-impl ChatLog {
     pub fn push(&mut self, kind: LineKind, text: impl Into<String>) {
         if self.lines.len() == LOG_CAP {
             self.lines.pop_front();
