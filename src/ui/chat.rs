@@ -65,10 +65,12 @@ impl ChatLog {
         self.lines.iter()
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.lines.len()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.lines.is_empty()
     }

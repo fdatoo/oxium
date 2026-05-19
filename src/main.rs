@@ -23,7 +23,7 @@ mod ui;
 use std::path::PathBuf;
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
-use winit::event::{DeviceEvent, ElementState, WindowEvent};
+use winit::event::{DeviceEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::window::{CursorGrabMode, WindowAttributes, WindowId};
@@ -239,7 +239,7 @@ impl ApplicationHandler for App {
             use crate::ui::chat::ChatInput;
             state.ui.state = match kind.as_str() {
                 "paused" => UiState::Paused { menu: MenuNav::Top { hovered: 0 } },
-                "chat"   => UiState::Chat { input: ChatInput::new("/he"), prefilled_slash: true },
+                "chat"   => UiState::Chat { input: ChatInput::new("/he") },
                 other    => panic!("--ui: expected 'paused' or 'chat', got {other}"),
             };
             // Pre-seed a few chat lines so the chat snapshot shows content.

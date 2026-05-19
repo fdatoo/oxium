@@ -34,7 +34,6 @@ pub enum MenuAction {
     Resume,
     Save,
     OpenSettings,
-    BackToTop,
     Quit,
 }
 

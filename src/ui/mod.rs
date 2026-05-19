@@ -115,11 +115,11 @@ impl Ui {
                 true
             }
             (UiState::Playing, KeyCode::KeyT) => {
-                self.state = UiState::Chat { input: ChatInput::new(""), prefilled_slash: false };
+                self.state = UiState::Chat { input: ChatInput::new("") };
                 true
             }
             (UiState::Playing, KeyCode::Slash) => {
-                self.state = UiState::Chat { input: ChatInput::new("/"), prefilled_slash: true };
+                self.state = UiState::Chat { input: ChatInput::new("/") };
                 true
             }
             (UiState::Paused { menu: MenuNav::Top { .. } }, KeyCode::Escape) => {
@@ -204,9 +204,6 @@ impl Ui {
             }
             MenuAction::OpenSettings => {
                 self.state = UiState::Paused { menu: MenuNav::Settings };
-            }
-            MenuAction::BackToTop => {
-                self.state = UiState::Paused { menu: MenuNav::Top { hovered: 0 } };
             }
             MenuAction::Quit => {
                 self.push_effect(UiEffect::Quit);
@@ -320,9 +317,8 @@ mod tests {
         let d = ui.on_key(KeyCode::KeyT, Pressed, None);
         assert_eq!(d, InputDisposition::Consumed);
         match &ui.state {
-            UiState::Chat { input, prefilled_slash } => {
+            UiState::Chat { input } => {
                 assert_eq!(input.buf, "");
-                assert!(!prefilled_slash);
             }
             _ => panic!("expected Chat state"),
         }
@@ -334,10 +330,9 @@ mod tests {
         let d = ui.on_key(KeyCode::Slash, Pressed, None);
         assert_eq!(d, InputDisposition::Consumed);
         match &ui.state {
-            UiState::Chat { input, prefilled_slash } => {
+            UiState::Chat { input } => {
                 assert_eq!(input.buf, "/");
                 assert_eq!(input.cursor, 1);
-                assert!(prefilled_slash);
             }
             _ => panic!("expected Chat state"),
         }

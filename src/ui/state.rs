@@ -7,7 +7,7 @@ use crate::ui::chat::ChatInput;
 pub enum UiState {
     Playing,
     Paused { menu: MenuNav },
-    Chat { input: ChatInput, prefilled_slash: bool },
+    Chat { input: ChatInput },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -25,9 +25,15 @@ const CHAT_LINE_H: f32 = 20.0;
 const CHAT_SCALE: f32 = 2.0;
 const CHAT_VISIBLE_PLAYING: usize = 5;
 const CHAT_VISIBLE_OPEN: usize = 8;
-const CHAT_BLOCK_W: f32 = 480.0;
 const CHAT_FADE_START_SEC: f32 = 6.0;
 const CHAT_FADE_END_SEC:   f32 = 8.0;
+
+/// Width of the chat block, sized to half the window with a sane floor
+/// so it can still hold a typical line on tiny windows but follows
+/// resizes on big ones.
+fn chat_block_width(screen_w: f32) -> f32 {
+    (screen_w * 0.5).max(560.0).min(screen_w - 2.0 * CHAT_PAD)
+}
 
 pub fn draw_overlay(ui: &Ui, screen_px: (u32, u32), frame: &mut HudFrame) {
     match &ui.state {
@@ -55,10 +61,11 @@ fn draw_chat_open(
     screen_px: (u32, u32),
     frame: &mut HudFrame,
 ) {
-    let (_, sh) = (screen_px.0 as f32, screen_px.1 as f32);
+    let (sw, sh) = (screen_px.0 as f32, screen_px.1 as f32);
+    let block_w = chat_block_width(sw);
     let block_h = CHAT_LINE_H * (CHAT_VISIBLE_OPEN as f32 + 1.5);
     let block_y = sh - block_h - 80.0;
-    frame.icons.push_rect(0.0, block_y, CHAT_BLOCK_W, block_h, [0, 0, 0, 0xA0]);
+    frame.icons.push_rect(0.0, block_y, block_w, block_h, [0, 0, 0, 0xA0]);
 
     let lines: Vec<_> = ui.log.iter().rev().take(CHAT_VISIBLE_OPEN).collect();
     for (i, line) in lines.iter().enumerate() {
