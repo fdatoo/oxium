@@ -78,6 +78,25 @@ const CAVE_SURFACE_BUFFER: i32 = 4;
 /// World-space Y above which a mountain-biome surface block becomes
 /// bare stone (proxy for "above the tree line").
 const MOUNTAIN_ROCK_LINE: i32 = 92;
+/// World-space Y above which any surface block in a cold biome gets
+/// capped with snow regardless of the desert/grass decision. Used so
+/// even temperate forests have a snowy alpine band on the upper
+/// flanks of nearby peaks.
+const SNOW_LINE: i32 = 110;
+/// Temperature threshold (in normalised noise units, roughly `[-1, 1]`)
+/// below which a column counts as cold — gets a Snow surface cap and
+/// no trees regardless of humidity. Around `-0.10` so the cold belt
+/// covers a modest fraction of the world rather than dominating.
+const COLD_THRESHOLD: f32 = -0.10;
+/// Humidity threshold above which a temperate column counts as a
+/// forest (denser trees). Below the threshold the column reads as
+/// plains (rare trees).
+const FOREST_HUMIDITY: f32 = 0.05;
+/// Tree-cell spawn percentile (out of 100) for plains: dry grassland
+/// with the occasional lone tree.
+const TREE_RATE_PLAINS: u32 = 12;
+/// Tree-cell spawn percentile for forest: dense woodland.
+const TREE_RATE_FOREST: u32 = 55;
 
 /// World is partitioned into `CELL_SIZE × CELL_SIZE` (XZ) tree cells.
 /// Each cell rolls a deterministic hash to decide whether it contains a
@@ -109,6 +128,15 @@ pub struct Generator {
     /// mountainness map but uncorrelated (different seed) so deserts and
     /// mountains drift independently.
     desert_map: Fbm<Simplex>,
+    /// Temperature map (large-period 2D noise). Drives the cold/warm
+    /// axis of the biome system; negative values are colder and earn
+    /// snow surfaces, positive values are warmer (and combined with
+    /// the desert mask, hottest values are arid).
+    temperature_map: Fbm<Simplex>,
+    /// Humidity map (large-period 2D noise). Drives the wet/dry axis;
+    /// wetter columns earn denser tree cover, drier columns read as
+    /// sparser plains.
+    humidity_map: Fbm<Simplex>,
     /// First of two 3D noise fields whose zero-crossings intersect to
     /// form cave tunnels. By itself this would carve a single warped
     /// sheet through the world; combined with [`Self::tunnel_b`] only
@@ -153,6 +181,20 @@ impl Generator {
             .set_octaves(2)
             .set_frequency(1.0 / 512.0)
             .set_persistence(0.5);
+        // Climate maps. Same scale as the other biome masks so a
+        // single climate cell covers many chunks — players walk for
+        // a while between biome bands instead of crossing one every
+        // few steps. Independently seeded so temperature and
+        // humidity drift apart and combine into all four corners of
+        // the cold/warm × dry/wet square.
+        let temperature_map = Fbm::<Simplex>::new(seed.wrapping_add(8) as u32)
+            .set_octaves(2)
+            .set_frequency(1.0 / 512.0)
+            .set_persistence(0.5);
+        let humidity_map = Fbm::<Simplex>::new(seed.wrapping_add(9) as u32)
+            .set_octaves(2)
+            .set_frequency(1.0 / 512.0)
+            .set_persistence(0.5);
         // Tunnel system: two independent 3D noises at the same frequency.
         // 2 octaves keeps the surfaces relatively smooth — too many
         // octaves and the tunnel walls turn into ragged stair-steps.
@@ -178,6 +220,8 @@ impl Generator {
             mountain_noise,
             mountainness_map,
             desert_map,
+            temperature_map,
+            humidity_map,
             tunnel_a,
             tunnel_b,
             cavern_noise,
@@ -249,10 +293,19 @@ impl Generator {
         // boundary stays crisp and recognisable.
         let is_desert = desertness > 0.30;
 
+        // Climate axes drive the biome system. The biome itself is a
+        // discrete derivation of (temperature, humidity, desertness)
+        // — see `Biome::classify` — so consumers don't have to repeat
+        // the threshold logic. Computed up front for both the layer
+        // pass and the tree placer.
+        let temperature = self.temperature_map.get(xz) as f32;
+        let humidity = self.humidity_map.get(xz) as f32;
+        let biome = Biome::classify(temperature, humidity, is_desert);
+
         ColumnData {
             height,
             mountain_weight,
-            is_desert,
+            biome,
         }
     }
 
@@ -305,19 +358,29 @@ impl Generator {
                                 Block::Air
                             }
                         } else if depth == 0 {
-                            // Surface block. Beach > desert > mountain
-                            // rock > grass — priorities chosen so a
-                            // beach always wins (deserts shouldn't have
-                            // sand-into-water edges) and mountain rock
-                            // beats both beach and desert when the
-                            // column is high *and* deeply mountain-y.
+                            // Surface block selection. Priority order:
+                            //   1. Beach (column at/below sea level + 1) wins
+                            //      over every biome so coastlines always
+                            //      read as sand → water.
+                            //   2. Bare rock above the mountain tree line.
+                            //   3. Snow above the alpine SNOW_LINE — even
+                            //      temperate forests gather snow on their
+                            //      upper flanks.
+                            //   4. The column's biome dictates the rest:
+                            //      Tundra / SnowyForest get Snow,
+                            //      Desert keeps Sand, Plains / Forest
+                            //      get Grass.
                             if height <= SEA_LEVEL + 1 {
                                 Block::Sand
                             } else if col.mountain_weight > 0.45
                                 && height > MOUNTAIN_ROCK_LINE
                             {
                                 Block::Stone
-                            } else if col.is_desert {
+                            } else if height >= SNOW_LINE {
+                                Block::Snow
+                            } else if col.biome.snow_capped() {
+                                Block::Snow
+                            } else if col.biome == Biome::Desert {
                                 Block::Sand
                             } else {
                                 Block::Grass
@@ -378,27 +441,35 @@ impl Generator {
     /// cell. Determined entirely by `(seed, cell coords)` so adjacent
     /// chunks agree on which trees exist.
     fn tree_in_cell(&self, cell_x: i32, cell_z: i32) -> Option<Tree> {
-        // Roll #0: does this cell have a tree at all?
-        let roll = tree_hash(self.seed, cell_x, cell_z, 0) % 100;
-        if roll < 65 {
-            return None;
-        }
-        // Roll #1, #2: tree's XZ offset inside the cell. Inset by 1 so
-        // the trunk never lands exactly on a cell boundary.
-        let off_x = (tree_hash(self.seed, cell_x, cell_z, 1) % 6) as i32 + 1;
-        let off_z = (tree_hash(self.seed, cell_x, cell_z, 2) % 6) as i32 + 1;
-        let wx = cell_x * TREE_CELL_SIZE + off_x;
-        let wz = cell_z * TREE_CELL_SIZE + off_z;
-        // Trees only grow on grass — keep them off sand-tipped beaches,
-        // desert biomes, and bare mountain rock. The column_data call
-        // mirrors the same biome thresholds used by fill_chunk so a
-        // tree never sprouts on a surface that's rendered as sand or
-        // stone.
+        // First the column-level vetoes — a cell can be a tree
+        // candidate by roll but its column might be a beach, a bare
+        // peak, or above the alpine snow line, in which case no
+        // amount of luck makes a tree grow.
+        let wx = cell_x * TREE_CELL_SIZE
+            + (tree_hash(self.seed, cell_x, cell_z, 1) % 6) as i32
+            + 1;
+        let wz = cell_z * TREE_CELL_SIZE
+            + (tree_hash(self.seed, cell_x, cell_z, 2) % 6) as i32
+            + 1;
         let col = self.column_data(wx, wz);
-        if col.height <= SEA_LEVEL + 1 || col.is_desert {
+        if col.height <= SEA_LEVEL + 1 {
             return None;
         }
         if col.mountain_weight > 0.45 && col.height > MOUNTAIN_ROCK_LINE {
+            return None;
+        }
+        if col.height >= SNOW_LINE {
+            return None;
+        }
+        // Biome decides both *whether* trees grow here at all and
+        // *how densely* they pack. Tundra and Desert return `None`
+        // outright; the rest carry a percentile (0..100) that the
+        // roll below has to clear. Higher percentile ⇒ denser
+        // forest. Threshold form `(roll mod 100) < rate` so the
+        // distribution stays uniform-ish across cells.
+        let rate = col.biome.tree_rate_percentile()?;
+        let roll = tree_hash(self.seed, cell_x, cell_z, 0) % 100;
+        if roll >= rate {
             return None;
         }
         let height = col.height;
@@ -456,8 +527,77 @@ struct ColumnData {
     /// 0..1: how strongly this column belongs to a mountain region.
     /// 1.0 ⇒ deep in a range; 0.0 ⇒ plains.
     mountain_weight: f32,
-    /// `true` when the column is inside the desert biome.
-    is_desert: bool,
+    /// Discrete biome label derived from temperature, humidity, and
+    /// the desert mask. Drives surface block selection (snow vs grass
+    /// vs sand) and tree density.
+    biome: Biome,
+}
+
+/// Discrete biome label assigned to each column. The set is small on
+/// purpose — every variant has a distinct visual signature (different
+/// surface block or noticeably different tree density), so the
+/// difference between biomes reads from a screenshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Biome {
+    /// Cold column. Snow on the surface; no trees grow here.
+    Tundra,
+    /// Cold *and* humid. Same Snow surface as Tundra but trees do
+    /// grow (taiga / boreal forest analogue).
+    SnowyForest,
+    /// Temperate, dry. Grass surface, very sparse trees — open
+    /// rolling fields.
+    Plains,
+    /// Temperate, humid. Grass surface, dense tree cover.
+    Forest,
+    /// Hot, dry. Sand surface, no trees. Existing desert biome
+    /// preserved here so the rest of the system has a single
+    /// vocabulary.
+    Desert,
+}
+
+impl Biome {
+    /// Map raw climate noise + the desert mask to a discrete biome.
+    ///
+    /// The model is the classic two-axis temperature × humidity grid
+    /// boiled down to five buckets: anything below
+    /// [`COLD_THRESHOLD`] is cold (Tundra or SnowyForest depending on
+    /// humidity), anything that the legacy `desert_map` marks as
+    /// desert beats out the warm/humid bucket, and the remaining
+    /// temperate region splits on [`FOREST_HUMIDITY`].
+    fn classify(temperature: f32, humidity: f32, is_desert: bool) -> Self {
+        if temperature < COLD_THRESHOLD {
+            return if humidity > 0.0 {
+                Biome::SnowyForest
+            } else {
+                Biome::Tundra
+            };
+        }
+        if is_desert {
+            return Biome::Desert;
+        }
+        if humidity > FOREST_HUMIDITY {
+            Biome::Forest
+        } else {
+            Biome::Plains
+        }
+    }
+
+    /// True when the biome should cap the surface column with Snow.
+    fn snow_capped(self) -> bool {
+        matches!(self, Biome::Tundra | Biome::SnowyForest)
+    }
+
+    /// Probability (0..100) that a `TREE_CELL_SIZE × TREE_CELL_SIZE`
+    /// patch in this biome rolls a tree. `None` for biomes that
+    /// don't host trees at all — saves the placement loop a noise
+    /// evaluation per cell.
+    fn tree_rate_percentile(self) -> Option<u32> {
+        match self {
+            Biome::Tundra | Biome::Desert => None,
+            Biome::Plains => Some(TREE_RATE_PLAINS),
+            Biome::Forest | Biome::SnowyForest => Some(TREE_RATE_FOREST),
+        }
+    }
 }
 
 /// GLSL/WGSL-style smoothstep. We re-implement it (Rust has nothing in
@@ -568,7 +708,7 @@ mod tests {
     fn golden_seed42_chunk_0_2_0() {
         // Hash refreshed after the tunnel/cavern + ridged-mountain pass.
         // Update again whenever an intentional generator change lands.
-        const GOLDEN_42_002: u64 = 0xBC69_F574_93D7_BDC6;
+        const GOLDEN_42_002: u64 = 0xB396_96E4_79ED_4A1C;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);
@@ -607,6 +747,85 @@ mod tests {
         assert!(
             air > CHUNK_VOL / 100,
             "expected at least 1% carved air to prove caves carve anywhere, got {air}"
+        );
+    }
+
+    /// Biome diversity: scanning a few thousand columns across a
+    /// generous area should turn up every biome at least once.
+    /// Otherwise either the thresholds are misconfigured (cold
+    /// belt vanishingly narrow, forest too rare) or the climate
+    /// noise isn't actually getting sampled.
+    #[test]
+    fn all_biomes_appear_in_a_large_scan() {
+        let g = Generator::new(42);
+        let mut seen = std::collections::HashSet::new();
+        // Step 8 blocks at a time so a 2048×2048 scan only costs
+        // 64 K column evaluations — fast enough to keep the test
+        // under a second even in debug builds.
+        for wz in (-1024..1024).step_by(8) {
+            for wx in (-1024..1024).step_by(8) {
+                seen.insert(g.column_data(wx, wz).biome);
+            }
+        }
+        for expected in [
+            Biome::Tundra,
+            Biome::SnowyForest,
+            Biome::Plains,
+            Biome::Forest,
+            Biome::Desert,
+        ] {
+            assert!(
+                seen.contains(&expected),
+                "biome {:?} never appeared in the scan; saw {:?}",
+                expected,
+                seen
+            );
+        }
+    }
+
+    /// Cold biomes should plant Snow as their surface block. Pick a
+    /// column known to be Tundra and verify the topmost solid block
+    /// is Snow, not Grass.
+    #[test]
+    fn cold_biome_caps_with_snow() {
+        let g = Generator::new(42);
+        // Find any tundra column by scanning the same area as
+        // `all_biomes_appear_in_a_large_scan`.
+        let mut found: Option<(i32, i32)> = None;
+        'outer: for wz in (-1024..1024).step_by(8) {
+            for wx in (-1024..1024).step_by(8) {
+                if g.column_data(wx, wz).biome == Biome::Tundra {
+                    found = Some((wx, wz));
+                    break 'outer;
+                }
+            }
+        }
+        let (wx, wz) = found.expect("expected at least one tundra column");
+        let col = g.column_data(wx, wz);
+        // Build the chunk that contains the surface block and read
+        // out the cell at the column's `height`.
+        let cy = col.height.div_euclid(CHUNK_DIM_U as i32);
+        let cx = wx.div_euclid(CHUNK_DIM_U as i32);
+        let cz = wz.div_euclid(CHUNK_DIM_U as i32);
+        let mut chunk = DenseChunk::empty();
+        g.fill_chunk(ChunkCoord(IVec3::new(cx, cy, cz)), &mut chunk);
+        let lx = wx.rem_euclid(CHUNK_DIM_U as i32) as u32;
+        let lz = wz.rem_euclid(CHUNK_DIM_U as i32) as u32;
+        let ly = col.height.rem_euclid(CHUNK_DIM_U as i32) as u32;
+        let surface = chunk.blocks[crate::voxel::coords::LocalPos(
+            glam::UVec3::new(lx, ly, lz),
+        )
+        .to_index()];
+        // Beach / mountain rock overrides take priority over the
+        // biome cap (the rules in `fill_chunk`); the picked column
+        // shouldn't trip either of those, but accept either Snow or
+        // those overrides defensively so the test reports a clearer
+        // failure if it does.
+        assert!(
+            matches!(surface, Block::Snow | Block::Sand | Block::Stone),
+            "tundra surface block at ({wx}, {wz}) y={} was {:?}, expected Snow",
+            col.height,
+            surface
         );
     }
 

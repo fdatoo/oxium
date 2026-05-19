@@ -64,10 +64,15 @@ pub enum Block {
     Wood,
     Leaves,
     Torch,
+    /// Snow surface block for cold biomes. Reuses the grass_top
+    /// grayscale tile with a near-white tint so we don't need a
+    /// separate asset; the colour gives it a slightly cool cast
+    /// against the warmer dirt sides below.
+    Snow,
 }
 
 /// Number of distinct [`Block`] variants. Updated when adding new blocks.
-pub const BLOCK_COUNT: usize = 9;
+pub const BLOCK_COUNT: usize = 10;
 
 impl Block {
     /// Inverse of `Block as u16`: returns the variant whose discriminant
@@ -85,6 +90,7 @@ impl Block {
             6 => Wood,
             7 => Leaves,
             8 => Torch,
+            9 => Snow,
             _ => return None,
         })
     }
@@ -261,6 +267,22 @@ impl BlockRegistry {
             color: [1.0, 0.80, 0.30, 1.0],
             top_color: None,
             tile_side: None,
+            tile_top: None,
+            tile_bottom: None,
+        };
+        infos[Snow as usize] = BlockInfo {
+            // Snow blanket: visually similar to grass-as-a-block but
+            // tinted near-white. Reuses `grass_block_top.png` on every
+            // face — the grayscale tile multiplied by our cool tint
+            // reads as crisp snow without needing a separate asset.
+            // A faint blue cast in the tint keeps it from looking
+            // identical to the sand tile's near-white midtones.
+            solid: true,
+            opaque: true,
+            emission: 0,
+            color: [0.95, 0.96, 1.0, 1.0],
+            top_color: None,
+            tile_side: Some(Tile::GrassTop),
             tile_top: None,
             tile_bottom: None,
         };
