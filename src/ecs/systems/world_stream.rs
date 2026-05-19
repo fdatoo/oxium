@@ -58,7 +58,7 @@ pub fn world_stream(
     jobs: &Jobs,
     generator: &Arc<Generator>,
     registry: &Arc<BlockRegistry>,
-    _persistence: &Persistence,
+    persistence: &Persistence,
     saves_dir: &Path,
 ) {
     let mut q = ecs.world.query_one::<&Position>(ecs.player).unwrap();
@@ -117,15 +117,19 @@ pub fn world_stream(
         if let std::collections::hash_map::Entry::Vacant(slot) = world.chunks.entry(c) {
             slot.insert(ChunkSlot::Pending);
             // Prefer loading from disk when a region file exists —
-            // persisted edits should reappear next session. The
-            // load runs on the rayon pool (`spawn_load`), not the
-            // single-threaded persistence I/O thread, so per-region
-            // loads don't serialise. The persistence thread is
-            // still the home for *Saves* — those need the header
-            // write to be atomic per region file.
+            // persisted edits should reappear next session. Reads
+            // go through the persistence I/O thread (single-threaded
+            // but safe to interleave with the persistence thread's
+            // own concurrent writes). A previous attempt to run
+            // Loads on the rayon pool (`spawn_load`) introduced a
+            // bug where chunks the player had previously edited
+            // came back showing a flat fog-coloured plain — the
+            // root cause is somewhere in concurrent-read vs the
+            // chunk's saved light/block arrays, and reverting the
+            // parallel path until we identify it.
             let path = region_path(saves_dir, c);
             if path.exists() {
-                jobs.spawn_load(c, path);
+                let _ = persistence.req_tx.send(PersistRequest::Load { coord: c });
             } else {
                 jobs.spawn_gen(c, generator.clone(), registry.clone());
             }

@@ -309,33 +309,28 @@ pub fn drain_persistence(
         match res {
             PersistResult::Loaded { coord, data } => match data {
                 Some(data) => {
-                    // Install the loaded chunk and queue all three LODs.
-                    world.insert(coord, data.clone());
-                    // Same reasoning as the Generated handler: no
-                    // cascade here. Saved chunks ship their already-
-                    // computed lighting; the relight cascade can fire
-                    // from the boundary-diff path after a real edit.
-                    let data_arc = Arc::new(data);
-                    let neighbors = gather_neighbors(world, coord);
-                    let version = world
-                        .chunks
-                        .get(&coord)
-                        .and_then(|s| match s {
-                            ChunkSlot::Stored { meta, .. } => Some(meta.mesh_version),
-                            _ => None,
-                        })
-                        .unwrap_or(0);
-                    // Same reasoning as the Generated handler: only
-                    // LOD0 is spawned eagerly. LOD1/2 land lazily
-                    // when needed; the renderer falls back to
-                    // whatever LOD is loaded.
-                    jobs.spawn_mesh_lod0(
-                        coord,
-                        data_arc,
-                        neighbors,
-                        registry.clone(),
-                        version,
-                    );
+                    world.insert(coord, data);
+                    // Re-mesh self + already-Stored neighbours, same
+                    // as Generated. Out-of-order arrivals would
+                    // otherwise leave neighbour boundary faces
+                    // conservatively-emitted (a flat fog plane at
+                    // the shared boundary).
+                    for c in std::iter::once(coord).chain(neighbor_coords(coord)) {
+                        if let Some(ChunkSlot::Stored { data, meta }) =
+                            world.chunks.get(&c)
+                        {
+                            let data_arc = data.clone();
+                            let version = meta.mesh_version;
+                            let neighbors = gather_neighbors(world, c);
+                            jobs.spawn_mesh_lod0(
+                                c,
+                                data_arc,
+                                neighbors,
+                                registry.clone(),
+                                version,
+                            );
+                        }
+                    }
                 }
                 None => {
                     // Region file existed but the slot was empty —
