@@ -238,8 +238,18 @@ fn vs_main(in: VsIn) -> VsOut {
     // version are gone at this resolution, and what was a "seam
     // hairline" becomes part of the wave detail.
     if (face == 2u) {
+        // Wave displacement is biased so the *crest* sits at the
+        // water-block top and the surface only dips DOWN from
+        // there. Otherwise crests rose above the block plane and
+        // popped visibly above the surrounding sand bank — you
+        // could see the sky between the wave top and the shore.
+        //
+        // `wave_height` returns roughly [-1, 1]; `(h - 1)` maps
+        // that into [-2, 0], scaled by 0.22 → [-0.44, 0] block
+        // displacement. Always non-positive, so the surface never
+        // exceeds its authoring height.
         let h = wave_height(world_pos.xz, camera.time);
-        world_pos.y = world_pos.y + h * 0.22;
+        world_pos.y = world_pos.y + (h - 1.0) * 0.22;
     }
 
     var out: VsOut;
@@ -406,11 +416,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Depth tint: deeper water reads progressively darker and more
     // saturated, the cheap stand-in for real light absorption.
-    // 0..14 block depth range — past that the water is fully
-    // deep-coloured.
-    let depth_t = clamp(depth_diff / 14.0, 0.0, 1.0);
-    let deep_tint = vec3<f32>(0.05, 0.20, 0.35);
-    rgb = mix(rgb, rgb * deep_tint * 3.0, depth_t * 0.55);
+    //
+    // The depth range is tight on purpose. Rivers carve only 3
+    // blocks deep and lakes 5 (see `worldgen` constants), so a
+    // 14-block range left the tint barely visible. 6 blocks gives
+    // the river center a clear shift and the lake center a strong
+    // saturated blue. `pow(depth_t, 0.7)` brightens the curve so
+    // shallow water leans into the tint earlier without losing the
+    // top-out at full depth.
+    let depth_t = clamp(depth_diff / 6.0, 0.0, 1.0);
+    let depth_curve = pow(depth_t, 0.7);
+    let deep_tint = vec3<f32>(0.04, 0.18, 0.32);
+    rgb = mix(rgb, deep_tint, depth_curve * 0.75);
 
     rgb = aces_tonemap(rgb);
     rgb = underwater_tint(rgb, in.v_world, camera.time, camera.underwater_factor);
