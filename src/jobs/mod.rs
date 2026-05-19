@@ -104,14 +104,29 @@ impl Jobs {
     ) {
         let tx = self.tx.clone();
         self.pool.spawn(move || {
-            let mut dense = DenseChunk::empty();
-            generator.fill_chunk(coord, &mut dense);
-            // Local-only lighting; the streaming system will re-run light
-            // jobs on neighbours later if light leaks across a boundary.
-            let no_neighbors = crate::voxel::chunk::Neighbors { chunks: [None; 6] };
-            crate::lighting::recompute_chunk(&mut dense, &no_neighbors, &registry);
-            let data = PalettedChunk::compress(&dense);
-            let _ = tx.send(JobResult::Generated { coord, data });
+            // Catch worker panics so they surface in logs instead of
+            // silently killing a worker thread. Without this, a single
+            // deterministic panic in `fill_chunk` or `recompute_chunk`
+            // for a specific coord would kill one worker per such
+            // coord — and after ~11 panics the rayon pool has zero
+            // live threads and every queued chunk waits forever
+            // (visible as a quadrant of the load radius never
+            // populating no matter how long the player waits).
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut dense = DenseChunk::empty();
+                generator.fill_chunk(coord, &mut dense);
+                let no_neighbors = crate::voxel::chunk::Neighbors { chunks: [None; 6] };
+                crate::lighting::recompute_chunk(&mut dense, &no_neighbors, &registry);
+                PalettedChunk::compress(&dense)
+            }));
+            match result {
+                Ok(data) => {
+                    let _ = tx.send(JobResult::Generated { coord, data });
+                }
+                Err(payload) => {
+                    log::error!("gen job panic at {coord:?}: {}", panic_message(payload));
+                }
+            }
         });
     }
 
@@ -131,33 +146,40 @@ impl Jobs {
     ) {
         let tx = self.tx.clone();
         self.pool.spawn(move || {
-            let mut dense = data.decompress();
-            let neighbor_dense: Vec<Option<DenseChunk>> = neighbors
-                .iter()
-                .map(|opt| opt.as_ref().map(|p| p.decompress()))
-                .collect();
-            let n_refs: [Option<&DenseChunk>; 6] = [
-                neighbor_dense[0].as_ref(),
-                neighbor_dense[1].as_ref(),
-                neighbor_dense[2].as_ref(),
-                neighbor_dense[3].as_ref(),
-                neighbor_dense[4].as_ref(),
-                neighbor_dense[5].as_ref(),
-            ];
-            let ns = crate::voxel::chunk::Neighbors { chunks: n_refs };
-            // Snapshot per-face boundary lighting before the BFS so we
-            // can detect which faces actually changed and only cascade
-            // dirty.light to those neighbours.
-            let pre = crate::lighting::snapshot_face_boundaries(&dense);
-            crate::lighting::recompute_chunk(&mut dense, &ns, &registry);
-            let post = crate::lighting::snapshot_face_boundaries(&dense);
-            let changed_faces: [bool; 6] = std::array::from_fn(|i| pre[i] != post[i]);
-            let data = PalettedChunk::compress(&dense);
-            let _ = tx.send(JobResult::Relit {
-                coord,
-                data,
-                changed_faces,
-            });
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut dense = data.decompress();
+                let neighbor_dense: Vec<Option<DenseChunk>> = neighbors
+                    .iter()
+                    .map(|opt| opt.as_ref().map(|p| p.decompress()))
+                    .collect();
+                let n_refs: [Option<&DenseChunk>; 6] = [
+                    neighbor_dense[0].as_ref(),
+                    neighbor_dense[1].as_ref(),
+                    neighbor_dense[2].as_ref(),
+                    neighbor_dense[3].as_ref(),
+                    neighbor_dense[4].as_ref(),
+                    neighbor_dense[5].as_ref(),
+                ];
+                let ns = crate::voxel::chunk::Neighbors { chunks: n_refs };
+                let pre = crate::lighting::snapshot_face_boundaries(&dense);
+                crate::lighting::recompute_chunk(&mut dense, &ns, &registry);
+                let post = crate::lighting::snapshot_face_boundaries(&dense);
+                let changed_faces: [bool; 6] = std::array::from_fn(|i| pre[i] != post[i]);
+                let data = PalettedChunk::compress(&dense);
+                (data, changed_faces)
+            }));
+            match result {
+                Ok((data, changed_faces)) => {
+                    let _ = tx.send(JobResult::Relit {
+                        coord,
+                        data,
+                        changed_faces,
+                    });
+                }
+                Err(payload) => {
+                    log::error!("relight job panic at {coord:?}: {}", panic_message(payload));
+                }
+            }
         });
     }
 
