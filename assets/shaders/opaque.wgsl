@@ -151,6 +151,50 @@ fn block_variation_hash(p: vec3<f32>) -> f32 {
     return (h - 0.5) * 2.0; // map [0,1) → [-1, 1)
 }
 
+// Smooth low-frequency value noise on world (x, z) — used to drive
+// biome-scale tint variation in `biome_tint_shift`. Output in [0, 1].
+fn biome_hash2(p: vec2<f32>) -> f32 {
+    let h = sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453;
+    return fract(h);
+}
+fn biome_noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = biome_hash2(i);
+    let b = biome_hash2(i + vec2<f32>(1.0, 0.0));
+    let c = biome_hash2(i + vec2<f32>(0.0, 1.0));
+    let d = biome_hash2(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// Continuous biome-scale tint shift. Computes a per-world-position
+// (humidity, temperature)-like signal from low-frequency noise — same
+// continuous structure the worldgen biome model has, just evaluated
+// here per fragment. Returns small `(r, g, b)` offsets to add to a
+// surface block's tint so grass / sand colour shifts smoothly across
+// climate zones instead of stepping at the discrete biome boundary.
+//
+// Lower-frequency than the per-block jitter so the variation is
+// "this whole valley is greener" rather than "this single block is
+// brighter" — biome-scale variation vs block-scale variation.
+fn biome_tint_shift(world_xz: vec2<f32>) -> vec3<f32> {
+    let h = biome_noise(world_xz * 0.0035);  // ~285 block period
+    let t = biome_noise(world_xz * 0.0035 + vec2<f32>(50.0, 50.0));
+    // h shifts the green/yellow axis (humidity proxy): wet=greener,
+    // dry=yellower. t shifts brightness slightly (temperature proxy).
+    // Magnitudes kept small (~10% / 5%) so the variation is "this
+    // patch reads as a different shade of green" rather than "the
+    // grass has gone weird colours".
+    let humidity_shift = (h - 0.5) * 0.10;
+    let temp_shift     = (t - 0.5) * 0.05;
+    return vec3<f32>(
+        -humidity_shift + temp_shift,
+         humidity_shift + temp_shift,
+        -humidity_shift * 0.4
+    );
+}
+
 // ACES filmic tone mapping — the cinematographer's go-to curve. Compresses
 // highlights into a soft roll-off (no clip to pure white on bright
 // surfaces) and adds a touch of crispness in the shadows. Operates on
@@ -257,9 +301,22 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // integer steps in any axis) get a different jitter; cells
     // *within* a block share the same value, so the variation reads
     // as block-level natural variance rather than per-pixel noise.
-    // Effect is most visible on otherwise-uniform grass/sand fields.
     let variation = 1.0 + block_variation_hash(in.v_world) * 0.06;
-    let lit_rgb = base_rgb * shade * variation;
+    // Biome-scale tint shift: low-frequency continuous signal that
+    // smoothly varies the hue across hundreds of blocks — the
+    // shader-side approximation of "blend biome properties instead
+    // of biome IDs". Detected by atlas tile so the rule fires
+    // exclusively on grass-top and sand surfaces (not the same-tinted
+    // leaves, which would otherwise come along for the ride and look
+    // unnaturally pink/yellow).
+    //
+    // Tile indices must stay in lockstep with `voxel::block::Tile`:
+    //   2 = GrassTop, 4 = Sand
+    var lit_rgb = base_rgb * shade * variation;
+    let is_blendable = in.v_tile_index == 2u || in.v_tile_index == 4u;
+    if (is_blendable) {
+        lit_rgb = lit_rgb + biome_tint_shift(in.v_world.xz) * shade;
+    }
 
     // Distance fog: linear ramp between FOG_START and FOG_END.
     let dist = length(in.v_world - camera.eye.xyz);
