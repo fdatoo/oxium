@@ -38,6 +38,16 @@ pub enum JobResult {
         mesh: ChunkMesh,
         version: u64,
     },
+    /// A chunk Load job finished — the persisted chunk has been read
+    /// from disk on the worker pool (rather than the single-threaded
+    /// persistence I/O thread, which was the bottleneck for chunks
+    /// whose region file existed). `data = None` means the region
+    /// file exists but the slot for this coord is empty — caller
+    /// falls back to procedural gen.
+    LoadedFromDisk {
+        coord: ChunkCoord,
+        data: Option<PalettedChunk>,
+    },
     /// A relight job finished; `data` is the re-illuminated paletted chunk
     /// to swap into the World. A follow-up mesh job runs as soon as the
     /// caller drains this — without that, the new sky/block light bytes
@@ -85,6 +95,41 @@ impl Jobs {
             .build()
             .expect("rayon pool");
         Self { tx, rx, pool }
+    }
+
+    /// Spawn a chunk-load job: read the persisted chunk from disk on
+    /// the rayon pool instead of queuing it on the single-threaded
+    /// persistence I/O thread. Many small reads from the same region
+    /// file are safe concurrently (reads don't mutate state); writes
+    /// stay on the dedicated thread so the header-update sequence
+    /// remains atomic.
+    ///
+    /// Returns `LoadedFromDisk { data: None }` when the region file
+    /// exists but the slot for this coord is empty — the caller
+    /// falls back to procedural gen for that case.
+    pub fn spawn_load(&self, coord: ChunkCoord, path: std::path::PathBuf) {
+        let tx = self.tx.clone();
+        self.pool.spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                use crate::persistence::region::{read_chunk, RegionError};
+                match read_chunk(&path, coord) {
+                    Ok(c) => Some(c),
+                    Err(RegionError::NotPresent) => None,
+                    Err(e) => {
+                        log::warn!("load failed {coord:?}: {e:?}");
+                        None
+                    }
+                }
+            }));
+            match result {
+                Ok(data) => {
+                    let _ = tx.send(JobResult::LoadedFromDisk { coord, data });
+                }
+                Err(payload) => {
+                    log::error!("load job panic at {coord:?}: {}", panic_message(payload));
+                }
+            }
+        });
     }
 
     /// Spawn a worldgen job for the chunk at `coord`. The job:

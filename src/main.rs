@@ -203,7 +203,10 @@ impl ApplicationHandler for App {
             Some(p) => AppState::new_with_spawn(window.clone(), p, uncapped, profile),
             None => AppState::new_with_spawn(
                 window.clone(),
-                glam::Vec3::new(16.0, 96.0, 16.0),
+                // High default spawn so you can see the whole load
+                // radius from above for diagnostics. Use --spawn
+                // x,y,z to pick a different one.
+                glam::Vec3::new(16.0, 250.0, 16.0),
                 uncapped,
                 profile,
             ),

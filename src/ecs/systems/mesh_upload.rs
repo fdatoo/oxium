@@ -198,6 +198,42 @@ pub fn drain_jobs(
                     .unwrap_or(0);
                 jobs.spawn_mesh_lod0(coord, data_arc, neighbors, registry.clone(), version);
             }
+            JobResult::LoadedFromDisk { coord, data } => match data {
+                Some(data) => {
+                    // Same handling as `PersistResult::Loaded` used
+                    // to do (still does, for the few cases that
+                    // route through the persistence thread). The
+                    // load path moved to rayon so per-region chunk
+                    // loads parallelise instead of serialising
+                    // behind one I/O thread.
+                    world.insert(coord, data);
+                    if let Some(ChunkSlot::Stored { data, meta }) =
+                        world.chunks.get(&coord)
+                    {
+                        let data_arc = data.clone();
+                        let version = meta.mesh_version;
+                        let neighbors = gather_neighbors(world, coord);
+                        jobs.spawn_mesh_lod0(
+                            coord,
+                            data_arc,
+                            neighbors,
+                            registry.clone(),
+                            version,
+                        );
+                    }
+                }
+                None => {
+                    // Region file existed but the slot was empty —
+                    // fall back to procedural gen.
+                    // generator and persistence are passed to
+                    // drain_persistence; we need them here too.
+                    // (See the parameter additions below.)
+                    log::trace!("loaded chunk slot empty at {coord:?}, falling back to gen");
+                    // Re-mark as Vacant so world_stream picks it up
+                    // next frame and dispatches gen.
+                    world.chunks.remove(&coord);
+                }
+            },
         }
     }
 }

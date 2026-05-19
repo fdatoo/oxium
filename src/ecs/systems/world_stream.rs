@@ -58,7 +58,7 @@ pub fn world_stream(
     jobs: &Jobs,
     generator: &Arc<Generator>,
     registry: &Arc<BlockRegistry>,
-    persistence: &Persistence,
+    _persistence: &Persistence,
     saves_dir: &Path,
 ) {
     let mut q = ecs.world.query_one::<&Position>(ecs.player).unwrap();
@@ -117,10 +117,15 @@ pub fn world_stream(
         if let std::collections::hash_map::Entry::Vacant(slot) = world.chunks.entry(c) {
             slot.insert(ChunkSlot::Pending);
             // Prefer loading from disk when a region file exists —
-            // persisted edits should reappear next session.
+            // persisted edits should reappear next session. The
+            // load runs on the rayon pool (`spawn_load`), not the
+            // single-threaded persistence I/O thread, so per-region
+            // loads don't serialise. The persistence thread is
+            // still the home for *Saves* — those need the header
+            // write to be atomic per region file.
             let path = region_path(saves_dir, c);
             if path.exists() {
-                let _ = persistence.req_tx.send(PersistRequest::Load { coord: c });
+                jobs.spawn_load(c, path);
             } else {
                 jobs.spawn_gen(c, generator.clone(), registry.clone());
             }

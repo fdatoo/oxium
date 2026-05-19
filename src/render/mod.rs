@@ -685,16 +685,17 @@ impl Renderer {
             let chunk_min = Vec3::new(origin.x as f32, origin.y as f32, origin.z as f32);
             let chunk_max = chunk_min + Vec3::splat(32.0);
             let center_f = chunk_min + Vec3::splat(16.0);
-            // BOTH culls DISABLED. If DC now equals CH and the void
-            // is gone, *some* cull was wrong. If DC == CH but void
-            // persists, the missing chunks aren't in `chunk_meshes`
-            // at all (mesh job didn't run or was rejected). If
-            // DC < CH still, the iteration itself is broken.
-            let _ = frustum;
-            let _ = chunk_max;
-            let _ = cull_sq;
-            let _ = center_f;
-            let _ = chunk_min;
+            let d_sq = (center_f - eye).length_squared();
+            if d_sq > cull_sq {
+                continue;
+            }
+            // Frustum cull: skip chunks entirely behind the camera
+            // or out to the sides. The cheap n-vertex test per
+            // chunk saves the per-draw wgpu command-encoding cost
+            // that dominated render time before culling.
+            if !aabb_in_frustum(frustum, chunk_min, chunk_max) {
+                continue;
+            }
             let preferred = Self::pick_lod(eye, center_f);
             // Try the preferred LOD first; if it isn't uploaded yet,
             // fall back to *any* available LOD slot rather than
