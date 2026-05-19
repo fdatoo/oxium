@@ -233,6 +233,18 @@ impl ApplicationHandler for App {
             } => {
                 state.input_buf.on_mouse_button(button, bstate);
             }
+            WindowEvent::MouseWheel { delta, .. } => {
+                // winit reports either lines (mouse wheel) or pixels
+                // (trackpad scroll). Treat one line ≈ one detent; the
+                // pixel branch scales down so trackpad scrolling
+                // doesn't fly through the hotbar.
+                use winit::event::MouseScrollDelta;
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
+                };
+                state.input_buf.on_scroll(lines);
+            }
             WindowEvent::RedrawRequested => {
                 state.step();
                 self.frames_drawn = self.frames_drawn.saturating_add(1);
@@ -335,7 +347,29 @@ fn capture_offscreen(
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     let aspect = width as f32 / height.max(1) as f32;
-    renderer.render_to_view(&view, eye, yaw, pitch, aspect, sun_dir, sun_intensity, time);
+    // Capture the HUD too so screenshots can verify HUD layout.
+    // Build a representative HudFrame using a fixed-ish FPS readout
+    // (the real metric requires multiple live frames; the screenshot
+    // path runs in one shot after warmup).
+    let registry = crate::voxel::block::BlockRegistry::new();
+    let hud = crate::render::hud::build_hud(
+        (width, height),
+        60.0,
+        eye,
+        0,
+        &registry,
+    );
+    renderer.render_to_view(
+        &view,
+        eye,
+        yaw,
+        pitch,
+        aspect,
+        sun_dir,
+        sun_intensity,
+        time,
+        Some(&hud),
+    );
 
     render::screenshot::capture_texture_to_png(
         &renderer.gpu.device,

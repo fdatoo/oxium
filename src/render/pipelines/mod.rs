@@ -5,5 +5,6 @@
 //! changes local.
 
 pub mod cursor;
+pub mod hud;
 pub mod opaque;
 pub mod sky;

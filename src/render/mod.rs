@@ -12,7 +12,9 @@
 
 pub mod atlas;
 pub mod camera;
+pub mod font;
 pub mod gpu;
+pub mod hud;
 pub mod mesh;
 pub mod pipelines;
 pub mod screenshot;
@@ -27,11 +29,14 @@ use crate::render::camera::{
     make_camera_bind_group_layout, make_camera_buffer, make_chunk_bind_group_layout, view_proj,
     CameraUniform, ChunkUniform,
 };
+use crate::render::font::{build_font_atlas, ATLAS_H as FONT_ATLAS_H, ATLAS_W as FONT_ATLAS_W};
 use crate::render::gpu::{make_depth_texture, Gpu};
+use crate::render::hud::HudFrame;
 use crate::render::mesh::{upload_mesh, GpuMesh};
 use crate::render::pipelines::cursor::{
     build as build_cursor, make_cursor_bind_group_layout, CursorPipeline,
 };
+use crate::render::pipelines::hud::{build as build_hud, HudPipeline};
 use crate::render::pipelines::opaque::{build as build_opaque, OpaquePipeline};
 use crate::render::pipelines::sky::{build as build_sky, SkyPipeline};
 use crate::voxel::coords::{BlockPos, ChunkCoord};
@@ -66,6 +71,19 @@ pub struct Renderer {
     /// Built once at startup from `assets/textures/*.png`; the GPU
     /// resources stay alive for the renderer's lifetime.
     atlas: AtlasGpu,
+
+    /// HUD pipeline + the two bind groups it draws against (one for
+    /// the font atlas, one re-using the block atlas for hotbar
+    /// icons). The screen-size uniform is rewritten per frame.
+    hud_pipe: HudPipeline,
+    hud_screen_buf: wgpu::Buffer,
+    hud_screen_bg: wgpu::BindGroup,
+    hud_font_bg: wgpu::BindGroup,
+    hud_atlas_bg: wgpu::BindGroup,
+    /// Kept alive so `hud_font_bg`'s texture view stays valid.
+    _hud_font_texture: wgpu::Texture,
+    _hud_font_view: wgpu::TextureView,
+    _hud_sampler: wgpu::Sampler,
 
     /// Up to three GPU meshes per loaded chunk — one per LOD level
     /// (`[L0, L1, L2]`). The render loop picks which slot to draw based
@@ -122,6 +140,103 @@ impl Renderer {
         );
         let sky_pipe = build_sky(&gpu.device, gpu.surface_cfg.format, &camera_bgl);
 
+        // HUD: build the pipeline + upload the font atlas. The font
+        // texture is its own resource (R8-style data but stored
+        // RGBA8Unorm — see `font.rs`) so the HUD shader can use the
+        // same `tex * vertex_color` math for both font and block
+        // batches. The block atlas's bind group is *separate* from
+        // the opaque pipeline's bind group because the HUD pipeline
+        // uses its own bind-group layout (different binding indices).
+        let hud_pipe = build_hud(&gpu.device, gpu.surface_cfg.format);
+        let hud_screen_buf =
+            gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("hud-screen-uniform"),
+                contents: bytemuck::cast_slice(&[
+                    gpu.surface_cfg.width as f32,
+                    gpu.surface_cfg.height as f32,
+                    0.0,
+                    0.0,
+                ]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        let hud_screen_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("hud-screen-bg"),
+            layout: &hud_pipe.screen_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: hud_screen_buf.as_entire_binding(),
+            }],
+        });
+        let hud_sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("hud-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        // Font atlas texture upload.
+        let font_bytes = build_font_atlas();
+        let font_size = wgpu::Extent3d {
+            width: FONT_ATLAS_W,
+            height: FONT_ATLAS_H,
+            depth_or_array_layers: 1,
+        };
+        let font_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("hud-font-texture"),
+            size: font_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            // Stored as plain `Rgba8Unorm` (not -Srgb) so the white
+            // glyph pixels render at their authored brightness — the
+            // text shouldn't be gamma-darkened the way world textures
+            // are. Output is composited over the (already-srgb-encoded)
+            // world by the alpha-blend pipeline state.
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        gpu.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &font_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &font_bytes,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(FONT_ATLAS_W * 4),
+                rows_per_image: Some(FONT_ATLAS_H),
+            },
+            font_size,
+        );
+        let font_view = font_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let hud_font_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("hud-font-bg"),
+            layout: &hud_pipe.tex_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&font_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&hud_sampler) },
+            ],
+        });
+        // Block-atlas bind group for the HUD pipeline's layout (the
+        // opaque pipeline's bind group can't be reused — its layout
+        // matches a *different* pipeline's bind-group layout, and
+        // wgpu validates layout identity per draw).
+        let atlas_view = atlas
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let hud_atlas_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("hud-atlas-bg"),
+            layout: &hud_pipe.tex_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&atlas_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&hud_sampler) },
+            ],
+        });
+
         // Cursor highlight pipeline + buffer.
         let cursor_bgl = make_cursor_bind_group_layout(&gpu.device);
         let cursor_buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -157,6 +272,14 @@ impl Renderer {
             cursor_bg,
             cursor_visible: false,
             atlas,
+            hud_pipe,
+            hud_screen_buf,
+            hud_screen_bg,
+            hud_font_bg,
+            hud_atlas_bg,
+            _hud_font_texture: font_texture,
+            _hud_font_view: font_view,
+            _hud_sampler: hud_sampler,
             chunk_meshes: HashMap::new(),
         }
     }
@@ -181,10 +304,24 @@ impl Renderer {
         }
     }
 
+    /// Current swap-chain framebuffer dimensions. Used by the HUD
+    /// builder to lay out elements in pixel space.
+    pub fn framebuffer_size(&self) -> (u32, u32) {
+        (self.gpu.surface_cfg.width, self.gpu.surface_cfg.height)
+    }
+
     /// Reconfigure the surface + depth texture for a new window size.
     pub fn resize(&mut self, w: u32, h: u32) {
         self.gpu.resize(w, h);
         self.depth_view = make_depth_texture(&self.gpu.device, w, h);
+        // HUD lays out in pixel space so the screen-size uniform also
+        // needs the new dimensions; otherwise the HUD shrinks/expands
+        // to fill the old framebuffer rect.
+        self.gpu.queue.write_buffer(
+            &self.hud_screen_buf,
+            0,
+            bytemuck::cast_slice(&[w as f32, h as f32, 0.0, 0.0]),
+        );
     }
 
     /// Upload (or replace) the GPU mesh for chunk `coord` at LOD `lod`
@@ -279,15 +416,17 @@ impl Renderer {
     /// Draw a single frame. `sun_dir` is the (unit-length) world-space sun
     /// direction and `sun_intensity` is its brightness `[0, 1]`; both come
     /// from the time-of-day system. `time` is seconds since startup and
-    /// drives shader-side animation (e.g. water shimmer).
+    /// drives shader-side animation (e.g. water shimmer). The optional
+    /// `hud` is drawn as a separate pass over the world view.
     pub fn render(
-        &self,
+        &mut self,
         eye: Vec3,
         yaw: f32,
         pitch: f32,
         sun_dir: [f32; 3],
         sun_intensity: f32,
         time: f32,
+        hud: Option<&HudFrame>,
     ) -> Result<(), wgpu::SurfaceError> {
         let aspect =
             self.gpu.surface_cfg.width as f32 / self.gpu.surface_cfg.height.max(1) as f32;
@@ -320,9 +459,92 @@ impl Renderer {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         self.encode_opaque_pass(&mut enc, &view, eye);
+        // HUD: uploaded once per frame into fresh vertex/index
+        // buffers (the HUD layout changes every frame as FPS ticks).
+        if let Some(hud) = hud {
+            self.encode_hud_pass(&mut enc, &view, hud);
+        }
         self.gpu.queue.submit(std::iter::once(enc.finish()));
         frame.present();
         Ok(())
+    }
+
+    /// Encode the HUD pass: alpha-blended 2D overlay, two draws (font
+    /// + block-atlas batches). Skipped when both batches are empty.
+    fn encode_hud_pass(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        color_view: &wgpu::TextureView,
+        hud: &HudFrame,
+    ) {
+        use wgpu::util::DeviceExt;
+        if hud.text.vertices.is_empty() && hud.icons.vertices.is_empty() {
+            return;
+        }
+        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("hud-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: color_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    // `Load` so we composite over the world pass that
+                    // already populated this view.
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&self.hud_pipe.pipeline);
+        pass.set_bind_group(0, &self.hud_screen_bg, &[]);
+
+        // Helper: stash a batch's CPU buffers into ephemeral wgpu
+        // buffers, then draw them. `init_buffer` makes the lifetime
+        // straightforward — the buffers are dropped at the end of the
+        // pass but the encoded GPU commands hold references to them
+        // via the submitted command buffer.
+        let mut draw_batch = |batch: &crate::render::hud::HudBatch,
+                              bind_group: &wgpu::BindGroup,
+                              vbuf_holder: &mut Option<wgpu::Buffer>,
+                              ibuf_holder: &mut Option<wgpu::Buffer>| {
+            if batch.vertices.is_empty() {
+                return;
+            }
+            let vbuf =
+                self.gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("hud-vbuf"),
+                    contents: bytemuck::cast_slice(&batch.vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let ibuf =
+                self.gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("hud-ibuf"),
+                    contents: bytemuck::cast_slice(&batch.indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+            // Bind, then keep the buffers alive in the outer scope
+            // until the render-pass ends; the borrow checker would
+            // otherwise drop them mid-draw.
+            *vbuf_holder = Some(vbuf);
+            *ibuf_holder = Some(ibuf);
+            pass.set_bind_group(1, bind_group, &[]);
+            pass.set_vertex_buffer(0, vbuf_holder.as_ref().unwrap().slice(..));
+            pass.set_index_buffer(
+                ibuf_holder.as_ref().unwrap().slice(..),
+                wgpu::IndexFormat::Uint32,
+            );
+            pass.draw_indexed(0..batch.indices.len() as u32, 0, 0..1);
+        };
+
+        let (mut tv, mut ti, mut bv, mut bi) = (None, None, None, None);
+        draw_batch(&hud.icons, &self.hud_atlas_bg, &mut tv, &mut ti);
+        draw_batch(&hud.text, &self.hud_font_bg, &mut bv, &mut bi);
+        // Drop the pass before the closure-captured buffers go out
+        // of scope so the encoder finishes recording.
+        drop(pass);
+        let _ = (tv, ti, bv, bi);
     }
 
     /// Encode the sky + opaque passes into `enc` against the given color
@@ -423,6 +645,7 @@ impl Renderer {
         sun_dir: [f32; 3],
         sun_intensity: f32,
         time: f32,
+        hud: Option<&HudFrame>,
     ) {
         let vp = view_proj(eye, yaw, pitch, 70f32.to_radians(), aspect);
         let inv_vp = vp.inverse();
@@ -446,6 +669,9 @@ impl Renderer {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         self.encode_opaque_pass(&mut enc, target, eye);
+        if let Some(hud) = hud {
+            self.encode_hud_pass(&mut enc, target, hud);
+        }
         self.gpu.queue.submit(std::iter::once(enc.finish()));
     }
 }

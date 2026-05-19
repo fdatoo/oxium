@@ -34,6 +34,9 @@ pub struct InputBuf {
     pub lmb_pressed: bool,
     /// Right mouse pressed during this frame (edge-triggered).
     pub rmb_pressed: bool,
+    /// Signed scroll-wheel delta this frame (positive = wheel up =
+    /// previous hotbar slot, matching Minecraft's convention).
+    pub scroll_delta: f32,
 }
 
 impl InputBuf {
@@ -45,6 +48,14 @@ impl InputBuf {
         self.key_pressed_this_frame.clear();
         self.lmb_pressed = false;
         self.rmb_pressed = false;
+        self.scroll_delta = 0.0;
+    }
+
+    /// Add a scroll-wheel delta. winit reports lines on a desktop
+    /// mouse and pixels on a trackpad; we accumulate the signed
+    /// magnitude either way and let `apply_input` decide on a step.
+    pub fn on_scroll(&mut self, lines: f32) {
+        self.scroll_delta += lines;
     }
 
     /// Add a raw mouse-motion delta from winit's `DeviceEvent::MouseMotion`.
@@ -142,20 +153,18 @@ pub fn apply_input(ecs: &mut GameEcs, buf: &InputBuf) {
     input.break_ = buf.lmb_pressed;
     input.place = buf.rmb_pressed;
 
-    // Number-row 1..7 cycle the currently-selected block. Held in its own
-    // query so the borrow above can release before we touch a different
-    // component on the same entity.
+    // Number-row 1..8 + scroll wheel cycle the currently-selected
+    // block. Held in its own query so the borrow above can release
+    // before we touch a different component on the same entity.
+    //
+    // The hotbar layout is the single source of truth for which block
+    // each slot holds — `apply_input` just steps the *slot index* and
+    // resolves the block via `HOTBAR_BLOCKS`. That keeps the input
+    // path and the HUD's icon rendering in sync without a second
+    // ordering list to maintain.
     drop(q);
-    let blocks = [
-        crate::voxel::block::Block::Stone,
-        crate::voxel::block::Block::Dirt,
-        crate::voxel::block::Block::Grass,
-        crate::voxel::block::Block::Sand,
-        crate::voxel::block::Block::Wood,
-        crate::voxel::block::Block::Leaves,
-        crate::voxel::block::Block::Torch,
-    ];
-    let keys = [
+    use crate::render::hud::HOTBAR_BLOCKS;
+    let digit_keys = [
         KeyCode::Digit1,
         KeyCode::Digit2,
         KeyCode::Digit3,
@@ -163,15 +172,47 @@ pub fn apply_input(ecs: &mut GameEcs, buf: &InputBuf) {
         KeyCode::Digit5,
         KeyCode::Digit6,
         KeyCode::Digit7,
+        KeyCode::Digit8,
+        KeyCode::Digit9,
     ];
     let mut sq = ecs
         .world
         .query_one::<&mut crate::ecs::components::Selected>(ecs.player)
         .unwrap();
     let sel = sq.get().unwrap();
-    for (i, k) in keys.iter().enumerate() {
+
+    // 1..9 keys: jump straight to that slot (only the slots whose
+    // block is `Some` actually change the selection — empty slot 9
+    // is ignored).
+    for (i, k) in digit_keys.iter().enumerate() {
         if buf.key_pressed_this_frame.contains(k) {
-            sel.0 = blocks[i];
+            if let Some(block) = HOTBAR_BLOCKS[i] {
+                sel.0 = block;
+            }
+        }
+    }
+
+    // Scroll wheel: each notch (winit reports ~1.0 per detent on a
+    // typical mouse) steps the selection forward or backward by one
+    // slot. Wraps at the ends. Empty slots are skipped so the scroll
+    // never lands on a "nothing to place" state.
+    if buf.scroll_delta.abs() >= 0.5 {
+        let cur = HOTBAR_BLOCKS
+            .iter()
+            .position(|b| *b == Some(sel.0))
+            .unwrap_or(0) as i32;
+        let dir = if buf.scroll_delta > 0.0 { -1 } else { 1 };
+        let n = HOTBAR_BLOCKS.len() as i32;
+        // Step until we land on a non-empty slot — at most `n` steps,
+        // and since there's always at least one populated slot we
+        // always terminate.
+        let mut next = cur;
+        for _ in 0..n {
+            next = (next + dir).rem_euclid(n);
+            if let Some(block) = HOTBAR_BLOCKS[next as usize] {
+                sel.0 = block;
+                break;
+            }
         }
     }
 }

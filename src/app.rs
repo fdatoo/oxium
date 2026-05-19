@@ -55,10 +55,50 @@ pub struct AppState {
     /// Real time when AppState was created — used to compute `time`
     /// for shader animation (water shimmer, etc).
     pub start_time: Instant,
+    /// Rolling FPS meter — sampled every `step` and read by the HUD.
+    pub fps_meter: FpsMeter,
 }
 
 /// How often the autosave system flushes modified chunks to disk.
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Rolling window of recent frame durations, used to compute a smooth
+/// FPS readout for the HUD. A short window (1 s of frames) reacts
+/// quickly to genuine slowdowns without flickering between samples.
+pub struct FpsMeter {
+    samples: std::collections::VecDeque<f32>,
+    capacity: usize,
+}
+
+impl FpsMeter {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            samples: std::collections::VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    /// Record one frame's duration (seconds). Drops the oldest sample
+    /// when the ring is full so the average tracks the most recent
+    /// `capacity` frames.
+    pub fn record(&mut self, dt: f32) {
+        if self.samples.len() == self.capacity {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(dt.max(1.0e-5));
+    }
+
+    /// Smoothed frames-per-second over the current window. Returns 0
+    /// before any frames have been recorded so the HUD doesn't display
+    /// "NaN" on the first frame.
+    pub fn fps(&self) -> f32 {
+        if self.samples.is_empty() {
+            return 0.0;
+        }
+        let sum: f32 = self.samples.iter().sum();
+        self.samples.len() as f32 / sum
+    }
+}
 
 impl AppState {
     /// Build all subsystems. The player spawns at `(16, 96, 16)` — above
@@ -98,6 +138,7 @@ impl AppState {
             input_buf: InputBuf::default(),
             last_tick: Instant::now(),
             start_time: Instant::now(),
+            fps_meter: FpsMeter::new(60),
         }
     }
 
@@ -107,6 +148,7 @@ impl AppState {
         let now = Instant::now();
         let dt = now.duration_since(self.last_tick).as_secs_f32().min(0.1);
         self.last_tick = now;
+        self.fps_meter.record(dt);
 
         crate::ecs::systems::input::apply_input(&mut self.ecs, &self.input_buf);
         crate::ecs::systems::time_of_day::advance(&mut self.ecs, dt);
@@ -176,9 +218,14 @@ impl AppState {
         }
 
         let time = self.start_time.elapsed().as_secs_f32();
-        if let Err(e) =
-            crate::ecs::systems::render::render(&self.ecs, &mut self.renderer, time)
-        {
+        let fps = self.fps_meter.fps();
+        if let Err(e) = crate::ecs::systems::render::render(
+            &self.ecs,
+            &mut self.renderer,
+            &self.registry,
+            fps,
+            time,
+        ) {
             log::warn!("render error: {e:?}");
         }
         self.input_buf.clear_per_frame();

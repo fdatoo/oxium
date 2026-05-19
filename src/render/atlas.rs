@@ -151,9 +151,11 @@ fn blit_tile(atlas: &mut [u8], index: u32, tile_rgba: &[u8]) {
 pub struct AtlasGpu {
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub bind_group: wgpu::BindGroup,
-    /// Kept alive so the bind-group's texture view stays valid; not
-    /// read directly after construction.
-    _texture: wgpu::Texture,
+    /// Public so other pipelines (e.g. the HUD) can build their own
+    /// bind groups against the same atlas image. Bind-group layouts
+    /// are per-pipeline in wgpu, so a single bind group can't serve
+    /// every consumer — but the underlying texture is reusable.
+    pub texture: wgpu::Texture,
     _view: wgpu::TextureView,
     _sampler: wgpu::Sampler,
 }
@@ -253,7 +255,7 @@ pub fn upload_atlas(device: &wgpu::Device, queue: &wgpu::Queue, image: &AtlasIma
     AtlasGpu {
         bind_group_layout,
         bind_group,
-        _texture: texture,
+        texture,
         _view: view,
         _sampler: sampler,
     }
