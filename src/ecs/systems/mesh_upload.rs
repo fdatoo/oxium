@@ -61,24 +61,22 @@ pub fn drain_jobs(
                 // see it.
                 world.insert(coord, data);
 
-                // Cascade `dirty.light` to the six face neighbours that
-                // already exist, AND to this chunk itself. The chunk
-                // was initially lit with `[None; 6]` neighbours by
-                // `spawn_gen` — fine for surface chunks, but for an
-                // underground chunk the "no above-neighbour ⇒ assume
-                // full sky" fallback bakes in `sky_light = 15` on
-                // every column. The relight pump downstream picks up
-                // these dirty flags and rebuilds lighting with the
-                // real neighbour boundaries, which the BFS's
-                // `seed_from_neighbors` consumes correctly.
-                if let Some(ChunkSlot::Stored { meta, .. }) = world.chunks.get_mut(&coord) {
-                    meta.dirty.light = true;
-                }
-                for nc in neighbor_coords(coord) {
-                    if let Some(ChunkSlot::Stored { meta, .. }) = world.chunks.get_mut(&nc) {
-                        meta.dirty.light = true;
-                    }
-                }
+                // Used to cascade `dirty.light` to self + 6
+                // neighbours here for "underground chunks generated
+                // with no above-neighbour need re-lighting." But the
+                // mark rate from initial stream-in (`~16 gens/frame
+                // × 7 marks each = 112 marks/frame`) buried the
+                // rayon pool: relight jobs piled up faster than the
+                // pump could drain them, and the mesh jobs for the
+                // freshly-generated chunks waited behind that pile.
+                // Result: huge white voids where chunks should be.
+                //
+                // Accepting slightly-too-bright underground lighting
+                // is a much better trade than chunks failing to
+                // render at all. Cascade still fires on real
+                // boundary changes from the Relit handler's
+                // `changed_faces` path, so light propagation
+                // through tunnels still works after player edits.
 
                 // Spawn a LOD0 mesh job for this chunk plus any neighbour
                 // that's already loaded — generating a new chunk can
@@ -270,23 +268,10 @@ pub fn drain_persistence(
                 Some(data) => {
                     // Install the loaded chunk and queue all three LODs.
                     world.insert(coord, data.clone());
-                    // Cascade `dirty.light` the same way as Generated:
-                    // the freshly-loaded chunk's neighbours may have been
-                    // lit before this chunk existed and have stale
-                    // boundary values, and this chunk's saved lighting
-                    // may itself be stale relative to current neighbours.
-                    if let Some(ChunkSlot::Stored { meta, .. }) =
-                        world.chunks.get_mut(&coord)
-                    {
-                        meta.dirty.light = true;
-                    }
-                    for nc in neighbor_coords(coord) {
-                        if let Some(ChunkSlot::Stored { meta, .. }) =
-                            world.chunks.get_mut(&nc)
-                        {
-                            meta.dirty.light = true;
-                        }
-                    }
+                    // Same reasoning as the Generated handler: no
+                    // cascade here. Saved chunks ship their already-
+                    // computed lighting; the relight cascade can fire
+                    // from the boundary-diff path after a real edit.
                     let data_arc = Arc::new(data);
                     let neighbors = gather_neighbors(world, coord);
                     let version = world
