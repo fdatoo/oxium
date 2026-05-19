@@ -40,7 +40,7 @@ use crate::render::pipelines::cursor::{
     build as build_cursor, make_cursor_bind_group_layout, CursorPipeline,
 };
 use crate::render::pipelines::hud::{build as build_hud, HudPipeline};
-use crate::render::pipelines::opaque::{build as build_opaque, OpaquePipeline};
+use crate::render::pipelines::opaque::{build as build_opaque, FrontFace, OpaquePipeline};
 use crate::render::pipelines::sky::{build as build_sky, SkyPipeline};
 use crate::render::pipelines::water::{build as build_water, WaterPipeline};
 use crate::voxel::coords::{BlockPos, ChunkCoord};
@@ -121,6 +121,13 @@ pub struct Renderer {
     /// Bind group exposing `depth_sample_view` at group 3 to the
     /// water pipeline. Recreated alongside the textures on resize.
     water_depth_bg: wgpu::BindGroup,
+    /// Reflection-pass variant of `opaque_pipe`. Identical except
+    /// `front_face = Cw` — mirroring the camera flips the apparent
+    /// winding of every triangle, so without this the regular
+    /// pipeline would cull every top-facing surface (mountain tops,
+    /// grass patches, etc.) when the mirror eye renders them.
+    opaque_pipe_reflection: OpaquePipeline,
+
     /// Multisampled colour render target for the world pass. The world
     /// pass draws into this `MSAA_SAMPLES`-sample texture; the render
     /// pass's `resolve_target` is the swapchain texture, which wgpu
@@ -306,6 +313,15 @@ impl Renderer {
             &camera_bgl,
             &chunk_bgl,
             &atlas.bind_group_layout,
+            FrontFace::Ccw,
+        );
+        let opaque_pipe_reflection = build_opaque(
+            &gpu.device,
+            gpu.surface_cfg.format,
+            &camera_bgl,
+            &chunk_bgl,
+            &atlas.bind_group_layout,
+            FrontFace::Cw,
         );
         let water_pipe = build_water(
             &gpu.device,
@@ -481,6 +497,7 @@ impl Renderer {
             camera_bg,
             chunk_bgl,
             opaque_pipe,
+            opaque_pipe_reflection,
             water_pipe,
             sky_pipe,
             cursor_pipe,
@@ -931,12 +948,16 @@ impl Renderer {
         pass.set_bind_group(0, &self.reflection_camera_bg, &[]);
         pass.draw(0..3, 0..1);
 
-        // 2) Opaque chunks. Use the existing pipeline; the only
-        // thing different here is which camera uniform is bound
-        // (reflection_camera_bg vs camera_bg). `clip_y_min =
-        // SEA_LEVEL` in that uniform makes the fragment shader
-        // discard below-water fragments.
-        pass.set_pipeline(&self.opaque_pipe.pipeline);
+        // 2) Opaque chunks via the REFLECTION-WINDING pipeline
+        // (front_face = Cw). Without this flip, the mirror eye's
+        // view sees every world-facing triangle from the back side
+        // — back-face cull kicks in and drops the entire visible
+        // world, leaving only the sky in the reflection. This was
+        // the actual cause of "reflection content shifts wildly
+        // with camera motion": the reflection texture was sky-only
+        // and small camera moves caused big sky-region shifts in
+        // the sampled output.
+        pass.set_pipeline(&self.opaque_pipe_reflection.pipeline);
         pass.set_bind_group(0, &self.reflection_camera_bg, &[]);
         pass.set_bind_group(2, &self.atlas.bind_group, &[]);
         const CULL_DISTANCE: f32 = 600.0 + 28.0;

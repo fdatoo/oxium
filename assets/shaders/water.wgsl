@@ -334,16 +334,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         // Only top faces get wave-perturbed normals — side faces of
         // exposed water columns shouldn't pretend to be wavy. The
         // amplitude here is the *normal-perturbation* strength,
-        // separate from the vertex-displacement amplitude. Keeping
-        // it low (0.12) makes the per-pixel surface normal swing
-        // only gently away from vertical — so fresnel, sun
-        // reflection, and reflection-UV distortion all stay close
-        // to their "flat-water" baseline, and the screen-space
-        // reflection content doesn't shift wildly as the camera
-        // moves. An earlier 0.45 here made every small camera
-        // movement produce big per-pixel reflection translations
-        // that read as the reflection "sliding around".
-        surface_n = wave_normal(in.v_world.xz, camera.time, 0.12);
+        // separate from the vertex-displacement amplitude.
+        // 0.20 gives readable surface ripple without making the
+        // reflection content visibly slosh on small camera moves.
+        surface_n = wave_normal(in.v_world.xz, camera.time, 0.20);
     }
     let cos_theta = clamp(dot(view_dir, surface_n), 0.0, 1.0);
 
