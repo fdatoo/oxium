@@ -401,7 +401,14 @@ impl ApplicationHandler for App {
             return;
         };
         if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
-            state.input_buf.on_mouse_motion(dx, dy);
+            // Only buffer motion while playing. Otherwise any cursor
+            // movement during a menu / chat session accumulates in
+            // InputBuf and gets applied as a camera shake on the first
+            // resume frame — visible as a sudden snap back toward
+            // where the cursor was last moved in the menu.
+            if state.ui.is_playing() {
+                state.input_buf.on_mouse_motion(dx, dy);
+            }
         }
     }
 }
