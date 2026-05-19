@@ -33,9 +33,16 @@ pub const ROUGHNESS_RANGE: (f32, f32) = (0.7, 1.4);
 
 /// Boundary-intensity threshold below which a plate boundary lifts
 /// ridges. `t = (d_b - d_a) / (d_b + d_a)` — `0` exactly on a
-/// boundary, `1` deep inside a plate. Lower → narrower mountain
-/// ranges.
-pub const BOUNDARY_RIDGE_WIDTH: f32 = 0.12;
+/// boundary, `1` deep inside a plate.
+///
+/// Widened from 0.12 → 0.30 in the cliff-strip fix: a narrower band
+/// concentrates the ridge falloff into a short distance, making the
+/// peak slope at the band midpoint steep enough to trigger cliff
+/// exposure in a straight strip parallel to the plate boundary. A
+/// wider band spreads the rise out so the peak slope stays below
+/// `CLIFF_SLOPE_THRESH`. Trade-off: ridges are broader / less needle-
+/// sharp, which reads more like a real range silhouette anyway.
+pub const BOUNDARY_RIDGE_WIDTH: f32 = 0.30;
 
 /// Peak ridge height (blocks) at a continental–continental boundary.
 /// Lowered from 90 → 60 in the post-overhaul polish pass: the
@@ -63,7 +70,14 @@ pub const WARP_PERIOD: f32 = 400.0;
 /// Slope (in blocks-per-block) above which a column is exposed as a
 /// cliff: surface block becomes `Stone` and the dirt sub-surface is
 /// skipped.
-pub const CLIFF_SLOPE_THRESH: f32 = 1.5;
+///
+/// Raised from 1.5 → 2.2 in the cliff-strip fix. The previous value
+/// was tripped by the ridge-band falloff itself, which produced
+/// straight cliff strips parallel to plate boundaries. 2.2 reserves
+/// cliff exposure for genuinely steep terrain (real cliff faces,
+/// canyon walls, sheer mountain sides) instead of the gentler
+/// gradients found on ridge flanks.
+pub const CLIFF_SLOPE_THRESH: f32 = 2.2;
 /// Hard upper cap on final terrain Y. Keeps tallest peaks inside the
 /// vertical chunk-load radius.
 pub const MAX_TERRAIN_Y: i32 = 140;

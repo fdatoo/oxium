@@ -958,11 +958,11 @@ mod tests {
     /// future runs catch unintentional behavioural drift.
     #[test]
     fn golden_seed42_chunk_0_2_0() {
-        // Hash re-baselined for the post-overhaul polish pass
-        // (smoothstep ridges, lower RIDGE_PEAK_CC, along-boundary
-        // ridge noise fix, snow tuning, lake shoreline halo,
-        // tree-on-sand fixes).
-        const GOLDEN_42_002: u64 = 0xFD7A_B0B9_CBAF_3B81;
+        // Hash re-baselined for the cliff-strip fix: wider
+        // `BOUNDARY_RIDGE_WIDTH` (0.12 → 0.30) and higher
+        // `CLIFF_SLOPE_THRESH` (1.5 → 2.2) so the ridge falloff no
+        // longer trips cliff exposure in a straight strip.
+        const GOLDEN_42_002: u64 = 0xC4CA_9989_CEA6_C50E;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);
