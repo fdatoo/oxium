@@ -86,6 +86,17 @@ pub struct PerfSnapshot {
     /// LOD0 mesh slots currently held by the renderer. Useful as a
     /// proxy for "is the world fully streamed in yet."
     pub chunks_rendered: usize,
+    /// Chunks currently in `ChunkSlot::Stored` state — i.e., gen
+    /// completed and world.data is populated. Compare against
+    /// `chunks_rendered`: if `chunks_loaded` is much larger, mesh
+    /// jobs haven't completed yet; if they're roughly equal, the
+    /// world really is fully streamed and any voids are something
+    /// else (cull, frustum, …).
+    pub chunks_loaded: usize,
+    /// Chunks currently in `ChunkSlot::Pending` — gen spawned but
+    /// hasn't returned. If this stays high, the worker pool is
+    /// stuck (panic, deadlock, or saturated).
+    pub chunks_pending: usize,
     /// Milliseconds of *work* (not wall-clock between frames) the
     /// last step took. With vsync on, frame time = work + vsync
     /// wait; work-time alone tells you whether a low FPS reading is
@@ -319,6 +330,19 @@ impl AppState {
         }) as u32 as _;
         self.perf.chunks_rendered = self.renderer.chunk_mesh_count();
         self.perf.draw_calls = self.renderer.last_draw_calls();
+        // Walk the world chunks once to count Stored vs Pending so
+        // the HUD can show whether the missing chunks are simply
+        // un-generated yet vs generated-but-not-meshed.
+        let mut stored = 0usize;
+        let mut pending = 0usize;
+        for slot in self.world.chunks.values() {
+            match slot {
+                crate::voxel::world::ChunkSlot::Stored { .. } => stored += 1,
+                crate::voxel::world::ChunkSlot::Pending => pending += 1,
+            }
+        }
+        self.perf.chunks_loaded = stored;
+        self.perf.chunks_pending = pending;
         crate::ecs::systems::world_stream::world_unload(
             &self.ecs,
             &mut self.world,

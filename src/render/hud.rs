@@ -200,8 +200,13 @@ pub fn build_hud(
     // non-zero means cascade isn't terminating. "CH" = chunk meshes
     // currently held by the renderer.
     let perf_str = format!(
-        "LQ: {} CH: {} DC: {} WMS: {:.1}",
-        perf.light_queue, perf.chunks_rendered, perf.draw_calls, perf.work_ms,
+        "LQ: {} LD: {} PE: {} CH: {} DC: {} WMS: {:.1}",
+        perf.light_queue,
+        perf.chunks_loaded,
+        perf.chunks_pending,
+        perf.chunks_rendered,
+        perf.draw_calls,
+        perf.work_ms,
     );
     // A semi-transparent dark backdrop behind the three text lines so
     // the cyan/white glyphs stay readable against bright skies and
