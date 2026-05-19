@@ -64,6 +64,9 @@ struct CliOptions {
     /// alongside the perf-counter snapshot. Open the file in a
     /// spreadsheet (or `awk`) to see where the frame budget goes.
     profile_path: Option<PathBuf>,
+    /// Hidden test hook: drop the UI into `paused` or `chat` before the
+    /// screenshot frame. No effect during normal play.
+    ui_state: Option<String>,
 }
 
 impl CliOptions {
@@ -76,6 +79,7 @@ impl CliOptions {
         let mut time_of_day: Option<f32> = None;
         let mut uncapped = false;
         let mut profile_path = None;
+        let mut ui_state: Option<String> = None;
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--screenshot-and-exit" => {
@@ -112,6 +116,10 @@ impl CliOptions {
                         .expect("--profile requires a path argument");
                     profile_path = Some(PathBuf::from(path));
                 }
+                "--ui" => {
+                    let v = args.next().expect("--ui requires `paused` or `chat`");
+                    ui_state = Some(v);
+                }
                 _ => {}
             }
         }
@@ -128,6 +136,7 @@ impl CliOptions {
             time_of_day,
             uncapped,
             profile_path,
+            ui_state,
         }
     }
 }
@@ -200,7 +209,7 @@ impl ApplicationHandler for App {
             .or_else(|| self.cli.find_water.then(find_water_spawn));
         let uncapped = self.cli.uncapped;
         let profile = self.cli.profile_path.as_deref();
-        let state = match spawn {
+        let mut state = match spawn {
             Some(p) => AppState::new_with_spawn(window.clone(), p, uncapped, profile),
             None => AppState::new_with_spawn(
                 window.clone(),
@@ -223,6 +232,20 @@ impl ApplicationHandler for App {
             {
                 tod.t = t;
             }
+        }
+
+        if let Some(ref kind) = self.cli.ui_state {
+            use crate::ui::state::{MenuNav, UiState};
+            use crate::ui::chat::ChatInput;
+            state.ui.state = match kind.as_str() {
+                "paused" => UiState::Paused { menu: MenuNav::Top { hovered: 0 } },
+                "chat"   => UiState::Chat { input: ChatInput::new("/he"), prefilled_slash: true },
+                other    => panic!("--ui: expected 'paused' or 'chat', got {other}"),
+            };
+            // Pre-seed a few chat lines so the chat snapshot shows content.
+            state.ui.log.push_system("System: hello there");
+            state.ui.log.push_player("a friendly note");
+            state.ui.log.push_echo("/help");
         }
 
         // Skip cursor grab when running in screenshot mode so the helper
