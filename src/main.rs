@@ -337,6 +337,17 @@ impl ApplicationHandler for App {
                     }
                 }
 
+                // Re-assert cursor invisibility every gameplay frame.
+                // macOS only honours `set_cursor_visible(false)` while
+                // it considers the cursor "over" the window; the moment
+                // motion suggests the cursor has wandered, the OS
+                // flashes the system pointer back on. Cheap to call
+                // (no-op when already hidden), and unlike a warp it
+                // doesn't perturb DeviceEvent::MouseMotion.
+                if state.ui.is_playing() {
+                    state.window.set_cursor_visible(false);
+                }
+
                 if state.ui.wants_quit {
                     event_loop.exit();
                     return;
@@ -478,11 +489,19 @@ fn capture_offscreen(
 }
 
 fn grab_cursor(window: &winit::window::Window) {
-    if let Err(e) = window
-        .set_cursor_grab(CursorGrabMode::Locked)
-        .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined))
-    {
-        log::warn!("cursor grab failed: {e:?}");
+    // Prefer Locked (cursor is pinned, doesn't move at all). If the
+    // platform refuses (some Linux setups, older macOS), fall back to
+    // Confined which at least keeps the cursor inside the window.
+    match window.set_cursor_grab(CursorGrabMode::Locked) {
+        Ok(()) => log::debug!("cursor grab: Locked"),
+        Err(e_locked) => match window.set_cursor_grab(CursorGrabMode::Confined) {
+            Ok(()) => log::info!(
+                "cursor grab: Confined (Locked unavailable: {e_locked:?})"
+            ),
+            Err(e_confined) => log::warn!(
+                "cursor grab failed (Locked: {e_locked:?}; Confined: {e_confined:?})"
+            ),
+        },
     }
     window.set_cursor_visible(false);
 }
