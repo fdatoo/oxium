@@ -217,11 +217,32 @@ impl Ui {
     fn submit_chat(&mut self, line: &str) {
         let line = line.trim();
         if line.is_empty() { return }
-        if line.starts_with('/') {
-            self.log.push_echo(line);
-            self.log.push_error("(dispatcher not wired yet)");
-        } else {
+        if !line.starts_with('/') {
             self.log.push_player(line);
+            return;
+        }
+        self.log.push_echo(line);
+
+        // Special-case /help so it can walk the registry, which
+        // Command::run can't access.
+        if line == "/help" {
+            for c in self.commands.all() {
+                self.log.push_system(c.help());
+            }
+            return;
+        }
+
+        match self.commands.dispatch(line) {
+            Ok(effs) => {
+                for e in effs {
+                    match e {
+                        UiEffect::PostMessage(msg) => self.log.push_system(msg),
+                        UiEffect::ClearChat => self.log.clear(),
+                        other => self.push_effect(other),
+                    }
+                }
+            }
+            Err(msg) => self.log.push_error(msg),
         }
     }
 
