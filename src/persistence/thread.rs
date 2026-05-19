@@ -19,10 +19,12 @@ use std::thread;
 
 /// A unit of work sent from the main thread.
 pub enum PersistRequest {
-    /// Write `data` to the appropriate region file.
+    /// Write `data` to the appropriate region file. Carries `Arc` so
+    /// the main thread doesn't have to deep-clone the chunk just to
+    /// hand it off — the I/O thread reads through the Arc.
     Save {
         coord: ChunkCoord,
-        data: PalettedChunk,
+        data: std::sync::Arc<PalettedChunk>,
     },
     /// Read the chunk at `coord` if it exists on disk.
     Load {
@@ -69,7 +71,7 @@ impl Persistence {
                         PersistRequest::Shutdown => break,
                         PersistRequest::Save { coord, data } => {
                             let path = region_path(&saves_dir, coord);
-                            if let Err(e) = write_chunk(&path, coord, &data) {
+                            if let Err(e) = write_chunk(&path, coord, &*data) {
                                 log::warn!("save failed {coord:?}: {e:?}");
                             }
                             let _ = res_tx.send(PersistResult::Saved { coord });

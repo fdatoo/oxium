@@ -17,7 +17,17 @@ use std::collections::HashMap;
 /// yet — the streaming system uses this to avoid re-spawning the same job.
 pub enum ChunkSlot {
     Pending,
-    Stored { data: PalettedChunk, meta: ChunkMeta },
+    /// `data` is `Arc<PalettedChunk>` so every consumer (mesh job
+    /// neighbour gather, persistence save, edit dispatcher) can
+    /// `Arc::clone` instead of deep-copying ~50 KB of palette + bits.
+    /// The pre-Arc layout's `data.clone()` showed up as a top hot
+    /// stack in the samply profile of the user's first-break
+    /// regression: each `gather_neighbors` cloned 6 chunks, and the
+    /// Generated handler called `gather_neighbors` seven times per
+    /// new chunk → ~49 × 50 KB allocs per generated chunk every
+    /// frame. Switching to `Arc` makes those clones O(1) atomic
+    /// refcount bumps.
+    Stored { data: std::sync::Arc<PalettedChunk>, meta: ChunkMeta },
 }
 
 /// The world: every currently-loaded chunk, the seed used to regenerate
@@ -67,7 +77,13 @@ impl World {
             },
             ..Default::default()
         };
-        self.chunks.insert(c, ChunkSlot::Stored { data, meta });
+        self.chunks.insert(
+            c,
+            ChunkSlot::Stored {
+                data: std::sync::Arc::new(data),
+                meta,
+            },
+        );
     }
 
     /// Overwrite the block at `pos` with `new_block` and mark every chunk
@@ -97,7 +113,7 @@ impl World {
         // one block per click so it's fine.
         let mut dense = data.decompress();
         dense.set(local, new_block);
-        *data = PalettedChunk::compress(&dense);
+        *data = std::sync::Arc::new(PalettedChunk::compress(&dense));
 
         meta.dirty.mesh = true;
         meta.dirty.light = true;

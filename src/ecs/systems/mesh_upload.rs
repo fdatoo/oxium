@@ -85,7 +85,7 @@ pub fn drain_jobs(
                 // reveal previously-hidden faces on its neighbours.
                 for c in std::iter::once(coord).chain(neighbor_coords(coord)) {
                     if let Some(ChunkSlot::Stored { data, .. }) = world.chunks.get(&c) {
-                        let data_arc = Arc::new(data.clone());
+                        let data_arc = data.clone();
                         let neighbors = gather_neighbors(world, c);
                         jobs.spawn_mesh_lod0(c, data_arc, neighbors, registry.clone());
                     }
@@ -95,7 +95,7 @@ pub fn drain_jobs(
                 // need neighbours (boundary precision is invisible at
                 // distance), so they run independently.
                 if let Some(ChunkSlot::Stored { data, .. }) = world.chunks.get(&coord) {
-                    let data_arc = Arc::new(data.clone());
+                    let data_arc = data.clone();
                     jobs.spawn_mesh_lod(coord, 1, data_arc.clone(), registry.clone());
                     jobs.spawn_mesh_lod(coord, 2, data_arc, registry.clone());
                 }
@@ -112,12 +112,13 @@ pub fn drain_jobs(
                 // baked in at initial gen even after their lighting
                 // converged.
                 use crate::voxel::chunk::{ChunkDirty, ChunkState};
+                let data_arc = Arc::new(data);
                 if let Some(ChunkSlot::Stored {
                     data: cur,
                     meta,
                 }) = world.chunks.get_mut(&coord)
                 {
-                    *cur = data.clone();
+                    *cur = data_arc.clone();
                     meta.dirty = ChunkDirty {
                         mesh: true,
                         light: false,
@@ -147,7 +148,6 @@ pub fn drain_jobs(
                 // chunk re-lights itself. Re-meshing LOD1/LOD2 on
                 // every relight was ~3× the mesh work per cascade
                 // step with no visible benefit at distance.
-                let data_arc = Arc::new(data);
                 let neighbors = gather_neighbors(world, coord);
                 jobs.spawn_mesh_lod0(coord, data_arc, neighbors, registry.clone());
             }
@@ -195,7 +195,7 @@ pub fn relight_pump(
             continue;
         };
         meta.dirty.light = false;
-        let data_arc = Arc::new(data.clone());
+        let data_arc = data.clone();
         let neighbors = gather_neighbors(world, c);
         jobs.spawn_relight(c, data_arc, neighbors, registry.clone());
     }
@@ -280,7 +280,11 @@ pub fn gather_neighbors(world: &World, c: ChunkCoord) -> [Option<Arc<PalettedChu
     let mut out: [Option<Arc<PalettedChunk>>; 6] = Default::default();
     for (i, nc) in coords.iter().enumerate() {
         if let Some(ChunkSlot::Stored { data, .. }) = world.chunks.get(nc) {
-            out[i] = Some(Arc::new(data.clone()));
+            // `data` is already `Arc<PalettedChunk>` — cheap atomic
+            // refcount bump, no 50 KB deep copy. This was the
+            // single biggest hot path in the v0.1.31 samply profile
+            // (~49 chunk clones per generated chunk).
+            out[i] = Some(data.clone());
         }
     }
     out

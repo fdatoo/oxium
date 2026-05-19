@@ -205,7 +205,7 @@ mod tests {
         {
             let mut dense = data.decompress();
             dense.set(LocalPos(UVec3::new(2, 1, 5)), Block::Stone);
-            *data = PalettedChunk::compress(&dense);
+            *data = std::sync::Arc::new(PalettedChunk::compress(&dense));
         }
         // Starting at x=0.5, walking +X at 10 m/s for 1s should be blocked
         // by the wall whose -X face is at x=2.
@@ -236,7 +236,7 @@ mod tests {
             for y in 1..3 {
                 dense.set(LocalPos(UVec3::new(2, y, 5)), Block::Stone);
             }
-            *data = PalettedChunk::compress(&dense);
+            *data = std::sync::Arc::new(PalettedChunk::compress(&dense));
         }
         let res = sweep_player(
             &w,

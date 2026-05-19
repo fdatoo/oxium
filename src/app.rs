@@ -256,7 +256,7 @@ impl AppState {
                 let Some(ChunkSlot::Stored { data, .. }) = self.world.chunks.get(c) else {
                     continue;
                 };
-                let data_arc = std::sync::Arc::new(data.clone());
+                let data_arc = data.clone();
                 let neighbors =
                     crate::ecs::systems::mesh_upload::gather_neighbors(&self.world, *c);
                 if needs_light {
