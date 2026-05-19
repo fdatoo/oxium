@@ -132,6 +132,10 @@ pub struct Generator {
     /// the graph-based cave systems below `WORMHOLE_BAND_Y`. Above
     /// that, caves come exclusively from the cave-system graph.
     wormhole_noise: caves::WormholeNoise,
+    /// High-frequency 2D noise used to perturb biome thresholds so
+    /// the resulting boundaries wave instead of cutting in straight
+    /// contour lines. Added in PR 5.
+    biome_jitter_noise: Fbm<Simplex>,
     seed: u64,
     /// LRU cache of pre-built fine regions. Consulted per chunk fill
     /// to evaluate valley carve and lake water; built on first touch.
@@ -174,16 +178,38 @@ impl Generator {
             .set_frequency(1.0 / 512.0)
             .set_persistence(0.5);
         let wormhole_noise = caves::WormholeNoise::new(seed);
+        // High-frequency biome-edge jitter. 2 octaves of Simplex at
+        // ~24-block period, amplitude shaped by `BIOME_JITTER_AMPL`.
+        let biome_jitter_noise = Fbm::<Simplex>::new(seed.wrapping_add(401) as u32)
+            .set_octaves(2)
+            .set_frequency(1.0 / tuning::BIOME_JITTER_PERIOD as f64)
+            .set_persistence(0.5);
         Self {
             heightmap,
             desert_map,
             temperature_map,
             humidity_map,
             wormhole_noise,
+            biome_jitter_noise,
             seed,
             fine_cache: region::fresh_fine_cache(),
             macro_cache: region::fresh_macro_cache(),
         }
+    }
+
+    /// Sample the biome-edge jitter at world `(wx, wz)`. Scaled to
+    /// `±BIOME_JITTER_AMPL` (noise-value units).
+    fn biome_jitter(&self, wx: i32, wz: i32) -> f32 {
+        (self.biome_jitter_noise.get([wx as f64, wz as f64]) as f32)
+            * tuning::BIOME_JITTER_AMPL
+    }
+
+    /// Rotated jitter — sample at `(wz, -wx)` so it's uncorrelated
+    /// with the primary jitter. Used for the humidity threshold so
+    /// Forest/Plains edges don't co-jitter with desert edges.
+    fn biome_jitter_rot(&self, wx: i32, wz: i32) -> f32 {
+        (self.biome_jitter_noise.get([wz as f64, -(wx as f64)]) as f32)
+            * tuning::BIOME_JITTER_AMPL
     }
 
     /// Build the fine region at `coord` from noise (heightmap +
@@ -259,27 +285,29 @@ impl Generator {
         let height = (h_pre - carve)
             .clamp((CAVE_FLOOR_Y + 8) as f32, MAX_TERRAIN_Y as f32) as i32;
 
-        // Climate sample — still legacy 2D noise per column for PR 3
-        // (PR 5 introduces threshold perturbation + Tropical biome).
+        // Climate sample. PR 5 adds threshold perturbation: a small
+        // shared high-frequency noise field jitters the biome
+        // thresholds so transition edges wave instead of cutting in
+        // straight contour lines.
         let xz = [wx as f64, wz as f64];
+        let jitter = self.biome_jitter(wx, wz);
 
-        let desertness = self.desert_map.get(xz) as f32;
-        // Hard cutoff (no transition smoothing) so the desert/grass
-        // boundary stays crisp and recognisable.
+        let desertness_raw = self.desert_map.get(xz) as f32;
+        let desertness = desertness_raw + jitter;
         let is_desert = desertness > 0.30;
 
-        // Climate axes drive the biome system. The biome itself is a
-        // discrete derivation of (temperature, humidity, desertness)
-        // — see `Biome::classify` — so consumers don't have to repeat
-        // the threshold logic. Computed up front for both the layer
-        // pass and the tree placer.
-        let temperature = self.temperature_map.get(xz) as f32;
-        let humidity = self.humidity_map.get(xz) as f32;
+        let temperature_raw = self.temperature_map.get(xz) as f32;
+        let temperature = temperature_raw - jitter; // negate so cold zones jitter independently
+        let humidity_raw = self.humidity_map.get(xz) as f32;
+        // Rotated jitter for the humidity threshold so Forest/Plains
+        // and cold/warm boundaries don't co-jitter.
+        let humidity = humidity_raw + self.biome_jitter_rot(wx, wz);
         let biome = Biome::classify(temperature, humidity, is_desert);
 
         ColumnData {
             height,
             is_cliff,
+            desertness,
             biome,
         }
     }
@@ -372,22 +400,25 @@ impl Generator {
                                 Block::Air
                             }
                         } else if depth == 0 {
-                            // Surface block selection. Priority order:
-                            //   1. Cliff (slope > CLIFF_SLOPE_THRESH) →
-                            //      bare Stone. Wins over beach so cliffed
-                            //      coastlines read as rock faces, not
-                            //      sand strips. Replaces v1's
-                            //      `MOUNTAIN_ROCK_LINE` rule.
-                            //   2. Beach (column at/below sea level + 1
-                            //      and not a cliff) — coastline sand.
-                            //   3. Snow line — alpine snow cap, biome-
-                            //      independent.
-                            //   4. Cold biome — surface snow at any
-                            //      elevation.
-                            //   5. Desert → Sand; everything else → Grass.
+                            // Surface block selection. Priority:
+                            //   1. Cliff → bare Stone (replaces v1
+                            //      `MOUNTAIN_ROCK_LINE`).
+                            //   2. Beach (`height ∈ [SL-1, SL+2]`) →
+                            //      Sand. PR 5 widens to 4 blocks.
+                            //   3. Snow line → Snow.
+                            //   4. Cold biome → Snow.
+                            //   5. Desert / Tropical-beach-adjacent →
+                            //      Sand; otherwise → Grass.
+                            //   6. PR 5: stochastic sand/grass
+                            //      transition band on the grass side
+                            //      of the desert boundary.
                             if col.is_cliff {
                                 Block::Stone
-                            } else if height <= SEA_LEVEL + 1 {
+                            } else if height >= SEA_LEVEL - 1
+                                && height <= SEA_LEVEL + 2
+                                && !col.biome.snow_capped()
+                            {
+                                // Beach band (4 blocks tall).
                                 Block::Sand
                             } else if height >= SNOW_LINE {
                                 Block::Snow
@@ -396,7 +427,34 @@ impl Generator {
                             } else if col.biome == Biome::Desert {
                                 Block::Sand
                             } else {
-                                Block::Grass
+                                // PR 5 stochastic sand transition:
+                                // inside `SAND_TRANSITION_BAND` (in
+                                // noise-value units) on the grass
+                                // side of the desert boundary, roll
+                                // for sand vs grass. Probability
+                                // ramps from 0 at the band's outer
+                                // edge to ~50% at the boundary.
+                                let dist_to_boundary = 0.30 - col.desertness;
+                                if dist_to_boundary > 0.0
+                                    && dist_to_boundary
+                                        < tuning::SAND_TRANSITION_BAND
+                                {
+                                    let p = 0.5
+                                        * (1.0
+                                            - dist_to_boundary
+                                                / tuning::SAND_TRANSITION_BAND);
+                                    let roll = hash::mix_unit(
+                                        self.seed,
+                                        &[wx, wz, 71],
+                                    );
+                                    if roll < p {
+                                        Block::Sand
+                                    } else {
+                                        Block::Grass
+                                    }
+                                } else {
+                                    Block::Grass
+                                }
                             }
                         } else if depth <= 3 {
                             // Cliff faces are stone all the way down —
@@ -488,13 +546,23 @@ impl Generator {
             return None;
         }
         let height = col.height;
-        // Roll #3: trunk height in 4..=6 blocks.
-        let trunk_h = 4 + (tree_hash(self.seed, cell_x, cell_z, 3) % 3) as i32;
+        let kind = col.biome.tree_kind();
+        let trunk_h = match kind {
+            TreeKind::Oak => {
+                // Roll #3: oak trunk height in 4..=6 blocks.
+                4 + (tree_hash(self.seed, cell_x, cell_z, 3) % 3) as i32
+            }
+            TreeKind::Palm => {
+                // Palms are taller and skinnier: 7..=9 blocks.
+                7 + (tree_hash(self.seed, cell_x, cell_z, 3) % 3) as i32
+            }
+        };
         Some(Tree {
             wx,
             wz,
             base_y: height,
             trunk_h,
+            kind,
         })
     }
 
@@ -508,25 +576,55 @@ impl Generator {
         for dy in 1..=tree.trunk_h {
             try_set_air(coord, out, tree.wx, tree.base_y + dy, tree.wz, Block::Wood);
         }
-        // Leaves: a thick disc + slight cap around the top of the trunk.
         let top_y = tree.base_y + tree.trunk_h;
-        // Round canopy. Radius² uses 6 so the corner cells are dropped
-        // and the silhouette stays roughly spherical instead of cubic.
-        for dy in -1..=2 {
-            for dz in -2..=2 {
-                for dx in -2..=2 {
-                    let r2 = dx * dx + dy * dy + dz * dz;
-                    if r2 > 6 {
-                        continue;
+        match tree.kind {
+            TreeKind::Oak => {
+                // Round canopy. Radius² uses 6 so corner cells drop
+                // out and the silhouette stays roughly spherical.
+                for dy in -1..=2 {
+                    for dz in -2..=2 {
+                        for dx in -2..=2 {
+                            let r2 = dx * dx + dy * dy + dz * dz;
+                            if r2 > 6 {
+                                continue;
+                            }
+                            try_set_air(
+                                coord,
+                                out,
+                                tree.wx + dx,
+                                top_y + dy,
+                                tree.wz + dz,
+                                Block::Leaves,
+                            );
+                        }
                     }
-                    try_set_air(
-                        coord,
-                        out,
-                        tree.wx + dx,
-                        top_y + dy,
-                        tree.wz + dz,
-                        Block::Leaves,
-                    );
+                }
+            }
+            TreeKind::Palm => {
+                // Spreading-fronds canopy: 4–6 horizontal arms, one
+                // block thick, radiating from the trunk top. Each arm
+                // is a straight line of 3 blocks; a small +1y cap
+                // sits at the centre.
+                try_set_air(coord, out, tree.wx, top_y + 1, tree.wz, Block::Leaves);
+                let arm_count = 5; // five fronds, evenly spaced
+                for a in 0..arm_count {
+                    let theta =
+                        a as f32 * std::f32::consts::TAU / arm_count as f32;
+                    for step in 1..=3i32 {
+                        let dx = (theta.cos() * step as f32).round() as i32;
+                        let dz = (theta.sin() * step as f32).round() as i32;
+                        // Fronds droop: outer tip is 1 block lower
+                        // than the trunk top.
+                        let dy = if step >= 3 { -1 } else { 0 };
+                        try_set_air(
+                            coord,
+                            out,
+                            tree.wx + dx,
+                            top_y + dy,
+                            tree.wz + dz,
+                            Block::Leaves,
+                        );
+                    }
                 }
             }
         }
@@ -540,12 +638,14 @@ struct ColumnData {
     /// Surface height in world Y, post-carve, clamped.
     height: i32,
     /// True if the column's `h_pre` slope exceeds `CLIFF_SLOPE_THRESH`.
-    /// Drives bare-rock surface exposure and prevents trees from
-    /// taking root on sheer faces. Replaces the v1 `mountain_weight`
-    /// + `MOUNTAIN_ROCK_LINE` combo.
     is_cliff: bool,
+    /// Jitter-perturbed `desertness` noise value. Used by the
+    /// sand/grass transition band (PR 5): inside the band on the
+    /// grass side of the desert boundary, the surface block is
+    /// rolled stochastically.
+    desertness: f32,
     /// Discrete biome label derived from temperature, humidity, and
-    /// the desert mask.
+    /// the desert mask, with PR 5's threshold perturbation applied.
     biome: Biome,
 }
 
@@ -565,21 +665,18 @@ enum Biome {
     Plains,
     /// Temperate, humid. Grass surface, dense tree cover.
     Forest,
-    /// Hot, dry. Sand surface, no trees. Existing desert biome
-    /// preserved here so the rest of the system has a single
-    /// vocabulary.
+    /// Hot, dry. Sand surface, no trees.
     Desert,
+    /// Hot, humid (new in PR 5). Grass surface, denser tree cover
+    /// than Forest — placeholder for the future palm/jungle pass.
+    /// Palm-shape trees are stamped here via `TreeKind::Palm`.
+    Tropical,
 }
 
 impl Biome {
-    /// Map raw climate noise + the desert mask to a discrete biome.
-    ///
-    /// The model is the classic two-axis temperature × humidity grid
-    /// boiled down to five buckets: anything below
-    /// [`COLD_THRESHOLD`] is cold (Tundra or SnowyForest depending on
-    /// humidity), anything that the legacy `desert_map` marks as
-    /// desert beats out the warm/humid bucket, and the remaining
-    /// temperate region splits on [`FOREST_HUMIDITY`].
+    /// Map climate values plus the (jitter-perturbed) desert mask to
+    /// a discrete biome. PR 5 adds `Tropical` for the hot+wet
+    /// bucket that the new continental geography produces a lot of.
     fn classify(temperature: f32, humidity: f32, is_desert: bool) -> Self {
         if temperature < COLD_THRESHOLD {
             return if humidity > 0.0 {
@@ -592,7 +689,12 @@ impl Biome {
             return Biome::Desert;
         }
         if humidity > FOREST_HUMIDITY {
-            Biome::Forest
+            // Hot+wet ⇒ Tropical; temperate+wet ⇒ Forest.
+            if temperature > 0.20 {
+                Biome::Tropical
+            } else {
+                Biome::Forest
+            }
         } else {
             Biome::Plains
         }
@@ -605,15 +707,32 @@ impl Biome {
 
     /// Probability (0..100) that a `TREE_CELL_SIZE × TREE_CELL_SIZE`
     /// patch in this biome rolls a tree. `None` for biomes that
-    /// don't host trees at all — saves the placement loop a noise
-    /// evaluation per cell.
+    /// don't host trees at all.
     fn tree_rate_percentile(self) -> Option<u32> {
         match self {
             Biome::Tundra | Biome::Desert => None,
             Biome::Plains => Some(TREE_RATE_PLAINS),
             Biome::Forest | Biome::SnowyForest => Some(TREE_RATE_FOREST),
+            Biome::Tropical => Some(crate::worldgen::tuning::TREE_RATE_TROPICAL),
         }
     }
+
+    /// Which tree shape to stamp in this biome's cells. Oak for
+    /// temperate / boreal, Palm for tropical.
+    fn tree_kind(self) -> TreeKind {
+        match self {
+            Biome::Tropical => TreeKind::Palm,
+            _ => TreeKind::Oak,
+        }
+    }
+}
+
+/// Tree shape selector. PR 5 introduces palms for `Tropical`;
+/// follow-up PRs may add jungle / pine / palm-specific blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TreeKind {
+    Oak,
+    Palm,
 }
 
 /// 3 × 3 grid of fine regions centered on a chunk's origin region.
@@ -725,6 +844,9 @@ struct Tree {
     base_y: i32,
     /// Number of Wood blocks above the surface, inclusive.
     trunk_h: i32,
+    /// Tree shape (`Oak` round canopy vs `Palm` spreading fronds).
+    /// Picked from the biome at the cell's column.
+    kind: TreeKind,
 }
 
 /// Write `b` at world coords `(wx, wy, wz)` if they fall inside
@@ -810,10 +932,10 @@ mod tests {
     /// future runs catch unintentional behavioural drift.
     #[test]
     fn golden_seed42_chunk_0_2_0() {
-        // Hash re-baselined for PR 4 (graph-based cave systems +
-        // surface entrances + deep-band wormholes, replacing the
-        // legacy 3D-noise tunnel + cavern carve).
-        const GOLDEN_42_002: u64 = 0x2ED7_ED31_7446_C056;
+        // Hash re-baselined for PR 5 (Tropical biome + threshold
+        // perturbation + stochastic sand transition band + palm
+        // tree stamps).
+        const GOLDEN_42_002: u64 = 0x8179_F099_EB0F_7C0F;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);
@@ -897,6 +1019,7 @@ mod tests {
             Biome::Plains,
             Biome::Forest,
             Biome::Desert,
+            Biome::Tropical,
         ] {
             assert!(
                 seen.contains(&expected),
