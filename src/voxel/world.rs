@@ -105,13 +105,20 @@ impl World {
         meta.state = ChunkState::Generated;
         dirty.push(chunk_coord);
 
-        // Border edits propagate to the neighbour on that side.
+        // Border edits propagate to the neighbour on that side. Both
+        // mesh AND light are marked dirty: the neighbour's boundary
+        // face may have changed visibility (mesh) and its own
+        // lighting BFS reads our edge values to seed boundary cells
+        // (light), so an edit at our boundary that flips a stone to
+        // air opens a new path for sky/torch light to enter the
+        // neighbour from us.
         let (lx, ly, lz) = (local.0.x, local.0.y, local.0.z);
         let dim = CHUNK_DIM_U;
         let mut maybe_mark = |this: &mut World, dc: IVec3| {
             let nc = ChunkCoord(chunk_coord.0 + dc);
             if let Some(ChunkSlot::Stored { meta, .. }) = this.chunks.get_mut(&nc) {
                 meta.dirty.mesh = true;
+                meta.dirty.light = true;
                 dirty.push(nc);
             }
         };

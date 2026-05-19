@@ -29,13 +29,16 @@ const D: i32 = CHUNK_DIM_U as i32;
 /// `light_dirty` and queues another recompute.
 pub fn recompute_chunk(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegistry) {
     sky_light(chunk, neighbors, reg);
-    block_light(chunk, reg);
+    block_light(chunk, neighbors, reg);
 }
 
 /// Compute sky light: each column drops `15` straight down until it hits an
 /// opaque block; non-opaque non-air blocks (e.g. leaves, water) cost 1 per
 /// step. A BFS pass then spreads light horizontally so overhangs receive
-/// the correct gradient.
+/// the correct gradient — and is seeded both from the vertical drop and
+/// from the four lateral chunk neighbours' boundary cells, so a tunnel
+/// dug across a chunk seam keeps a smooth light gradient instead of
+/// hard-switching to black at the boundary.
 fn sky_light(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegistry) {
     chunk.sky_light.iter_mut().for_each(|v| *v = 0);
 
@@ -69,6 +72,15 @@ fn sky_light(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegis
         }
     }
 
+    // Lateral boundary inflow: for each ±X / ±Z / -Y neighbour, copy its
+    // *mirror* boundary cells into our cells along that face, minus one
+    // attenuation step (the cost of crossing the seam). This is what
+    // makes a tunnel that crosses chunk boundaries keep its gradient —
+    // without it, the next chunk along the tunnel starts the BFS with
+    // no seeds and stays uniformly dark. We skip +Y because the
+    // vertical column drop above already consumed it.
+    seed_from_neighbors(chunk, neighbors, /* is_sky */ true);
+
     // BFS: seed every cell currently >= 2 (anything lower will be reached
     // by spreading from a higher cell, so no need to enqueue it now).
     let mut q: VecDeque<(i32, i32, i32, u8)> = VecDeque::new();
@@ -85,8 +97,99 @@ fn sky_light(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegis
     bfs_spread(&mut q, chunk, reg, /* is_sky */ true);
 }
 
+/// Seed the chunk's boundary cells from each face neighbour's mirror
+/// boundary, less one attenuation step (the cost of crossing the
+/// seam). Called by both sky-light and block-light passes after their
+/// in-chunk seeding. The BFS that runs afterward picks up these
+/// boundary values and spreads them inward.
+///
+/// The neighbour's cell at the mirror position represents whatever the
+/// neighbour already knows about that location's light. If the
+/// neighbour was just regenerated and has high light at its boundary
+/// (e.g., the lit end of a tunnel), this seeds *our* boundary cells
+/// so the BFS continues the gradient from there.
+fn seed_from_neighbors(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, is_sky: bool) {
+    use crate::mesher::Face;
+    for face in Face::all() {
+        // Sky light: +Y inflow is handled by the column drop above; the
+        // boundary-seed pass would re-seed those columns to whatever the
+        // above-chunk's bottom holds, which may be `0` (the above chunk
+        // is solid stone) — overwriting the vertical pass's correct
+        // value with 0 isn't a problem because we take `max`, but skip
+        // for clarity.
+        if is_sky && face == Face::PosY {
+            continue;
+        }
+        let Some(n) = neighbors.chunks[face as usize] else {
+            continue;
+        };
+        for v in 0..D {
+            for u in 0..D {
+                let (our_lp, their_lp) = mirror_boundary(face, u, v);
+                let our_idx = our_lp.to_index();
+                let their_idx = their_lp.to_index();
+                let their_light = if is_sky {
+                    n.sky_light[their_idx]
+                } else {
+                    n.block_light[their_idx]
+                };
+                let seeded = their_light.saturating_sub(1);
+                let our = if is_sky {
+                    &mut chunk.sky_light[our_idx]
+                } else {
+                    &mut chunk.block_light[our_idx]
+                };
+                if seeded > *our {
+                    *our = seeded;
+                }
+            }
+        }
+    }
+}
+
+/// Return `(our_boundary_cell, neighbour_mirror_cell)` for a given
+/// face's `(u, v)` boundary coordinate. `(u, v)` covers the 2D slice
+/// in the two axes orthogonal to the face's normal; `face` decides
+/// which axis is `u` vs `v` and which extreme of the chunk dimension
+/// the boundary sits on.
+fn mirror_boundary(face: crate::mesher::Face, u: i32, v: i32) -> (LocalPos, LocalPos) {
+    use crate::mesher::Face;
+    let last = D as u32 - 1;
+    let (ours, theirs) = match face {
+        // PosX: our boundary at x = D-1, neighbour mirror at x = 0.
+        Face::PosX => (
+            UVec3::new(last, v as u32, u as u32),
+            UVec3::new(0, v as u32, u as u32),
+        ),
+        Face::NegX => (
+            UVec3::new(0, v as u32, u as u32),
+            UVec3::new(last, v as u32, u as u32),
+        ),
+        Face::PosY => (
+            UVec3::new(u as u32, last, v as u32),
+            UVec3::new(u as u32, 0, v as u32),
+        ),
+        Face::NegY => (
+            UVec3::new(u as u32, 0, v as u32),
+            UVec3::new(u as u32, last, v as u32),
+        ),
+        Face::PosZ => (
+            UVec3::new(u as u32, v as u32, last),
+            UVec3::new(u as u32, v as u32, 0),
+        ),
+        Face::NegZ => (
+            UVec3::new(u as u32, v as u32, 0),
+            UVec3::new(u as u32, v as u32, last),
+        ),
+    };
+    (LocalPos(ours), LocalPos(theirs))
+}
+
 /// Compute block light: seed with every emissive block and BFS outward.
-fn block_light(chunk: &mut DenseChunk, reg: &BlockRegistry) {
+/// Also seeds boundary cells from neighbour chunks so torches in one
+/// chunk continue to glow through the adjacent chunks rather than
+/// hard-cutting at the chunk seam.
+fn block_light(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegistry) {
     chunk.block_light.iter_mut().for_each(|v| *v = 0);
 
     let mut q: VecDeque<(i32, i32, i32, u8)> = VecDeque::new();
@@ -98,6 +201,23 @@ fn block_light(chunk: &mut DenseChunk, reg: &BlockRegistry) {
                 if info.emission > 0 {
                     chunk.block_light[idx] = info.emission;
                     q.push_back((x, y, z, info.emission));
+                }
+            }
+        }
+    }
+    seed_from_neighbors(chunk, neighbors, /* is_sky */ false);
+    // Re-enqueue every boundary cell whose value the seed bumped to
+    // >= 2 so the BFS picks them up. (Interior cells are already in
+    // the queue from the emission scan; boundary cells may have been
+    // seeded *after* the scan.)
+    for z in 0..D {
+        for y in 0..D {
+            for x in 0..D {
+                let idx = LocalPos(UVec3::new(x as u32, y as u32, z as u32)).to_index();
+                let on_boundary = x == 0 || y == 0 || z == 0
+                    || x == D - 1 || y == D - 1 || z == D - 1;
+                if on_boundary && chunk.block_light[idx] >= 2 {
+                    q.push_back((x, y, z, chunk.block_light[idx]));
                 }
             }
         }
