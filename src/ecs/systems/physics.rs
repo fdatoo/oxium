@@ -4,10 +4,12 @@
 //! *before* world streaming (which reads the player's position to decide
 //! which chunks to load).
 //!
-//! In `Walk` mode we delegate to the axis-by-axis swept AABB and respect
-//! the `grounded` flag for jumping. In `Fly` mode we trivially integrate
-//! position from velocity — flight is a debug convenience and bypasses
-//! collision so the developer can poke around inside terrain.
+//! Both `Walk` and `Fly` use the axis-by-axis swept AABB (`sweep_player`)
+//! so the player can't phase through blocks in either mode; the only
+//! difference is that `Walk` accumulates gravity in the movement system
+//! and Fly does not. `grounded` is meaningful in Walk (controls jump);
+//! the same flag is still computed in Fly so a future "respect-ground"
+//! cosmetic could read it, but no current system does.
 
 use crate::ecs::components::{
     Aabb, Grounded, Movement, MovementMode, PlayerInput, Position, Velocity,
@@ -42,17 +44,8 @@ pub fn physics(ecs: &mut GameEcs, world: &World, dt: f32) {
         grounded.0 = false;
     }
 
-    match mov.mode {
-        MovementMode::Walk => {
-            let res = sweep_player(world, pos.0, aabb.half, vel.0, dt);
-            pos.0 = res.pos;
-            vel.0 = res.vel;
-            grounded.0 = res.grounded;
-        }
-        MovementMode::Fly => {
-            // No collision in fly mode — integrate directly. Movement
-            // system already set vel.0 to wish × speed.
-            pos.0 += vel.0 * dt;
-        }
-    }
+    let res = sweep_player(world, pos.0, aabb.half, vel.0, dt);
+    pos.0 = res.pos;
+    vel.0 = res.vel;
+    grounded.0 = res.grounded;
 }

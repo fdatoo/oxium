@@ -1,14 +1,14 @@
 //! Player movement: turn the per-frame `PlayerInput` into world-space motion.
 //!
-//! M2 ships only **flight**: velocity is set directly from `wishdir × speed`,
-//! ignoring gravity, friction, and collision. M6 adds the walking model
-//! (ground accel + friction + jump + gravity) and inserts the AABB-vs-voxel
-//! sweep right after this system in the schedule.
-//!
 //! Sprint doubles the speed regardless of mode. The "wishdir" is *local* to
 //! the camera basis: `+z = forward`, `+x = right`, `+y = up`.
+//!
+//! Integration in both modes happens in [`crate::ecs::systems::physics`] via
+//! `sweep_player`; this system only writes the desired velocity. Fly mode
+//! skips gravity (so you float when not pressing keys) but still respects
+//! voxel collision, matching creative-flight conventions.
 
-use crate::ecs::components::{Camera, Movement, MovementMode, PlayerInput, Position, Velocity};
+use crate::ecs::components::{Camera, Movement, MovementMode, PlayerInput, Velocity};
 use crate::ecs::GameEcs;
 use glam::Vec3;
 
@@ -20,15 +20,9 @@ use glam::Vec3;
 pub fn movement(ecs: &mut GameEcs, dt: f32) {
     let mut q = ecs
         .world
-        .query_one::<(
-            &Camera,
-            &PlayerInput,
-            &Movement,
-            &mut Position,
-            &mut Velocity,
-        )>(ecs.player)
+        .query_one::<(&Camera, &PlayerInput, &Movement, &mut Velocity)>(ecs.player)
         .unwrap();
-    let (cam, input, mov, pos, vel) = q.get().unwrap();
+    let (cam, input, mov, vel) = q.get().unwrap();
 
     // Camera basis (right-handed, +Y up):
     //   forward_3d  — full 3D look direction, used by Fly mode.
@@ -49,7 +43,10 @@ pub fn movement(ecs: &mut GameEcs, dt: f32) {
         MovementMode::Fly => {
             // Forward goes along the *full* 3D camera direction so looking
             // up + W flies you up. The wishdir.y stick (Space/Shift) adds
-            // pure vertical movement on top.
+            // pure vertical movement on top. Integration + collision are
+            // both done by `physics::physics` (which calls sweep_player
+            // for Fly the same way it does for Walk, just without
+            // accumulating gravity).
             let forward = if input.wishdir.z != 0.0 {
                 forward_3d
             } else {
@@ -59,7 +56,6 @@ pub fn movement(ecs: &mut GameEcs, dt: f32) {
                 + forward * input.wishdir.z
                 + Vec3::Y * input.wishdir.y;
             vel.0 = wish.normalize_or_zero() * speed;
-            pos.0 += vel.0 * dt;
         }
         MovementMode::Walk => {
             // Quake-style ground accel + friction.
