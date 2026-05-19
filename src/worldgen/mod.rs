@@ -40,6 +40,7 @@
 use crate::voxel::block::Block;
 use crate::voxel::chunk::DenseChunk;
 use crate::voxel::coords::{ChunkCoord, LocalPos, CHUNK_DIM_U};
+use crate::worldgen::tuning::MAX_TERRAIN_Y;
 use glam::UVec3;
 use noise::{Fbm, MultiFractal, NoiseFn, Simplex};
 
@@ -66,14 +67,6 @@ pub mod tuning;
 /// World-space Y at which the sea surface sits. Blocks above this with no
 /// solid above turn into air; air below this turns into water.
 pub const SEA_LEVEL: i32 = 62;
-/// Mean terrain height above world `Y = 0`.
-const BASE_HEIGHT: f32 = 64.0;
-/// Peak-to-peak amplitude of the heightmap (a column can be `BASE ± AMPL`).
-const AMPLITUDE: f32 = 24.0;
-/// Maximum extra elevation a mountain column can pick up on top of the
-/// base heightmap. Capped at 48 so the tallest peaks sit around y≈136 —
-/// inside the loaded vertical radius of 6 chunks above the player chunk.
-const MOUNTAIN_PEAK: f32 = 48.0;
 /// Half-width of the "near-zero" band around each tunnel noise's
 /// zero-crossing surface. Tunnels appear where BOTH
 /// [`Generator::tunnel_a`] and [`Generator::tunnel_b`] sit inside this
@@ -95,9 +88,6 @@ const CAVE_FLOOR_Y: i32 = -120;
 /// carve. Anything shallower than this would punch through the dirt
 /// cap and leave holes in the grass, so we leave a buffer.
 const CAVE_SURFACE_BUFFER: i32 = 4;
-/// World-space Y above which a mountain-biome surface block becomes
-/// bare stone (proxy for "above the tree line").
-const MOUNTAIN_ROCK_LINE: i32 = 92;
 /// World-space Y above which any surface block in a cold biome gets
 /// capped with snow regardless of the desert/grass decision. Used so
 /// even temperate forests have a snowy alpine band on the upper
@@ -156,15 +146,9 @@ const TREE_MARGIN: i32 = 5;
 /// `Fbm` builder is comparatively expensive, and chunk generation calls
 /// `get` thousands of times per chunk.
 pub struct Generator {
-    /// Rolling-hills base height. 96-block period.
-    height_noise: Fbm<Simplex>,
-    /// Sharper-frequency peak elevation, additive on top of `height_noise`.
-    /// Only contributes positive elevation, gated by `mountainness_map`.
-    mountain_noise: Fbm<Simplex>,
-    /// Geographic "is this region mountainous?" mask. Very low frequency
-    /// (~512-block period) so mountains cluster into ranges instead of
-    /// flecking the whole world.
-    mountainness_map: Fbm<Simplex>,
+    /// PR 2: plate-driven heightmap (continental shelf + ridges +
+    /// domain-warped FBM relief). Owns the FBM/warp noise fields.
+    heightmap: heightmap::HeightmapNoise,
     /// Geographic "is this region desert?" mask. Same large period as the
     /// mountainness map but uncorrelated (different seed) so deserts and
     /// mountains drift independently.
@@ -221,21 +205,11 @@ impl Generator {
     /// new geographic features).
     pub fn new(seed: u64) -> Self {
         // Heightmap noise: 4 octaves, ~96-block period at octave 0.
-        let height_noise = Fbm::<Simplex>::new(seed as u32)
-            .set_octaves(4)
-            .set_frequency(1.0 / 96.0)
-            .set_persistence(0.5);
-        // Mountain noise: smaller period (~64) for sharp peaks, higher
-        // persistence so mid-frequency detail is preserved.
-        let mountain_noise = Fbm::<Simplex>::new(seed.wrapping_add(2) as u32)
-            .set_octaves(3)
-            .set_frequency(1.0 / 64.0)
-            .set_persistence(0.6);
+        // PR 2: the plate-driven heightmap owns its own FBM + warp
+        // noise fields. The old `height_noise`, `mountain_noise`, and
+        // `mountainness_map` are gone — plate geometry replaces them.
+        let heightmap = heightmap::HeightmapNoise::new(seed);
         // Biome maps: large period so each biome covers many chunks.
-        let mountainness_map = Fbm::<Simplex>::new(seed.wrapping_add(3) as u32)
-            .set_octaves(2)
-            .set_frequency(1.0 / 512.0)
-            .set_persistence(0.5);
         let desert_map = Fbm::<Simplex>::new(seed.wrapping_add(4) as u32)
             .set_octaves(2)
             .set_frequency(1.0 / 512.0)
@@ -290,9 +264,7 @@ impl Generator {
             .set_frequency(1.0 / 80.0)
             .set_persistence(0.5);
         Self {
-            height_noise,
-            mountain_noise,
-            mountainness_map,
+            heightmap,
             desert_map,
             temperature_map,
             humidity_map,
@@ -339,50 +311,29 @@ impl Generator {
         self.cavern_noise.get(p) > CAVERN_THRESH
     }
 
-    /// Per-column terrain decisions: surface height + biome weights.
-    /// Used by both `fill_chunk` (block selection) and `add_trees`
-    /// (tree placement), so a single noise evaluation per column drives
-    /// every geographic choice consistently.
+    /// Per-column terrain decisions: surface height + biome + slope
+    /// flag. Used by both `fill_chunk` and `add_trees` so a single
+    /// noise evaluation per column drives every geographic choice.
+    ///
+    /// PR 2: heightmap is now plate-driven `h_pre` (continental
+    /// shelf + plate-edge ridges + warped-FBM relief). Cliff
+    /// detection comes from the slope of `h_pre`, replacing the v1
+    /// `MOUNTAIN_ROCK_LINE` rule. Rivers and lakes still use legacy
+    /// noise carve here (PR 3 replaces this with the real river
+    /// network).
     fn column_data(&self, wx: i32, wz: i32) -> ColumnData {
         let xz = [wx as f64, wz as f64];
-        let base = self.height_noise.get(xz) as f32;
-        let mountainness_raw = self.mountainness_map.get(xz) as f32;
-        // Smoothstep so plains↔mountain transitions are gradual.
-        // Mountains start contributing at mountainness_raw > -0.05 and
-        // fully kick in around 0.45.
-        let mountain_weight = smoothstep(-0.05, 0.45, mountainness_raw);
-        // Ridged mountain lift: instead of using the raw positive half
-        // of the mountain noise (which peaks at scattered local maxima
-        // and looks like isolated bumps), invert the absolute value so
-        // the peaks now sit along the noise's *zero-crossing curves*.
-        // Those zero-crossings are continuous lines through the field,
-        // so the resulting elevation traces out connected mountain
-        // ridges — the silhouette of a real range, with sharp crests
-        // dropping into valleys on either side. `pow(2)` accentuates
-        // the ridge crests so the peaks read as sharp instead of
-        // gently domed.
-        let mountain_raw = self.mountain_noise.get(xz) as f32;
-        let ridge = (1.0 - mountain_raw.abs()).max(0.0).powf(2.0);
-        let mountain_lift = ridge * MOUNTAIN_PEAK * mountain_weight;
-        let mut height = (BASE_HEIGHT + base * AMPLITUDE + mountain_lift) as i32;
+        // Pre-river heightmap from plates + warped FBM.
+        let mut height = self.heightmap.h_pre(self.seed, wx as f32, wz as f32);
+        // Slope-driven cliff classification on the *unmodified* h_pre
+        // — measuring slope after the river carve would falsely flag
+        // every valley side as a cliff.
+        let is_cliff = self.heightmap.is_cliff(self.seed, wx as f32, wz as f32);
 
-        // Rivers and lakes carve the heightmap downward; the
-        // sea-level flood pass later turns the carved depression into
-        // water. Two independent strengths:
-        //
-        // * **River:** a thin band around the river noise's
-        //   zero-crossing. Strength peaks at the centerline (1.0)
-        //   and falls linearly to 0 at the band edge — interior of
-        //   the river is fully carved down to the bed, banks taper
-        //   smoothly back into the natural heightmap.
-        // * **Lake:** a wide region where the lake noise sits above
-        //   `LAKE_THRESH`. Smoothstep over a `LAKE_RAMP` window
-        //   keeps the shoreline soft instead of stair-stepped.
-        //
-        // When both apply to the same column we lerp toward whichever
-        // bed is deeper (lakes are deeper), then apply the strongest
-        // of the two carve weights — overlapping a river into a lake
-        // shouldn't make the water *less* deep.
+        // Legacy river / lake carve. PR 3 will replace this with the
+        // real flow-accumulation network; for now the existing noise
+        // carve operates on h_pre so the world has at least the
+        // current generation's water bodies while we work.
         let r_noise = self.river_noise.get(xz) as f32;
         let river_strength =
             (1.0 - (r_noise.abs() / RIVER_BAND as f32)).clamp(0.0, 1.0);
@@ -399,11 +350,12 @@ impl Generator {
             } else {
                 (SEA_LEVEL - RIVER_CARVE) as f32
             };
-            // Lerp from natural height toward the bed by `carve`.
-            // Casting back to `i32` truncates which is fine — a
-            // sub-block fractional height doesn't show.
-            height = (height as f32 * (1.0 - carve) + bed * carve) as i32;
+            height = height * (1.0 - carve) + bed * carve;
         }
+        let height = height.clamp(
+            (CAVE_FLOOR_Y + 8) as f32,
+            MAX_TERRAIN_Y as f32,
+        ) as i32;
 
         let desertness = self.desert_map.get(xz) as f32;
         // Hard cutoff (no transition smoothing) so the desert/grass
@@ -421,7 +373,7 @@ impl Generator {
 
         ColumnData {
             height,
-            mountain_weight,
+            is_cliff,
             biome,
         }
     }
@@ -476,31 +428,24 @@ impl Generator {
                             }
                         } else if depth == 0 {
                             // Surface block selection. Priority order:
-                            //   1. Beach (column at/below sea level + 1) wins
-                            //      over every biome so coastlines always
-                            //      read as sand → water.
-                            //   2. **Snow line wins over mountain rock.**
-                            //      Anything at or above SNOW_LINE picks up
-                            //      a Snow cap regardless of biome — real
-                            //      mountains have snow on top, not bare
-                            //      grey at the summit. Earlier the
-                            //      mountain-rock rule fired first and
-                            //      every tall peak read as a wall of
-                            //      stone.
-                            //   3. Bare mountain rock in the band between
-                            //      MOUNTAIN_ROCK_LINE and SNOW_LINE: the
-                            //      crag belt below the snowline.
-                            //   4. Cold biomes (Tundra, SnowyForest) lay
-                            //      Snow at any elevation.
-                            //   5. Desert keeps Sand; the rest get Grass.
-                            if height <= SEA_LEVEL + 1 {
+                            //   1. Cliff (slope > CLIFF_SLOPE_THRESH) →
+                            //      bare Stone. Wins over beach so cliffed
+                            //      coastlines read as rock faces, not
+                            //      sand strips. Replaces v1's
+                            //      `MOUNTAIN_ROCK_LINE` rule.
+                            //   2. Beach (column at/below sea level + 1
+                            //      and not a cliff) — coastline sand.
+                            //   3. Snow line — alpine snow cap, biome-
+                            //      independent.
+                            //   4. Cold biome — surface snow at any
+                            //      elevation.
+                            //   5. Desert → Sand; everything else → Grass.
+                            if col.is_cliff {
+                                Block::Stone
+                            } else if height <= SEA_LEVEL + 1 {
                                 Block::Sand
                             } else if height >= SNOW_LINE {
                                 Block::Snow
-                            } else if col.mountain_weight > 0.45
-                                && height > MOUNTAIN_ROCK_LINE
-                            {
-                                Block::Stone
                             } else if col.biome.snow_capped() {
                                 Block::Snow
                             } else if col.biome == Biome::Desert {
@@ -509,10 +454,10 @@ impl Generator {
                                 Block::Grass
                             }
                         } else if depth <= 3 {
-                            // Mountain-rock peaks have stone directly
-                            // beneath the surface too (no dirt layer
-                            // looks more believable for high terrain).
-                            if col.mountain_weight > 0.45 && height > MOUNTAIN_ROCK_LINE {
+                            // Cliff faces are stone all the way down —
+                            // no dirt under sheer rock. Everywhere
+                            // else gets the standard dirt cap.
+                            if col.is_cliff {
                                 Block::Stone
                             } else {
                                 Block::Dirt
@@ -578,7 +523,9 @@ impl Generator {
         if col.height <= SEA_LEVEL + 1 {
             return None;
         }
-        if col.mountain_weight > 0.45 && col.height > MOUNTAIN_ROCK_LINE {
+        // Trees don't grow on cliffs — replaces v1's mountain-rock-line
+        // veto with a slope-driven equivalent.
+        if col.is_cliff {
             return None;
         }
         if col.height >= SNOW_LINE {
@@ -645,14 +592,15 @@ impl Generator {
 /// `add_trees` so block selection and tree placement stay in sync.
 #[derive(Debug, Clone, Copy)]
 struct ColumnData {
-    /// Surface height in world Y. Includes the mountain lift.
+    /// Surface height in world Y, post-carve, clamped.
     height: i32,
-    /// 0..1: how strongly this column belongs to a mountain region.
-    /// 1.0 ⇒ deep in a range; 0.0 ⇒ plains.
-    mountain_weight: f32,
+    /// True if the column's `h_pre` slope exceeds `CLIFF_SLOPE_THRESH`.
+    /// Drives bare-rock surface exposure and prevents trees from
+    /// taking root on sheer faces. Replaces the v1 `mountain_weight`
+    /// + `MOUNTAIN_ROCK_LINE` combo.
+    is_cliff: bool,
     /// Discrete biome label derived from temperature, humidity, and
-    /// the desert mask. Drives surface block selection (snow vs grass
-    /// vs sand) and tree density.
+    /// the desert mask.
     biome: Biome,
 }
 
@@ -829,9 +777,10 @@ mod tests {
     /// future runs catch unintentional behavioural drift.
     #[test]
     fn golden_seed42_chunk_0_2_0() {
-        // Hash refreshed after the tunnel/cavern + ridged-mountain pass.
-        // Update again whenever an intentional generator change lands.
-        const GOLDEN_42_002: u64 = 0xC2A6_4558_3088_5B74;
+        // Hash re-baselined for PR 2 (plate-driven heightmap +
+        // warped FBM + cliff exposure). Refresh again whenever an
+        // intentional generator change lands.
+        const GOLDEN_42_002: u64 = 0xBA8B_6AAA_8597_30AD;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);
@@ -995,19 +944,23 @@ mod tests {
         );
     }
 
-    /// Ridged mountains: the surface should still respect the height
-    /// cap (BASE + AMPLITUDE + MOUNTAIN_PEAK = 136), so no column
-    /// pokes above the chunk-stack vertical radius. Catches a future
-    /// refactor that accidentally drops the cap.
+    /// The plate-driven heightmap caps final heights at
+    /// `MAX_TERRAIN_Y` (140 by default) so the tallest possible
+    /// peak still sits inside the loaded vertical radius. Catches a
+    /// future refactor that drops the cap (or sets `MAX_TERRAIN_Y`
+    /// above the chunk-stack ceiling).
     #[test]
     fn ridged_mountains_respect_height_cap() {
         let g = Generator::new(42);
-        for cx in -2..=2 {
-            for cz in -2..=2 {
-                let col = g.column_data(cx * 16, cz * 16);
+        // Scan a generous area: the cap should hold everywhere, not
+        // just near origin. CC ridges peak at ~SEA_LEVEL + 28 + 90 =
+        // 180, but the clamp pulls them back to MAX_TERRAIN_Y.
+        for wx in (-2048..=2048).step_by(128) {
+            for wz in (-2048..=2048).step_by(128) {
+                let col = g.column_data(wx, wz);
                 assert!(
-                    col.height as f32 <= BASE_HEIGHT + AMPLITUDE + MOUNTAIN_PEAK,
-                    "column height {} broke the cap at ({cx}, {cz})",
+                    col.height <= MAX_TERRAIN_Y,
+                    "column height {} broke the cap at ({wx}, {wz})",
                     col.height
                 );
             }
