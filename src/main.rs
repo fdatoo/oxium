@@ -51,6 +51,12 @@ struct CliOptions {
     /// 0.25 = sunrise, 0.5 = noon, 0.75 = sunset. `--time 0.85` would
     /// show the night sky with stars + moon.
     time_of_day: Option<f32>,
+    /// Disable vsync (run with `PresentMode::Immediate`). Lets the HUD
+    /// FPS readout reflect actual CPU/GPU throughput instead of being
+    /// capped by the display refresh — important for diagnosing
+    /// "FPS stuck at 60" on ProMotion displays that drop refresh rate
+    /// under low demand.
+    uncapped: bool,
 }
 
 impl CliOptions {
@@ -61,6 +67,7 @@ impl CliOptions {
         let mut look = None;
         let mut find_water = false;
         let mut time_of_day: Option<f32> = None;
+        let mut uncapped = false;
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--screenshot-and-exit" => {
@@ -88,6 +95,9 @@ impl CliOptions {
                     let v = args.next().expect("--time requires a 0..=1 value");
                     time_of_day = Some(v.parse().unwrap());
                 }
+                "--uncapped" => {
+                    uncapped = true;
+                }
                 _ => {}
             }
         }
@@ -102,6 +112,7 @@ impl CliOptions {
             look,
             find_water,
             time_of_day,
+            uncapped,
         }
     }
 }
@@ -172,9 +183,14 @@ impl ApplicationHandler for App {
             .cli
             .spawn
             .or_else(|| self.cli.find_water.then(find_water_spawn));
+        let uncapped = self.cli.uncapped;
         let state = match spawn {
-            Some(p) => AppState::new_with_spawn(window.clone(), p),
-            None => AppState::new(window.clone()),
+            Some(p) => AppState::new_with_spawn(window.clone(), p, uncapped),
+            None => AppState::new_with_spawn(
+                window.clone(),
+                glam::Vec3::new(16.0, 96.0, 16.0),
+                uncapped,
+            ),
         };
         // CLI `--time` overrides the TimeOfDay sun-cycle value. Apply
         // after spawn so the Sun entity already exists.

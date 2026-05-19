@@ -44,6 +44,14 @@ impl Gpu {
     /// "async" here is mostly an artefact of WebGPU compatibility — on
     /// native it completes immediately, so the block is cheap.
     pub fn new(window: Arc<Window>) -> Self {
+        Self::new_with_present_mode(window, wgpu::PresentMode::Fifo)
+    }
+
+    /// Variant that lets the caller pick the swapchain present mode —
+    /// `Fifo` for v-sync (default), `Immediate` for "uncapped" perf
+    /// measurement so the HUD's FPS readout reflects actual throughput
+    /// rather than the display's refresh rate.
+    pub fn new_with_present_mode(window: Arc<Window>, present_mode: wgpu::PresentMode) -> Self {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
 
         let surface = instance
@@ -88,9 +96,15 @@ impl Gpu {
             format,
             width: size.width.max(1),
             height: size.height.max(1),
-            // FIFO == v-sync. Trades latency for tear-free output and is
-            // universally supported. Optimizing this is M10's job, not M1's.
-            present_mode: wgpu::PresentMode::Fifo,
+            // Default Fifo == v-sync; --uncapped passes Immediate to
+            // remove the display-rate cap for perf measurement. If the
+            // adapter doesn't support the requested mode, fall back to
+            // whatever's first in `present_modes`.
+            present_mode: if caps.present_modes.contains(&present_mode) {
+                present_mode
+            } else {
+                caps.present_modes[0]
+            },
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,

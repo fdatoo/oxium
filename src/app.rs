@@ -76,6 +76,14 @@ pub struct PerfSnapshot {
     /// LOD0 mesh slots currently held by the renderer. Useful as a
     /// proxy for "is the world fully streamed in yet."
     pub chunks_rendered: usize,
+    /// Milliseconds of *work* (not wall-clock between frames) the
+    /// last step took. With vsync on, frame time = work + vsync
+    /// wait; work-time alone tells you whether a low FPS reading is
+    /// a real perf problem or just the display refresh dropping to
+    /// 60Hz under low demand. ProMotion displays often park at 60Hz
+    /// after a burst of activity even when the app's per-step work
+    /// is still well under 8ms.
+    pub work_ms: f32,
 }
 
 /// How often the autosave system flushes modified chunks to disk.
@@ -124,14 +132,22 @@ impl AppState {
     /// the average terrain height (≈ 64) so the world streams in
     /// beneath the player rather than around them.
     pub fn new(window: Arc<Window>) -> Self {
-        Self::new_with_spawn(window, glam::Vec3::new(16.0, 96.0, 16.0))
+        Self::new_with_spawn(window, glam::Vec3::new(16.0, 96.0, 16.0), false)
     }
 
     /// Like [`new`] but accepts an explicit spawn point. Used by the
-    /// CLI `--spawn` / `--find-water` flags.
-    pub fn new_with_spawn(window: Arc<Window>, spawn: glam::Vec3) -> Self {
+    /// CLI `--spawn` / `--find-water` flags. `uncapped = true`
+    /// switches the swapchain to `PresentMode::Immediate` so HUD FPS
+    /// shows actual throughput instead of being capped to the
+    /// display refresh rate.
+    pub fn new_with_spawn(window: Arc<Window>, spawn: glam::Vec3, uncapped: bool) -> Self {
         let seed = 42;
-        let renderer = Renderer::new(window.clone());
+        let present_mode = if uncapped {
+            wgpu::PresentMode::Immediate
+        } else {
+            wgpu::PresentMode::Fifo
+        };
+        let renderer = Renderer::new_with_present_mode(window.clone(), present_mode);
         let ecs = GameEcs::new(spawn);
         let world = World::new(seed);
         let jobs = Jobs::new();
@@ -169,6 +185,10 @@ impl AppState {
         let dt = now.duration_since(self.last_tick).as_secs_f32().min(0.1);
         self.last_tick = now;
         self.fps_meter.record(dt);
+        // Start of the per-step CPU work; stopped just before the
+        // render `present()` call so the measurement excludes
+        // wall-clock time we spend waiting on vsync.
+        let work_start = now;
 
         crate::ecs::systems::input::apply_input(&mut self.ecs, &self.input_buf);
         crate::ecs::systems::time_of_day::advance(&mut self.ecs, dt);
@@ -236,6 +256,12 @@ impl AppState {
             &self.registry,
         );
         self.perf.chunks_rendered = self.renderer.chunk_mesh_count();
+        // Sample work-time just before the render call so the metric
+        // captures every system except the GPU present (which is
+        // where vsync blocks). On vsync-capped frames this number
+        // will be much lower than `1000 / FPS`; on perf-bound frames
+        // they'll be roughly equal.
+        self.perf.work_ms = work_start.elapsed().as_secs_f32() * 1000.0;
         crate::ecs::systems::world_stream::world_unload(
             &self.ecs,
             &mut self.world,

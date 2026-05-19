@@ -199,7 +199,10 @@ pub fn build_hud(
     // queue depth (chunks waiting for the relight pump); steady
     // non-zero means cascade isn't terminating. "CH" = chunk meshes
     // currently held by the renderer.
-    let perf_str = format!("LQ: {}  CH: {}", perf.light_queue, perf.chunks_rendered);
+    let perf_str = format!(
+        "LQ: {}  CH: {}  WMS: {:.1}",
+        perf.light_queue, perf.chunks_rendered, perf.work_ms,
+    );
     // A semi-transparent dark backdrop behind the three text lines so
     // the cyan/white glyphs stay readable against bright skies and
     // grass without us having to author per-character outlines. The

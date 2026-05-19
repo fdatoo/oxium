@@ -104,7 +104,14 @@ struct ChunkGpu {
 impl Renderer {
     /// Initialize the renderer on the given window.
     pub fn new(window: Arc<Window>) -> Self {
-        let gpu = Gpu::new(window);
+        Self::new_with_present_mode(window, wgpu::PresentMode::Fifo)
+    }
+
+    /// Like [`new`] but lets the caller pick the swapchain present
+    /// mode — `Immediate` is the diagnostic option (no v-sync,
+    /// HUD FPS reflects real throughput).
+    pub fn new_with_present_mode(window: Arc<Window>, present_mode: wgpu::PresentMode) -> Self {
+        let gpu = Gpu::new_with_present_mode(window, present_mode);
         let depth_view =
             make_depth_texture(&gpu.device, gpu.surface_cfg.width, gpu.surface_cfg.height);
         let camera_bgl = make_camera_bind_group_layout(&gpu.device);
