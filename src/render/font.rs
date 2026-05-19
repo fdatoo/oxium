@@ -30,8 +30,10 @@ pub const CELL_W: u32 = 8;
 /// Vertical stride; only one row of glyphs is laid out today.
 pub const CELL_H: u32 = 8;
 /// Number of glyph slots in the atlas. Holds digits + the full
-/// uppercase alphabet + common punctuation with room to spare.
-pub const SLOT_COUNT: u32 = 64;
+/// uppercase + lowercase alphabet + common punctuation with room to
+/// spare. Bumped from 64 to 96 when the lowercase set was added — the
+/// extra atlas width (256 → 768 texels) is still trivial.
+pub const SLOT_COUNT: u32 = 96;
 /// Atlas pixel width.
 pub const ATLAS_W: u32 = SLOT_COUNT * CELL_W;
 /// Atlas pixel height.
@@ -91,6 +93,43 @@ const GLYPHS: &[(char, Glyph)] = &[
     ('.', [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00100, 0b00100]),
     ('-', [0b00000, 0b00000, 0b00000, 0b01110, 0b00000, 0b00000, 0b00000]),
     (',', [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00100, 0b01000]),
+    // Lowercase alphabet. Tall letters (b, d, f, h, k, l, t) extend up
+    // to row 0; descenders (g, j, p, q, y) are clipped to the baseline
+    // because the cell has no extra row below it.
+    ('a', [0b00000, 0b00000, 0b01110, 0b00001, 0b01111, 0b10001, 0b01111]),
+    ('b', [0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b10001, 0b11110]),
+    ('c', [0b00000, 0b00000, 0b01110, 0b10001, 0b10000, 0b10001, 0b01110]),
+    ('d', [0b00001, 0b00001, 0b01111, 0b10001, 0b10001, 0b10001, 0b01111]),
+    ('e', [0b00000, 0b00000, 0b01110, 0b10001, 0b11111, 0b10000, 0b01110]),
+    ('f', [0b00110, 0b01001, 0b01000, 0b11110, 0b01000, 0b01000, 0b01000]),
+    ('g', [0b00000, 0b00000, 0b01111, 0b10001, 0b01111, 0b00001, 0b01110]),
+    ('h', [0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b10001, 0b10001]),
+    ('i', [0b00100, 0b00000, 0b01100, 0b00100, 0b00100, 0b00100, 0b01110]),
+    ('j', [0b00010, 0b00000, 0b00110, 0b00010, 0b00010, 0b10010, 0b01100]),
+    ('k', [0b10000, 0b10000, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010]),
+    ('l', [0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110]),
+    ('m', [0b00000, 0b00000, 0b11010, 0b10101, 0b10101, 0b10101, 0b10101]),
+    ('n', [0b00000, 0b00000, 0b11110, 0b10001, 0b10001, 0b10001, 0b10001]),
+    ('o', [0b00000, 0b00000, 0b01110, 0b10001, 0b10001, 0b10001, 0b01110]),
+    ('p', [0b00000, 0b00000, 0b11110, 0b10001, 0b11110, 0b10000, 0b10000]),
+    ('q', [0b00000, 0b00000, 0b01111, 0b10001, 0b01111, 0b00001, 0b00001]),
+    ('r', [0b00000, 0b00000, 0b10110, 0b11001, 0b10000, 0b10000, 0b10000]),
+    ('s', [0b00000, 0b00000, 0b01111, 0b10000, 0b01110, 0b00001, 0b11110]),
+    ('t', [0b01000, 0b01000, 0b11110, 0b01000, 0b01000, 0b01001, 0b00110]),
+    ('u', [0b00000, 0b00000, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110]),
+    ('v', [0b00000, 0b00000, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100]),
+    ('w', [0b00000, 0b00000, 0b10001, 0b10001, 0b10101, 0b10101, 0b01010]),
+    ('x', [0b00000, 0b00000, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001]),
+    ('y', [0b00000, 0b00000, 0b10001, 0b10001, 0b01111, 0b00001, 0b01110]),
+    ('z', [0b00000, 0b00000, 0b11111, 0b00010, 0b00100, 0b01000, 0b11111]),
+    // Punctuation needed by the chat console + pause overlay.
+    ('/', [0b00001, 0b00010, 0b00010, 0b00100, 0b00100, 0b01000, 0b01000]),
+    ('>', [0b10000, 0b01000, 0b00100, 0b00010, 0b00100, 0b01000, 0b10000]),
+    ('<', [0b00001, 0b00010, 0b00100, 0b01000, 0b00100, 0b00010, 0b00001]),
+    ('(', [0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010]),
+    (')', [0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000]),
+    ('!', [0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00100]),
+    ('?', [0b01110, 0b10001, 0b00010, 0b00100, 0b00100, 0b00000, 0b00100]),
     (' ', [0; 7]),
 ];
 
@@ -182,8 +221,8 @@ mod tests {
 
     #[test]
     fn missing_char_falls_back_to_blank() {
-        // '?' isn't in the table — glyph_for returns the blank pattern.
-        let g = glyph_for('?');
+        // '@' isn't in the table — glyph_for returns the blank pattern.
+        let g = glyph_for('@');
         assert_eq!(g, [0; 7]);
     }
 }

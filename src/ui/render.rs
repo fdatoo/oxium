@@ -13,18 +13,19 @@ const TEXT_WHITE: [u8; 4] = [255, 255, 255, 255];
 const TEXT_DIM:   [u8; 4] = [180, 180, 180, 255];
 const HOVER:      [u8; 4] = [255, 220, 120, 255];
 
-const PANEL_W: f32 = 360.0;
+const PANEL_W: f32 = 440.0;
 const PANEL_H: f32 = 280.0;
 const TITLE_SCALE: f32 = 4.0;
-const ITEM_SCALE:  f32 = 3.0;
-const ITEM_LINE_H: f32 = 32.0;
+const ITEM_SCALE:  f32 = 2.5;
+const ITEM_LINE_H: f32 = 28.0;
 const ITEM_CELL_W: f32 = crate::render::font::CELL_W as f32 * ITEM_SCALE;
 
 const CHAT_PAD: f32 = 12.0;
-const CHAT_LINE_H: f32 = 22.0;
+const CHAT_LINE_H: f32 = 20.0;
 const CHAT_SCALE: f32 = 2.0;
 const CHAT_VISIBLE_PLAYING: usize = 5;
-const CHAT_VISIBLE_OPEN: usize = 12;
+const CHAT_VISIBLE_OPEN: usize = 8;
+const CHAT_BLOCK_W: f32 = 480.0;
 const CHAT_FADE_START_SEC: f32 = 6.0;
 const CHAT_FADE_END_SEC:   f32 = 8.0;
 
@@ -57,7 +58,7 @@ fn draw_chat_open(
     let (_, sh) = (screen_px.0 as f32, screen_px.1 as f32);
     let block_h = CHAT_LINE_H * (CHAT_VISIBLE_OPEN as f32 + 1.5);
     let block_y = sh - block_h - 80.0;
-    frame.icons.push_rect(0.0, block_y, 480.0, block_h, [0, 0, 0, 0xA0]);
+    frame.icons.push_rect(0.0, block_y, CHAT_BLOCK_W, block_h, [0, 0, 0, 0xA0]);
 
     let lines: Vec<_> = ui.log.iter().rev().take(CHAT_VISIBLE_OPEN).collect();
     for (i, line) in lines.iter().enumerate() {
@@ -130,13 +131,13 @@ fn draw_top_menu(hovered: usize, px: f32, py: f32, frame: &mut HudFrame) {
     let title_x = px + (PANEL_W - title_w) * 0.5;
     frame.push_text(title_x, py + 32.0, title, TITLE_SCALE, TEXT_WHITE);
 
-    let items_top = py + 110.0;
-    let items_left = px + 40.0;
+    let items_top = py + 120.0;
+    let items_left = px + 60.0;
     for (i, item) in TOP_MENU.iter().enumerate() {
         let y = items_top + i as f32 * ITEM_LINE_H;
         let color = if i == hovered { HOVER } else { TEXT_WHITE };
         if i == hovered {
-            frame.push_text(items_left - ITEM_CELL_W * 2.0, y, ">", ITEM_SCALE, HOVER);
+            frame.push_text(items_left - ITEM_CELL_W * 1.5, y, ">", ITEM_SCALE, HOVER);
         }
         frame.push_text(items_left, y, item.label(), ITEM_SCALE, color);
     }
@@ -159,8 +160,8 @@ pub fn top_menu_item_rect(i: usize, screen_px: (u32, u32)) -> (f32, f32, f32, f3
     let (sw, sh) = (screen_px.0 as f32, screen_px.1 as f32);
     let px = (sw - PANEL_W) * 0.5;
     let py = (sh - PANEL_H) * 0.5;
-    let items_top = py + 110.0;
-    let items_left = px + 40.0;
+    let items_top = py + 120.0;
+    let items_left = px + 60.0;
     let y = items_top + i as f32 * ITEM_LINE_H;
-    (items_left - ITEM_CELL_W * 2.0, y - 4.0, PANEL_W - 80.0, ITEM_LINE_H)
+    (items_left - ITEM_CELL_W * 1.5, y - 4.0, PANEL_W - 100.0, ITEM_LINE_H)
 }
