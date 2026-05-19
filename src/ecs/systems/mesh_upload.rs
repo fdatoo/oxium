@@ -138,11 +138,19 @@ pub fn drain_jobs(
                         light: false,
                     };
                     meta.state = ChunkState::Generated;
-                    // Relight rewrote the chunk's light bytes, so the
-                    // mesh data has effectively changed — bump
-                    // version so any in-flight pre-relight mesh job
-                    // for this chunk gets discarded on completion.
-                    meta.mesh_version = meta.mesh_version.wrapping_add(1);
+                    // Deliberately NOT bumping `mesh_version` here.
+                    // Relight only rewrites the per-cell light bytes —
+                    // geometry stays the same — so a pre-relight mesh
+                    // (with slightly stale lighting baked into vertex
+                    // colours) still renders correctly enough. Bumping
+                    // the version meant the original `Generated`
+                    // handler's mesh job got *rejected* on completion
+                    // and the chunk had no mesh on the GPU at all
+                    // until the cascade's follow-up mesh arrived —
+                    // visible as huge sky-shader-coloured holes where
+                    // streamed-in chunks should be. The version tag
+                    // still fires on `set_block` (geometry change),
+                    // which is the case that actually needs it.
                 }
                 // Bounded cascade: only mark the face neighbours whose
                 // boundary actually changed as `dirty.light`. Most
