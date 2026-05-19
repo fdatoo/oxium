@@ -16,6 +16,7 @@ pub use oxium::{jobs, lighting, mesher, persistence, physics, voxel, worldgen};
 // aren't part of the library surface.
 mod app;
 mod ecs;
+mod profiler;
 mod render;
 
 use std::path::PathBuf;
@@ -57,6 +58,11 @@ struct CliOptions {
     /// "FPS stuck at 60" on ProMotion displays that drop refresh rate
     /// under low demand.
     uncapped: bool,
+    /// Enable per-frame profiling and write CSV rows to this path.
+    /// `--profile <path>` records every system's per-step timing
+    /// alongside the perf-counter snapshot. Open the file in a
+    /// spreadsheet (or `awk`) to see where the frame budget goes.
+    profile_path: Option<PathBuf>,
 }
 
 impl CliOptions {
@@ -68,6 +74,7 @@ impl CliOptions {
         let mut find_water = false;
         let mut time_of_day: Option<f32> = None;
         let mut uncapped = false;
+        let mut profile_path = None;
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--screenshot-and-exit" => {
@@ -98,6 +105,12 @@ impl CliOptions {
                 "--uncapped" => {
                     uncapped = true;
                 }
+                "--profile" => {
+                    let path = args
+                        .next()
+                        .expect("--profile requires a path argument");
+                    profile_path = Some(PathBuf::from(path));
+                }
                 _ => {}
             }
         }
@@ -113,6 +126,7 @@ impl CliOptions {
             find_water,
             time_of_day,
             uncapped,
+            profile_path,
         }
     }
 }
@@ -184,12 +198,14 @@ impl ApplicationHandler for App {
             .spawn
             .or_else(|| self.cli.find_water.then(find_water_spawn));
         let uncapped = self.cli.uncapped;
+        let profile = self.cli.profile_path.as_deref();
         let state = match spawn {
-            Some(p) => AppState::new_with_spawn(window.clone(), p, uncapped),
+            Some(p) => AppState::new_with_spawn(window.clone(), p, uncapped, profile),
             None => AppState::new_with_spawn(
                 window.clone(),
                 glam::Vec3::new(16.0, 96.0, 16.0),
                 uncapped,
+                profile,
             ),
         };
         // CLI `--time` overrides the TimeOfDay sun-cycle value. Apply

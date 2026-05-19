@@ -61,6 +61,16 @@ pub struct AppState {
     /// once per step from the bookkeeping numbers the other systems
     /// hand back (relight queue size, GPU-uploaded mesh count, etc).
     pub perf: PerfSnapshot,
+    /// Optional per-frame profiler. `Some` when launched with
+    /// `--profile <path>` on the binary. Each step wraps its systems
+    /// in `profiler::time(...)` calls; one CSV row per frame lands in
+    /// the file. The HUD path doesn't read this — it's strictly for
+    /// offline post-mortem analysis.
+    pub profiler: Option<crate::profiler::Profiler>,
+    /// Counter of edit actions (place/break) this frame, recorded
+    /// into the profile CSV so we can grep for the frames where
+    /// the user triggered an edit.
+    pub frame_edit_count: u32,
 }
 
 /// Per-frame counters shown in the debug HUD. Cheap to keep around;
@@ -138,15 +148,21 @@ impl AppState {
     /// the average terrain height (≈ 64) so the world streams in
     /// beneath the player rather than around them.
     pub fn new(window: Arc<Window>) -> Self {
-        Self::new_with_spawn(window, glam::Vec3::new(16.0, 96.0, 16.0), false)
+        Self::new_with_spawn(window, glam::Vec3::new(16.0, 96.0, 16.0), false, None)
     }
 
     /// Like [`new`] but accepts an explicit spawn point. Used by the
     /// CLI `--spawn` / `--find-water` flags. `uncapped = true`
     /// switches the swapchain to `PresentMode::Immediate` so HUD FPS
     /// shows actual throughput instead of being capped to the
-    /// display refresh rate.
-    pub fn new_with_spawn(window: Arc<Window>, spawn: glam::Vec3, uncapped: bool) -> Self {
+    /// display refresh rate. `profile_path = Some(p)` opens
+    /// `crate::profiler::Profiler` and starts writing per-frame CSV.
+    pub fn new_with_spawn(
+        window: Arc<Window>,
+        spawn: glam::Vec3,
+        uncapped: bool,
+        profile_path: Option<&std::path::Path>,
+    ) -> Self {
         let seed = 42;
         let present_mode = if uncapped {
             wgpu::PresentMode::Immediate
@@ -181,6 +197,17 @@ impl AppState {
             start_time: Instant::now(),
             fps_meter: FpsMeter::new(60),
             perf: PerfSnapshot::default(),
+            profiler: profile_path.and_then(|p| match crate::profiler::Profiler::open(p) {
+                Ok(prof) => {
+                    log::info!("profiling enabled, writing to {}", p.display());
+                    Some(prof)
+                }
+                Err(e) => {
+                    log::warn!("failed to open profile path {}: {e:?}", p.display());
+                    None
+                }
+            }),
+            frame_edit_count: 0,
         }
     }
 
@@ -196,58 +223,79 @@ impl AppState {
         // wall-clock time we spend waiting on vsync.
         let work_start = now;
 
-        crate::ecs::systems::input::apply_input(&mut self.ecs, &self.input_buf);
-        crate::ecs::systems::time_of_day::advance(&mut self.ecs, dt);
-        crate::ecs::systems::movement::movement(&mut self.ecs, dt);
-        crate::ecs::systems::physics::physics(&mut self.ecs, &self.world, dt);
+        let prof = self.profiler.as_ref();
+        use crate::profiler::time;
+
+        time(prof, "input", || {
+            crate::ecs::systems::input::apply_input(&mut self.ecs, &self.input_buf)
+        });
+        time(prof, "time_of_day", || {
+            crate::ecs::systems::time_of_day::advance(&mut self.ecs, dt)
+        });
+        time(prof, "movement", || {
+            crate::ecs::systems::movement::movement(&mut self.ecs, dt)
+        });
+        time(prof, "physics", || {
+            crate::ecs::systems::physics::physics(&mut self.ecs, &self.world, dt)
+        });
 
         // Interaction: raycast + place/break. Returns chunks the edit
         // dirtied; we immediately spawn relight (followed by remesh) on
         // each so the player sees the result within a frame or two.
-        let dirty_chunks =
-            crate::ecs::systems::interaction::interaction(&mut self.ecs, &mut self.world);
-        for c in dirty_chunks {
-            use crate::voxel::world::ChunkSlot;
-            let needs_light = match self.world.chunks.get(&c) {
-                Some(ChunkSlot::Stored { meta, .. }) => meta.dirty.light,
-                _ => false,
-            };
-            let Some(ChunkSlot::Stored { data, .. }) = self.world.chunks.get(&c) else {
-                continue;
-            };
-            let data_arc = std::sync::Arc::new(data.clone());
-            let neighbors =
-                crate::ecs::systems::mesh_upload::gather_neighbors(&self.world, c);
-            if needs_light {
-                self.jobs
-                    .spawn_relight(c, data_arc, neighbors, self.registry.clone());
-            } else {
-                self.jobs
-                    .spawn_mesh_lod0(c, data_arc, neighbors, self.registry.clone());
+        let dirty_chunks = time(prof, "interaction", || {
+            crate::ecs::systems::interaction::interaction(&mut self.ecs, &mut self.world)
+        });
+        self.frame_edit_count = dirty_chunks.len() as u32;
+        time(prof, "edit_dispatch", || {
+            for c in &dirty_chunks {
+                use crate::voxel::world::ChunkSlot;
+                let needs_light = match self.world.chunks.get(c) {
+                    Some(ChunkSlot::Stored { meta, .. }) => meta.dirty.light,
+                    _ => false,
+                };
+                let Some(ChunkSlot::Stored { data, .. }) = self.world.chunks.get(c) else {
+                    continue;
+                };
+                let data_arc = std::sync::Arc::new(data.clone());
+                let neighbors =
+                    crate::ecs::systems::mesh_upload::gather_neighbors(&self.world, *c);
+                if needs_light {
+                    self.jobs
+                        .spawn_relight(*c, data_arc, neighbors, self.registry.clone());
+                } else {
+                    self.jobs
+                        .spawn_mesh_lod0(*c, data_arc, neighbors, self.registry.clone());
+                }
             }
-        }
-        crate::ecs::systems::world_stream::world_stream(
-            &self.ecs,
-            &mut self.world,
-            &self.jobs,
-            &self.generator,
-            &self.registry,
-            &self.persistence,
-            &self.saves_dir,
-        );
-        crate::ecs::systems::mesh_upload::drain_jobs(
-            &mut self.world,
-            &self.jobs,
-            &mut self.renderer,
-            &self.registry,
-        );
-        crate::ecs::systems::mesh_upload::drain_persistence(
-            &mut self.world,
-            &self.jobs,
-            &self.persistence,
-            &self.generator,
-            &self.registry,
-        );
+        });
+        time(prof, "world_stream", || {
+            crate::ecs::systems::world_stream::world_stream(
+                &self.ecs,
+                &mut self.world,
+                &self.jobs,
+                &self.generator,
+                &self.registry,
+                &self.persistence,
+                &self.saves_dir,
+            )
+        });
+        time(prof, "drain_jobs", || {
+            crate::ecs::systems::mesh_upload::drain_jobs(
+                &mut self.world,
+                &self.jobs,
+                &mut self.renderer,
+                &self.registry,
+            )
+        });
+        time(prof, "drain_persistence", || {
+            crate::ecs::systems::mesh_upload::drain_persistence(
+                &mut self.world,
+                &self.jobs,
+                &self.persistence,
+                &self.generator,
+                &self.registry,
+            )
+        });
         // Relight pump runs after the two job-drain stages so it picks
         // up the `dirty.light` flags those handlers just set on newly
         // loaded/generated chunks. Each frame queues a bounded number
@@ -256,11 +304,13 @@ impl AppState {
         // The return value is the *total* (not just dispatched) count
         // of `dirty.light` chunks, which the HUD prints so we can see
         // whether the cascade is terminating.
-        self.perf.light_queue = crate::ecs::systems::mesh_upload::relight_pump(
-            &mut self.world,
-            &self.jobs,
-            &self.registry,
-        );
+        self.perf.light_queue = time(prof, "relight_pump", || {
+            crate::ecs::systems::mesh_upload::relight_pump(
+                &mut self.world,
+                &self.jobs,
+                &self.registry,
+            )
+        }) as u32 as _;
         self.perf.chunks_rendered = self.renderer.chunk_mesh_count();
         self.perf.draw_calls = self.renderer.last_draw_calls();
         crate::ecs::systems::world_stream::world_unload(
@@ -278,18 +328,20 @@ impl AppState {
             self.flush_modified();
         }
 
-        let time = self.start_time.elapsed().as_secs_f32();
+        let now_secs = self.start_time.elapsed().as_secs_f32();
         let fps = self.fps_meter.fps();
-        if let Err(e) = crate::ecs::systems::render::render(
-            &self.ecs,
-            &mut self.renderer,
-            &self.registry,
-            fps,
-            time,
-            &self.perf,
-        ) {
-            log::warn!("render error: {e:?}");
-        }
+        time(prof, "render", || {
+            if let Err(e) = crate::ecs::systems::render::render(
+                &self.ecs,
+                &mut self.renderer,
+                &self.registry,
+                fps,
+                now_secs,
+                &self.perf,
+            ) {
+                log::warn!("render error: {e:?}");
+            }
+        });
         self.input_buf.clear_per_frame();
         // Sample full per-step time AFTER the render call so WMS
         // captures GPU command encoding + the present (or whatever
@@ -297,6 +349,18 @@ impl AppState {
         // the *next* step reads this — 1 frame stale, which is
         // imperceptible for perf debugging.
         self.perf.work_ms = work_start.elapsed().as_secs_f32() * 1000.0;
+        // Flush this frame's profiler row, if profiling enabled.
+        if let Some(p) = &self.profiler {
+            p.finish_frame(crate::profiler::FrameCounters {
+                fps,
+                work_ms: self.perf.work_ms,
+                draw_calls: self.perf.draw_calls,
+                light_queue: self.perf.light_queue as u32,
+                chunks_rendered: self.perf.chunks_rendered as u32,
+                edits: self.frame_edit_count,
+            });
+        }
+        self.frame_edit_count = 0;
     }
 
     /// Send every currently-modified chunk through the persistence thread.
