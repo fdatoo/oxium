@@ -105,20 +105,29 @@ impl World {
         meta.state = ChunkState::Generated;
         dirty.push(chunk_coord);
 
-        // Border edits propagate to the neighbour on that side. Both
-        // mesh AND light are marked dirty: the neighbour's boundary
-        // face may have changed visibility (mesh) and its own
-        // lighting BFS reads our edge values to seed boundary cells
-        // (light), so an edit at our boundary that flips a stone to
-        // air opens a new path for sky/torch light to enter the
-        // neighbour from us.
+        // Border edits propagate to the neighbour on that side: its
+        // boundary face may have changed visibility, so it needs a
+        // remesh. We deliberately do NOT cascade `dirty.light` here:
+        // every breaking-edit at a boundary would queue up to four
+        // extra relights (chunk + face-adjacent neighbours), each
+        // decompressing 7 chunks and running a full BFS. That blew
+        // the job pool and the wgpu upload path far enough to dip
+        // FPS in half on every click.
+        //
+        // The lighting BFS instead consumes the neighbour's *current*
+        // boundary values when it next runs (see
+        // `lighting::seed_from_neighbors`). So the chunk we're
+        // editing relights correctly using the neighbour's old
+        // boundary; the neighbour will catch up the next time it's
+        // touched for any reason (new chunk gen, a later edit, etc.).
+        // The visible cost is a single-cell-off light discontinuity
+        // at the seam that fades on the next relight pass.
         let (lx, ly, lz) = (local.0.x, local.0.y, local.0.z);
         let dim = CHUNK_DIM_U;
         let mut maybe_mark = |this: &mut World, dc: IVec3| {
             let nc = ChunkCoord(chunk_coord.0 + dc);
             if let Some(ChunkSlot::Stored { meta, .. }) = this.chunks.get_mut(&nc) {
                 meta.dirty.mesh = true;
-                meta.dirty.light = true;
                 dirty.push(nc);
             }
         };
