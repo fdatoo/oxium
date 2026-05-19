@@ -2,45 +2,59 @@
 //!
 //! "Pure" matters: terrain output must depend only on the seed and chunk
 //! coordinate so chunks can be regenerated from disk-free state and so unit
-//! tests can pin output with golden hashes.
+//! tests can pin output with golden hashes. To make that compatible with
+//! the more expensive geography the new pipeline produces, intermediate
+//! data is memoised in two LRU caches keyed on region coords (see
+//! `region.rs`). The function is still pure in `(seed, coord)` — caches
+//! are just memoisation.
 //!
-//! The pipeline runs in five conceptual passes per column:
+//! ### Pipeline (per chunk)
 //!
-//! 1. **Biome maps.** Two very low-frequency noise fields drive geography:
-//!    `mountainness_map` decides where tall ranges cluster, `desert_map`
-//!    decides where sand replaces grass at the surface. Both are smooth so
-//!    biomes blend instead of stepping.
-//! 2. **Heightmap.** Base FBM gives rolling hills (`±AMPLITUDE` blocks).
-//!    A *ridged* `mountain_noise` (peaks form along the zero-crossings of
-//!    a smooth field, not at isolated maxima) adds `+MOUNTAIN_PEAK`
-//!    elevation scaled by `mountainness_map` — only mountainy regions
-//!    grow ranges, and the ranges form connected ridges rather than
-//!    scattered bumps.
-//! 3. **Layers.** Top block is grass (sand near sea level *or* in
-//!    deserts, stone on tall mountain peaks); next three are dirt;
-//!    everything below is stone.
-//! 4. **Caves.** Two interleaved cave systems:
-//!    * **Tunnels** — the intersection of two independent 3D noises'
-//!      zero-crossings. Each noise's `|n| < TUNNEL_BAND` defines an
-//!      infinite warped sheet; where two sheets cross they form
-//!      long winding ribbons ~2-3 blocks wide. Classic voxel-game
-//!      tunnel shape.
-//!    * **Caverns** — a single low-frequency 3D noise whose extreme
-//!      values open into large irregular rooms, occasionally
-//!      intersecting tunnels for big chambers with corridor entries.
-//!    Caves only carve below the dirt cap so surface terrain stays
-//!    intact, and respect a tiny floor so the world doesn't drop
-//!    away to infinity at the chunk-stack bottom.
-//! 5. **Sea level.** Any air at or below `SEA_LEVEL` becomes water —
-//!    flooded cave passages turn into underwater grottos automatically.
+//! 1. **Pre-fetch regions.** `gather_chunk_regions` populates a 3 × 3
+//!    grid of fine regions around the chunk; per-column queries read
+//!    from this grid without re-locking the cache.
+//! 2. **Per-column terrain.** For each column:
+//!    * `heightmap::h_pre` evaluates `SEA_LEVEL + plate_shelf +
+//!      plate_ridge_lift + warped_fbm * plate_roughness` from the
+//!      Voronoi plate decomposition (`plates.rs`) and the
+//!      domain-warped FBM relief.
+//!    * `slope_at` on `h_pre` decides cliff exposure (slope-driven,
+//!      replaces v1's `MOUNTAIN_ROCK_LINE` line).
+//!    * `valley_carve` queries the region's river segments for a
+//!      perpendicular-distance U-profile carve depth, subtracting
+//!      it from `h_pre` to get `h_final`.
+//!    * `climate.rs`-driven biome classifier picks Tundra /
+//!      SnowyForest / Plains / Forest / Desert / Tropical via
+//!      threshold-perturbed temperature & humidity noise.
+//! 3. **Surface block selection.** Cliff → Stone; beach band → Sand;
+//!    snow line / cold biome → Snow; Desert → Sand; otherwise Grass,
+//!    with a stochastic sand-transition band on the grass side of the
+//!    desert boundary.
+//! 4. **Caves.** Graph-based cave systems (`caves.rs`) deposit
+//!    chambers + spline tunnels into the chunk. The `CAVE_SURFACE_BUFFER`
+//!    rule preserves the grass cap except where an explicit entrance
+//!    (sinkhole / cliff mouth / skylight) punches through. Below
+//!    `WORMHOLE_BAND_Y` a sparse 3D-noise wormhole field carves
+//!    additional connective passages.
+//! 5. **Water flood.** Sea-level flood + per-column lake-rim flood
+//!    (the latter from sink-filled basins in the hydrology pass)
+//!    turn any air cell below the appropriate water level into Water.
+//! 6. **Trees.** Per-cell deterministic placement (`tree_in_cell`)
+//!    stamps Oak round-canopy or Palm spreading-fronds shapes
+//!    depending on the column's biome.
 //!
-//! Tree placement (in `add_trees`) reuses the same biome data so
-//! deserts and mountain peaks stay bare.
+//! ### Layer dependencies
+//!
+//! Plates → continental mask + ridge lift → heightmap → flow
+//! accumulation (fine + macro hierarchical) → valley carve →
+//! cave systems / wormholes → biomes / surface materials / trees.
+//! Each layer is in its own module; this file is the public entry
+//! point that wires them together.
 
 use crate::voxel::block::Block;
 use crate::voxel::chunk::DenseChunk;
 use crate::voxel::coords::{ChunkCoord, LocalPos, CHUNK_DIM_U};
-use crate::worldgen::tuning::{FINE_REGION_SIZE, MAX_TERRAIN_Y};
+use crate::worldgen::tuning::{FINE_REGION_SIZE, MAX_TERRAIN_Y, TREE_RATE_TROPICAL};
 use glam::UVec3;
 use noise::{Fbm, MultiFractal, NoiseFn, Simplex};
 
@@ -64,47 +78,18 @@ pub mod surface;
 pub mod trees;
 pub mod tuning;
 
-/// World-space Y at which the sea surface sits. Blocks above this with no
-/// solid above turn into air; air below this turns into water.
-pub const SEA_LEVEL: i32 = 62;
-/// World-space Y below which we leave a thin "floor" so the bottom of
-/// the loaded chunk stack doesn't dissolve into nothing. Caves above
-/// this can carve normally; cells at or below are left as their
-/// non-cave block.
-const CAVE_FLOOR_Y: i32 = -120;
-/// Minimum depth (in blocks) below the surface a cave is allowed to
-/// carve. Anything shallower than this would punch through the dirt
-/// cap and leave holes in the grass, so we leave a buffer.
-const CAVE_SURFACE_BUFFER: i32 = 4;
-/// World-space Y above which any surface block in a cold biome gets
-/// capped with snow regardless of the desert/grass decision. Used so
-/// even temperate forests have a snowy alpine band on the upper
-/// flanks of nearby peaks.
-const SNOW_LINE: i32 = 110;
-/// Temperature threshold (in normalised noise units, roughly `[-1, 1]`)
-/// below which a column counts as cold — gets a Snow surface cap and
-/// no trees regardless of humidity. Around `-0.10` so the cold belt
-/// covers a modest fraction of the world rather than dominating.
-const COLD_THRESHOLD: f32 = -0.10;
-/// Humidity threshold above which a temperate column counts as a
-/// forest (denser trees). Below the threshold the column reads as
-/// plains (rare trees).
-const FOREST_HUMIDITY: f32 = 0.05;
-/// Tree-cell spawn percentile (out of 100) for plains: dry grassland
-/// with the occasional lone tree.
-const TREE_RATE_PLAINS: u32 = 12;
-/// Tree-cell spawn percentile for forest: dense woodland.
-const TREE_RATE_FOREST: u32 = 55;
-/// World is partitioned into `CELL_SIZE × CELL_SIZE` (XZ) tree cells.
-/// Each cell rolls a deterministic hash to decide whether it contains a
-/// tree (and where in the cell). 8 blocks per cell + ~35 % spawn rate
-/// gives a forest density of roughly one tree per 180 blocks² — enough
-/// that hills look wooded without filling every meadow.
-const TREE_CELL_SIZE: i32 = 8;
-/// Maximum world-space radius (XZ + Y above surface) a tree's blocks can
-/// occupy. Used to decide which neighbouring tree cells could spill
-/// blocks into the chunk currently being generated.
-const TREE_MARGIN: i32 = 5;
+/// World-space Y at which the sea surface sits. Re-exported here so
+/// callers outside the worldgen module (renderer, persistence, tests)
+/// don't have to import `tuning::SEA_LEVEL` directly.
+pub use crate::worldgen::tuning::SEA_LEVEL;
+
+// All other tuning constants live in `worldgen::tuning`. The names
+// below are imported into this module's scope for ergonomics.
+use crate::worldgen::tuning::{
+    BIOME_JITTER_AMPL, BIOME_JITTER_PERIOD, CAVE_FLOOR_Y, CAVE_SURFACE_BUFFER,
+    COLD_THRESHOLD, FOREST_HUMIDITY, SAND_TRANSITION_BAND, SNOW_LINE, TREE_CELL_SIZE,
+    TREE_MARGIN, TREE_RATE_FOREST, TREE_RATE_PLAINS,
+};
 
 /// Pre-built noise fields for one world seed.
 ///
@@ -182,7 +167,7 @@ impl Generator {
         // ~24-block period, amplitude shaped by `BIOME_JITTER_AMPL`.
         let biome_jitter_noise = Fbm::<Simplex>::new(seed.wrapping_add(401) as u32)
             .set_octaves(2)
-            .set_frequency(1.0 / tuning::BIOME_JITTER_PERIOD as f64)
+            .set_frequency(1.0 / BIOME_JITTER_PERIOD as f64)
             .set_persistence(0.5);
         Self {
             heightmap,
@@ -201,7 +186,7 @@ impl Generator {
     /// `±BIOME_JITTER_AMPL` (noise-value units).
     fn biome_jitter(&self, wx: i32, wz: i32) -> f32 {
         (self.biome_jitter_noise.get([wx as f64, wz as f64]) as f32)
-            * tuning::BIOME_JITTER_AMPL
+            * BIOME_JITTER_AMPL
     }
 
     /// Rotated jitter — sample at `(wz, -wx)` so it's uncorrelated
@@ -209,7 +194,7 @@ impl Generator {
     /// Forest/Plains edges don't co-jitter with desert edges.
     fn biome_jitter_rot(&self, wx: i32, wz: i32) -> f32 {
         (self.biome_jitter_noise.get([wz as f64, -(wx as f64)]) as f32)
-            * tuning::BIOME_JITTER_AMPL
+            * BIOME_JITTER_AMPL
     }
 
     /// Build the fine region at `coord` from noise (heightmap +
@@ -437,12 +422,12 @@ impl Generator {
                                 let dist_to_boundary = 0.30 - col.desertness;
                                 if dist_to_boundary > 0.0
                                     && dist_to_boundary
-                                        < tuning::SAND_TRANSITION_BAND
+                                        < SAND_TRANSITION_BAND
                                 {
                                     let p = 0.5
                                         * (1.0
                                             - dist_to_boundary
-                                                / tuning::SAND_TRANSITION_BAND);
+                                                / SAND_TRANSITION_BAND);
                                     let roll = hash::mix_unit(
                                         self.seed,
                                         &[wx, wz, 71],
@@ -713,7 +698,7 @@ impl Biome {
             Biome::Tundra | Biome::Desert => None,
             Biome::Plains => Some(TREE_RATE_PLAINS),
             Biome::Forest | Biome::SnowyForest => Some(TREE_RATE_FOREST),
-            Biome::Tropical => Some(crate::worldgen::tuning::TREE_RATE_TROPICAL),
+            Biome::Tropical => Some(TREE_RATE_TROPICAL),
         }
     }
 
