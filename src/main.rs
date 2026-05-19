@@ -254,7 +254,7 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => state.renderer.resize(size.width, size.height),
             WindowEvent::KeyboardInput { event: ke, .. } => {
                 if let PhysicalKey::Code(code) = ke.physical_key {
-                    let text = ke.text.as_ref().map(|s| s.as_str());
+                    let text = ke.text.as_deref();
                     let disp = state.ui.on_key(code, ke.state, text);
                     if disp == crate::ui::input::InputDisposition::Forward {
                         state.input_buf.on_key(code, ke.state);
