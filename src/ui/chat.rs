@@ -109,6 +109,56 @@ mod tests {
         log.clear();
         assert!(log.is_empty());
     }
+
+    #[test]
+    fn insert_appends_at_cursor() {
+        let mut ci = ChatInput::default();
+        ci.insert_text("hello");
+        assert_eq!(ci.buf, "hello");
+        assert_eq!(ci.cursor, 5);
+        ci.move_home();
+        ci.insert_text("> ");
+        assert_eq!(ci.buf, "> hello");
+        assert_eq!(ci.cursor, 2);
+    }
+
+    #[test]
+    fn backspace_handles_multibyte() {
+        let mut ci = ChatInput::default();
+        ci.insert_text("héllo");
+        ci.backspace();
+        assert_eq!(ci.buf, "héll");
+        ci.move_home();
+        ci.move_right();
+        ci.backspace();
+        assert_eq!(ci.buf, "éll");
+    }
+
+    #[test]
+    fn delete_at_end_no_op() {
+        let mut ci = ChatInput::default();
+        ci.insert_text("ab");
+        ci.delete_forward();
+        assert_eq!(ci.buf, "ab");
+    }
+
+    #[test]
+    fn insert_filters_control_chars() {
+        let mut ci = ChatInput::default();
+        ci.insert_text("a\nb\tc");
+        assert_eq!(ci.buf, "abc");
+    }
+
+    #[test]
+    fn submit_returns_and_records_history() {
+        let mut ci = ChatInput::default();
+        ci.insert_text("/help");
+        let out = ci.submit();
+        assert_eq!(out, "/help");
+        assert_eq!(ci.buf, "");
+        ci.history_prev();
+        assert_eq!(ci.buf, "/help");
+    }
 }
 
 #[derive(Debug, Default)]
@@ -122,5 +172,93 @@ pub struct ChatInput {
 impl ChatInput {
     pub fn new(prefill: &str) -> Self {
         Self { buf: prefill.to_string(), cursor: prefill.len(), ..Self::default() }
+    }
+
+    pub fn insert_text(&mut self, text: &str) {
+        for ch in text.chars() {
+            if ch.is_control() { continue }
+            let mut buf = [0u8; 4];
+            let s = ch.encode_utf8(&mut buf);
+            self.buf.insert_str(self.cursor, s);
+            self.cursor += s.len();
+        }
+        self.history_pos = None;
+    }
+
+    pub fn backspace(&mut self) {
+        if self.cursor == 0 { return }
+        let mut new_cursor = self.cursor - 1;
+        while !self.buf.is_char_boundary(new_cursor) && new_cursor > 0 {
+            new_cursor -= 1;
+        }
+        self.buf.replace_range(new_cursor..self.cursor, "");
+        self.cursor = new_cursor;
+        self.history_pos = None;
+    }
+
+    pub fn delete_forward(&mut self) {
+        if self.cursor >= self.buf.len() { return }
+        let mut end = self.cursor + 1;
+        while end < self.buf.len() && !self.buf.is_char_boundary(end) {
+            end += 1;
+        }
+        self.buf.replace_range(self.cursor..end, "");
+        self.history_pos = None;
+    }
+
+    pub fn move_left(&mut self) {
+        if self.cursor == 0 { return }
+        let mut c = self.cursor - 1;
+        while c > 0 && !self.buf.is_char_boundary(c) { c -= 1; }
+        self.cursor = c;
+    }
+
+    pub fn move_right(&mut self) {
+        if self.cursor >= self.buf.len() { return }
+        let mut c = self.cursor + 1;
+        while c < self.buf.len() && !self.buf.is_char_boundary(c) { c += 1; }
+        self.cursor = c;
+    }
+
+    pub fn move_home(&mut self) { self.cursor = 0; }
+    pub fn move_end(&mut self)  { self.cursor = self.buf.len(); }
+
+    pub fn history_prev(&mut self) {
+        if self.history.is_empty() { return }
+        let next = match self.history_pos {
+            None       => self.history.len() - 1,
+            Some(0)    => 0,
+            Some(i)    => i - 1,
+        };
+        self.history_pos = Some(next);
+        self.buf = self.history[next].clone();
+        self.cursor = self.buf.len();
+    }
+
+    pub fn history_next(&mut self) {
+        match self.history_pos {
+            None => {}
+            Some(i) if i + 1 >= self.history.len() => {
+                self.history_pos = None;
+                self.buf.clear();
+                self.cursor = 0;
+            }
+            Some(i) => {
+                self.history_pos = Some(i + 1);
+                self.buf = self.history[i + 1].clone();
+                self.cursor = self.buf.len();
+            }
+        }
+    }
+
+    pub fn submit(&mut self) -> String {
+        let line = std::mem::take(&mut self.buf);
+        self.cursor = 0;
+        self.history_pos = None;
+        if !line.is_empty() {
+            if self.history.len() == 32 { self.history.pop_front(); }
+            self.history.push_back(line.clone());
+        }
+        line
     }
 }

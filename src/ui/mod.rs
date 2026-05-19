@@ -139,10 +139,10 @@ impl Ui {
     }
 
     /// Handle non-toggle keys while the UI is open.
-    fn consume_in_ui(&mut self, code: KeyCode, _text: Option<&str>) {
-        let action: Option<crate::ui::menu::MenuAction> = match &mut self.state {
+    fn consume_in_ui(&mut self, code: KeyCode, text: Option<&str>) {
+        match &mut self.state {
             UiState::Paused { menu: MenuNav::Top { hovered } } => {
-                match code {
+                let action = match code {
                     KeyCode::ArrowUp | KeyCode::KeyW => {
                         *hovered = (*hovered + TOP_MENU.len() - 1) % TOP_MENU.len();
                         None
@@ -155,12 +155,39 @@ impl Ui {
                         Some(TOP_MENU[*hovered].activate())
                     }
                     _ => None,
+                };
+                if let Some(a) = action {
+                    self.apply_menu_action(a);
                 }
             }
-            _ => None,
-        };
-        if let Some(a) = action {
-            self.apply_menu_action(a);
+            UiState::Paused { menu: MenuNav::Settings } => {}
+            UiState::Chat { input, .. } => {
+                let submitted: Option<String> = match code {
+                    KeyCode::Backspace  => { input.backspace(); None }
+                    KeyCode::Delete     => { input.delete_forward(); None }
+                    KeyCode::ArrowLeft  => { input.move_left(); None }
+                    KeyCode::ArrowRight => { input.move_right(); None }
+                    KeyCode::Home       => { input.move_home(); None }
+                    KeyCode::End        => { input.move_end(); None }
+                    KeyCode::ArrowUp    => { input.history_prev(); None }
+                    KeyCode::ArrowDown  => { input.history_next(); None }
+                    KeyCode::Enter | KeyCode::NumpadEnter => Some(input.submit()),
+                    _ => {
+                        if let Some(t) = text {
+                            if !t.chars().any(|c| c.is_control()) {
+                                input.insert_text(t);
+                            }
+                        }
+                        None
+                    }
+                };
+                if let Some(line) = submitted {
+                    self.submit_chat(&line);
+                    self.state = UiState::Playing;
+                    self.cursor_state_changed = true;
+                }
+            }
+            UiState::Playing => {}
         }
     }
 
@@ -184,6 +211,17 @@ impl Ui {
             MenuAction::Quit => {
                 self.push_effect(UiEffect::Quit);
             }
+        }
+    }
+
+    fn submit_chat(&mut self, line: &str) {
+        let line = line.trim();
+        if line.is_empty() { return }
+        if line.starts_with('/') {
+            self.log.push_echo(line);
+            self.log.push_error("(dispatcher not wired yet)");
+        } else {
+            self.log.push_player(line);
         }
     }
 
