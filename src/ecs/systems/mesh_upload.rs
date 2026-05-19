@@ -310,11 +310,28 @@ pub fn drain_persistence(
             PersistResult::Loaded { coord, data } => match data {
                 Some(data) => {
                     world.insert(coord, data);
-                    // Re-mesh self + already-Stored neighbours, same
-                    // as Generated. Out-of-order arrivals would
-                    // otherwise leave neighbour boundary faces
-                    // conservatively-emitted (a flat fog plane at
-                    // the shared boundary).
+                    // Mark `dirty.light = true` on the just-loaded
+                    // chunk. Saved chunks can carry stale
+                    // sky_light / block_light values when an
+                    // autosave races a player edit: `set_block`
+                    // bumps the data but leaves the light arrays
+                    // for the BFS to recompute later, and the
+                    // autosave/Drop flush writes whichever state is
+                    // current. On reload nothing re-runs the BFS,
+                    // so the chunk renders with stale (often zero)
+                    // light around the edit — which fades to the
+                    // cave-fog gray at distance and shows as the
+                    // "flat fog plane where I modified terrain"
+                    // bug. The relight pump picks this up and
+                    // converges over a few frames.
+                    if let Some(ChunkSlot::Stored { meta, .. }) =
+                        world.chunks.get_mut(&coord)
+                    {
+                        meta.dirty.light = true;
+                    }
+                    // Re-mesh self + already-Stored neighbours, so
+                    // out-of-order arrivals don't leave boundary
+                    // faces conservatively-emitted.
                     for c in std::iter::once(coord).chain(neighbor_coords(coord)) {
                         if let Some(ChunkSlot::Stored { data, meta }) =
                             world.chunks.get(&c)
