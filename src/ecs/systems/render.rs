@@ -23,6 +23,7 @@ pub fn render(
     fps: f32,
     time: f32,
     perf: &PerfSnapshot,
+    ui: &crate::ui::Ui,
 ) -> Result<(), wgpu::SurfaceError> {
     let target = ecs
         .world
@@ -50,7 +51,8 @@ pub fn render(
         .unwrap_or(0);
 
     let (sw, sh) = renderer.framebuffer_size();
-    let hud = build_hud((sw, sh), fps, eye, selected_slot, registry, perf);
+    let mut hud = build_hud((sw, sh), fps, eye, selected_slot, registry, perf);
+    ui.draw_overlay((sw, sh), &mut hud);
 
     renderer.render(
         eye,

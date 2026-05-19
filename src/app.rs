@@ -431,6 +431,7 @@ impl AppState {
                 fps,
                 now_secs,
                 &self.perf,
+                &self.ui,
             ) {
                 log::warn!("render error: {e:?}");
             }
