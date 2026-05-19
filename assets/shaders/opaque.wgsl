@@ -116,13 +116,39 @@ fn vs_main(in: VsIn) -> VsOut {
 // Compute the colour of the sky at the horizon, used as the fog tint.
 // Mirrors the gradient logic in sky.wgsl so distant terrain dissolves
 // seamlessly into the sky's horizon band rather than into a flat grey.
+//
+// Sun-warming pulls the horizon toward a soft peach when the sun is
+// near the horizon (sin(angle) low → sun_intensity low but non-zero),
+// the same atmospheric-scattering cue that makes real sunsets read
+// as orange before turning into the dusk band proper.
 fn horizon_color(sun_intensity: f32) -> vec3<f32> {
     let day   = vec3<f32>(0.65, 0.80, 1.00);   // brighter than zenith
     let dusk  = vec3<f32>(0.98, 0.62, 0.35);
     let night = vec3<f32>(0.05, 0.06, 0.12);
+    let peach = vec3<f32>(1.00, 0.78, 0.62);
     let i = sun_intensity;
     let dusk_w = smoothstep(0.0, 0.25, i) - smoothstep(0.25, 0.7, i);
-    return mix(night, day, smoothstep(0.0, 0.7, i)) + dusk * dusk_w * 0.6;
+    // Peach warming peaks at low-but-positive intensity — same
+    // window as `dusk_w` but a touch wider so the warm cast extends
+    // into early morning / late afternoon, not just sunset proper.
+    let peach_w = smoothstep(0.05, 0.30, i) - smoothstep(0.30, 0.80, i);
+    return mix(night, day, smoothstep(0.0, 0.7, i))
+        + dusk * dusk_w * 0.6
+        + peach * peach_w * 0.25;
+}
+
+// Per-block colour-variation noise. Adds a small low-frequency tint
+// modulation to surfaces so large flat areas don't read as uniform
+// painted patches. Driven by world-space block coordinates (the
+// `floor` snaps the perturbation to block boundaries so neighbouring
+// blocks shift independently, mimicking how a stack of distinct
+// physical blocks would look). Output is centered on 0 so it can be
+// added directly to a tint without changing average brightness.
+fn block_variation_hash(p: vec3<f32>) -> f32 {
+    let q = floor(p);
+    var h = sin(dot(q, vec3<f32>(127.1, 311.7, 74.7))) * 43758.5453;
+    h = fract(h);
+    return (h - 0.5) * 2.0; // map [0,1) → [-1, 1)
 }
 
 // ACES filmic tone mapping — the cinematographer's go-to curve. Compresses
@@ -226,7 +252,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let ao = mix(0.45, 1.0, in.v_ao);
     let lit = max(0.05, in.v_light);
     let shade = ao * lit;
-    let lit_rgb = base_rgb * shade;
+    // Per-block brightness jitter: a small ±6% modulation keyed off
+    // the world-space block coordinate. Neighbouring blocks (whole
+    // integer steps in any axis) get a different jitter; cells
+    // *within* a block share the same value, so the variation reads
+    // as block-level natural variance rather than per-pixel noise.
+    // Effect is most visible on otherwise-uniform grass/sand fields.
+    let variation = 1.0 + block_variation_hash(in.v_world) * 0.06;
+    let lit_rgb = base_rgb * shade * variation;
 
     // Distance fog: linear ramp between FOG_START and FOG_END.
     let dist = length(in.v_world - camera.eye.xyz);

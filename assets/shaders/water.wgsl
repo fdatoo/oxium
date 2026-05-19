@@ -309,11 +309,23 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // 32) and a much wider glow (exponent 8) that bleeds the sun's
     // colour out across the surrounding water like real
     // atmospheric scatter on a water plane at sunset.
-    let trail = pow(sun_align, 32.0) * 1.30 * camera.sun_intensity;
-    let halo  = pow(sun_align,  8.0) * 0.25 * camera.sun_intensity;
-    let sun_color  = vec3<f32>(1.00, 0.92, 0.70);
-    let sun_warm   = vec3<f32>(1.00, 0.78, 0.45);
-    let sun_glint  = sun_color * trail + sun_warm * halo;
+    // Three terms layered for a richer reflection:
+    //   - `core`:  tight bright centre (exponent 200), the "the sun
+    //              is literally reflected here" pixel
+    //   - `trail`: medium-width primary trail (exponent 48)
+    //   - `halo`:  wide warm glow that scatters the sun's colour
+    //              across the surrounding water
+    // Tightening `trail` from 32 → 48 and adding the high-exponent
+    // core gives the reflection a clear "burning bright in the
+    // middle, soft warm edges" shape — much closer to a real
+    // shader-pack water glint.
+    let core  = pow(sun_align, 200.0) * 2.50 * camera.sun_intensity;
+    let trail = pow(sun_align,  48.0) * 1.20 * camera.sun_intensity;
+    let halo  = pow(sun_align,   8.0) * 0.25 * camera.sun_intensity;
+    let sun_core_color = vec3<f32>(1.00, 0.98, 0.90);
+    let sun_color      = vec3<f32>(1.00, 0.92, 0.70);
+    let sun_warm       = vec3<f32>(1.00, 0.78, 0.45);
+    let sun_glint = sun_core_color * core + sun_color * trail + sun_warm * halo;
 
     // Compose: water body → blend toward sky reflection by fresnel,
     // then add the sun trail on top. The trail is bright enough
