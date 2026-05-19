@@ -73,14 +73,38 @@ struct VsOut {
 
 // Multi-octave wave height. Driven by world-space xz and `camera.time`
 // so adjacent chunks ripple coherently as the camera moves. Three
-// octaves at incommensurate frequencies — combines a slow rolling
-// swell with a faster choppy detail layer on top, gives the surface
-// real motion instead of one repeating wavelength.
+// octaves at incommensurate frequencies — slow rolling swell + medium
+// chop + fine high-frequency detail.
+//
+// Sampled per-pixel by the fragment shader to derive a fake surface
+// normal — the actual mesh geometry stays nearly flat. Doing this
+// per-pixel rather than per-vertex matters because greedy meshing
+// merges many block-tops into single huge quads; vertex displacement
+// alone gives a quad four wave samples at its corners and bilinear-
+// interpolates between them, which reads as flat at any reasonable
+// camera distance.
 fn wave_height(world_xz: vec2<f32>, t: f32) -> f32 {
     let big   = sin(world_xz.x * 0.20 + t * 0.60) * cos(world_xz.y * 0.17 + t * 0.50);
     let med   = sin(world_xz.x * 0.45 + t * 1.30) * cos(world_xz.y * 0.37 + t * 1.10);
     let small = sin(world_xz.x * 0.95 + world_xz.y * 1.05 + t * 2.40);
     return big * 0.50 + med * 0.35 + small * 0.15;
+}
+
+// Numerical gradient of `wave_height` over `world_xz`. The two
+// finite-difference samples give us dh/dx and dh/dz; the surface
+// normal of a heightfield (x, h(x,z), z) is then
+// `normalize(-dh/dx, 1, -dh/dz)`. Scaled by `amplitude` so the same
+// wave field drives both vertex displacement and the per-pixel
+// normal perturbation.
+fn wave_normal(world_xz: vec2<f32>, t: f32, amplitude: f32) -> vec3<f32> {
+    let eps = 0.5;
+    let h_x0 = wave_height(world_xz - vec2<f32>(eps, 0.0), t) * amplitude;
+    let h_x1 = wave_height(world_xz + vec2<f32>(eps, 0.0), t) * amplitude;
+    let h_z0 = wave_height(world_xz - vec2<f32>(0.0, eps), t) * amplitude;
+    let h_z1 = wave_height(world_xz + vec2<f32>(0.0, eps), t) * amplitude;
+    let dx = (h_x1 - h_x0) / (2.0 * eps);
+    let dz = (h_z1 - h_z0) / (2.0 * eps);
+    return normalize(vec3<f32>(-dx, 1.0, -dz));
 }
 
 // Cheap 2D hash for procedural noise — same shape the sky shader uses.
@@ -202,92 +226,94 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
 
     let view_dir = normalize(camera.eye.xyz - in.v_world);
-    let cos_theta = clamp(dot(view_dir, in.v_normal), 0.0, 1.0);
 
-    // Fresnel: low at head-on, high at grazing. We cap the *visual*
-    // contribution (`rgb_fresnel`) at 0.55 so even glancing water
-    // doesn't turn into a mirror — at our pixel-art fidelity a real
-    // unclamped Schlick fresnel makes the water read like the sky
-    // with a few wave wrinkles, which loses the water character
-    // entirely. Alpha uses the unclamped value because the *opacity*
-    // really should grow at grazing angles (more vertical column of
-    // water absorbs more light).
+    // Per-pixel surface normal from the wave gradient. Sampled in
+    // world space so neighbouring chunks agree on what the wave is
+    // doing at the seam — no visible boundary line. The amplitude
+    // here drives BOTH how the surface lights specularly and how
+    // much the sky reflection wobbles, which is what gives a real
+    // water body its lively shimmer.
+    var surface_n = in.v_normal;
+    if (in.v_face == 2.0) {
+        // Only top faces get wave-perturbed normals — side faces of
+        // exposed water columns shouldn't pretend to be wavy.
+        surface_n = wave_normal(in.v_world.xz, camera.time, 0.45);
+    }
+    let cos_theta = clamp(dot(view_dir, surface_n), 0.0, 1.0);
+
+    // Fresnel: low (transparent) at head-on, high (mirror) at
+    // grazing. Capped at 0.92 — keeps the very edge of the water
+    // from being a *perfect* mirror so the sky-reflection colour
+    // doesn't lose every trace of water hue.
     let fresnel = fresnel_schlick(cos_theta, 0.04);
-    let rgb_fresnel = min(fresnel, 0.55);
+    let rgb_fresnel = min(fresnel, 0.92);
 
-    // Base water colour. Saturated deep blue rather than the vertex
-    // tint's lighter shade — vertex `color` exists so the mesher /
-    // physics can identify water, but the rendered colour is
-    // shader-defined. Lit by sky-light so caves don't glow blue.
-    let water_body = vec3<f32>(0.05, 0.32, 0.55);
-    var base = water_body * max(in.v_light, 0.05);
+    // Base water body colour. Cool deep blue lit by sky-light. The
+    // body is mostly hidden by the sky reflection at glancing
+    // angles; only really visible when looking nearly straight down.
+    let water_body = vec3<f32>(0.04, 0.20, 0.38) * max(in.v_light, 0.10);
 
-    // Distance-saturation: shallow-near reads brighter, deep-far
-    // reads darker. Stand-in for real depth-buffer absorption.
-    let dist = length(in.v_world - camera.eye.xyz);
-    let depth_t = clamp(dist / 120.0, 0.0, 1.0);
-    let deep    = base * 0.55 + vec3<f32>(0.01, 0.06, 0.12);
-    base = mix(base, deep, depth_t);
+    // Sky reflection: read the horizon colour for the lower half of
+    // the visible sky and the zenith for the upper. Tonemapping
+    // earlier in the shader doesn't apply here — these values feed
+    // into the final tonemap pass at the end.
+    let horizon = vec3<f32>(0.65, 0.80, 1.00) * camera.sun_intensity
+                + vec3<f32>(0.05, 0.07, 0.12) * (1.0 - camera.sun_intensity);
+    let zenith  = vec3<f32>(0.30, 0.50, 0.95) * camera.sun_intensity
+                + vec3<f32>(0.02, 0.03, 0.07) * (1.0 - camera.sun_intensity);
+    // The "reflected up direction" — how vertical the surface is at
+    // this fragment — picks how much zenith vs horizon shows.
+    let sky_t = clamp(surface_n.y, 0.0, 1.0);
+    let sky_reflection = mix(horizon, zenith, sky_t * sky_t);
 
-    // Animated surface texture. Sample `water_still.png` (atlas tile
-    // 8) at TWO scrolling UVs and combine — the difference reads as
-    // glints sliding across the surface, even on still parts of the
-    // wave field where the vertex displacement alone wouldn't catch
-    // the eye.
-    let tile_origin = vec2<f32>(0.0, 2.0) * TILE_UV_SIZE; // tile 8 → (col 0, row 2)
-    let uv_a = fract(in.v_world.xz * 0.08 + vec2<f32>( 0.04,  0.03) * camera.time);
-    let uv_b = fract(in.v_world.xz * 0.13 + vec2<f32>(-0.05,  0.02) * camera.time);
-    let tex_a = textureSampleLevel(atlas_tex, atlas_sampler, tile_origin + uv_a * TILE_UV_SIZE, 0.0).rgb;
-    let tex_b = textureSampleLevel(atlas_tex, atlas_sampler, tile_origin + uv_b * TILE_UV_SIZE, 0.0).rgb;
-    let surface_tex = (tex_a + tex_b) * 0.5;
+    // Sun reflection: reflect the view direction across the surface
+    // normal, dot against the "to-sun" direction. A *wide* exponent
+    // (around 32, much wider than a tight glint) makes the sun
+    // smear into a long shimmer trail rather than a single bright
+    // pixel — the readable visual cue every shader-pack water uses.
+    // The exact wave normal we perturbed above is what breaks the
+    // trail up into the moving shimmer you see in screenshots; with
+    // a flat normal it'd be a hard ellipse.
+    // `camera.sun_dir` already points *from* the camera *toward* the
+    // sun (the sky shader uses it as-is for the disc dot product).
+    // No negation needed here.
+    let to_sun = normalize(camera.sun_dir.xyz);
+    let view_reflected = reflect(-view_dir, surface_n);
+    let sun_align = max(dot(view_reflected, to_sun), 0.0);
+    // Two terms layered: a moderate-width primary trail (exponent
+    // 32) and a much wider glow (exponent 8) that bleeds the sun's
+    // colour out across the surrounding water like real
+    // atmospheric scatter on a water plane at sunset.
+    let trail = pow(sun_align, 32.0) * 1.30 * camera.sun_intensity;
+    let halo  = pow(sun_align,  8.0) * 0.25 * camera.sun_intensity;
+    let sun_color  = vec3<f32>(1.00, 0.92, 0.70);
+    let sun_warm   = vec3<f32>(1.00, 0.78, 0.45);
+    let sun_glint  = sun_color * trail + sun_warm * halo;
 
-    // Surface ripple: animated value-noise pattern modulates the
-    // base brightness. Brighter ridges + slightly darker troughs
-    // make the surface read as moving even when the vertex wave is
-    // gentle.
-    let ripple = ripple_pattern(in.v_world.xz, camera.time);
-    base = base * (1.0 + ripple * 0.45);
-    // Lean the colour toward the sampled water texture so the
-    // pixel-art ripple pattern from `water_still.png` is visible on
-    // the surface.
-    base = mix(base, surface_tex * water_body * 1.8, 0.35);
-
-    // Sun specular. Blinn-Phong, tight exponent → small crisp glint.
-    // The ripple noise perturbs the half-vector slightly so the
-    // glint *moves* across the surface as the waves roll instead of
-    // sitting in a fixed spot.
-    let to_light = -camera.sun_dir.xyz;
-    let half_vec = normalize(view_dir + to_light);
-    let spec_n   = max(dot(in.v_normal, half_vec) + ripple * 0.08, 0.0);
-    let specular = pow(spec_n, 120.0) * camera.sun_intensity;
-
-    // Sky reflection colour: tinted toward water blue so even when
-    // fresnel hits the cap the surface stays believably watery.
-    let sky_reflection = vec3<f32>(0.30, 0.55, 0.85);
-    var rgb = mix(base, sky_reflection, rgb_fresnel);
-
-    // Additive sun glint — punches through at any angle where the
-    // half-vector lines up with the surface normal, independent of
-    // the fresnel blend.
-    let sun_glint = vec3<f32>(1.00, 0.95, 0.80);
-    rgb = rgb + sun_glint * specular;
+    // Compose: water body → blend toward sky reflection by fresnel,
+    // then add the sun trail on top. The trail is bright enough
+    // even at low fresnel that the eye reads it as the dominant
+    // surface feature, which is exactly the shader-pack signature.
+    var rgb = mix(water_body, sky_reflection, rgb_fresnel) + sun_glint;
 
     // Distance fog: dissolve into the horizon so far water doesn't
     // strip-band against the sky.
+    let dist = length(in.v_world - camera.eye.xyz);
     let fog_start = 96.0;
     let fog_end   = 360.0;
     let fog_t = clamp((dist - fog_start) / (fog_end - fog_start), 0.0, 1.0);
-    let fog_col = vec3<f32>(0.55, 0.72, 0.95) * camera.sun_intensity
-                + vec3<f32>(0.04, 0.05, 0.10) * (1.0 - camera.sun_intensity);
-    rgb = mix(rgb, fog_col, fog_t);
+    rgb = mix(rgb, horizon, fog_t);
 
     rgb = aces_tonemap(rgb);
     rgb = underwater_tint(rgb, in.v_world, camera.time, camera.underwater_factor);
 
-    // Alpha 0.65..0.88 — never fully transparent (you can always tell
-    // there's water), never fully opaque (you can always see *some*
-    // of what's underneath).
-    let alpha = mix(0.65, 0.88, fresnel);
+    // Alpha 0.78..0.97 — much more opaque than before. The previous
+    // 0.65..0.88 range let beach and chunk-boundary sand bleed
+    // through the surface in long diagonal lines because the water
+    // wasn't opaque enough to mask anything past the first few
+    // blocks. The shader-pack look depends on the surface itself
+    // being the visual subject, not the bottom seen through it.
+    let alpha = mix(0.78, 0.97, fresnel);
 
     return vec4<f32>(rgb, alpha);
 }
