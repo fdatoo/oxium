@@ -344,7 +344,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // small factor to get the distortion vector in NDC.
     let screen_size = vec2<f32>(textureDimensions(reflection_tex));
     let base_uv = in.clip_pos.xy / screen_size;
-    let distort = surface_n.xz * 0.04;
+    // Distortion magnitude is intentionally small. Wave normals are
+    // time-animated, so a large distortion factor multiplied by a
+    // changing normal injects a per-frame wobble that read as a
+    // shimmering, motion-amplifying reflection. ~1% of screen width
+    // gives just enough ripple to break the perfect-mirror look
+    // without making the reflected content slosh around when the
+    // camera moves.
+    let distort = surface_n.xz * 0.012;
     let refl_uv = clamp(base_uv + distort, vec2<f32>(0.0), vec2<f32>(1.0));
     let sky_reflection = textureSampleLevel(
         reflection_tex,
