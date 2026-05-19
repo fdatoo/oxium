@@ -30,6 +30,9 @@ pub struct Ui {
     /// Set when a state transition crossed the `Playing` boundary;
     /// `main.rs` reads + clears this to (re-)grab the cursor.
     pub cursor_state_changed: bool,
+    /// Set to `true` when a `UiEffect::Quit` is drained, so the event
+    /// loop can call `event_loop.exit()` from outside the step.
+    pub wants_quit: bool,
 }
 
 impl Default for Ui {
@@ -46,6 +49,7 @@ impl Ui {
             commands: Registry::builtin(),
             effects: VecDeque::new(),
             cursor_state_changed: false,
+            wants_quit: false,
         }
     }
 

@@ -543,8 +543,7 @@ impl AppState {
         use crate::ui::effect::UiEffect;
         match eff {
             UiEffect::Quit => {
-                // main.rs polls this on `Ui` directly via a flag we'll
-                // set in a later task. For now, no-op.
+                self.ui.wants_quit = true;
             }
             UiEffect::Save => self.flush_modified(),
             UiEffect::Teleport(_p) => {

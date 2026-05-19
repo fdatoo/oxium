@@ -302,6 +302,11 @@ impl ApplicationHandler for App {
                     }
                 }
 
+                if state.ui.wants_quit {
+                    event_loop.exit();
+                    return;
+                }
+
                 if let Some(path) = self.cli.screenshot_path.clone()
                     && self.frames_drawn > self.cli.warmup_frames
                 {
