@@ -98,9 +98,25 @@ fn emit_quad(
         .tile_for_face(face)
         .map(|t| t.index())
         .unwrap_or(UNTEXTURED_TILE);
-    // For a 1×1 naive quad the corner UVs are simply the unit square in
-    // tile space; the four corners line up with `face_corners`' winding.
-    let corner_tile_uv: [(u8, u8); 4] = [(0, 0), (0, 1), (1, 1), (1, 0)];
+    // 1×1 quad UV per face, matching `face_corners`' winding so the
+    // texture reads right-side up on every side face. See the equivalent
+    // comment in `greedy.rs::emit_greedy_quad` for the full rationale.
+    // For naive: `face_corners` puts the two top-Y corners at indices 1
+    // and 2, and the two bottom-Y corners at 0 and 3; the horizontal
+    // (UV.x) side then follows the face's "near/far" corner ordering.
+    let corner_tile_uv: [(u8, u8); 4] = match face {
+        // Top + bottom: UV from the two horizontal axes; PosY's
+        // (-x, -z) → (+x, -z) → (+x, +z) → (-x, +z) corner sweep gives
+        // (0,0)/(0,1)/(1,1)/(1,0).
+        Face::PosY => [(0, 0), (0, 1), (1, 1), (1, 0)],
+        Face::NegY => [(0, 0), (1, 0), (1, 1), (0, 1)],
+        // PosX / NegZ: corners[0,3] = bottom, [1,2] = top; UV.x grows
+        // toward higher horizontal world coord.
+        Face::PosX | Face::NegZ => [(0, 1), (0, 0), (1, 0), (1, 1)],
+        // NegX / PosZ: same vertical pattern but the corners' near/far
+        // ordering is mirrored, so UV.x flips.
+        Face::NegX | Face::PosZ => [(1, 1), (1, 0), (0, 0), (0, 1)],
+    };
 
     let base = mesh.vertices.len() as u32;
     for (i, c) in corners.into_iter().enumerate() {

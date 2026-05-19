@@ -304,11 +304,12 @@ fn emit_greedy_quad(
     let normal_pos = matches!(face, Face::PosX | Face::PosY | Face::PosZ);
     let s = if normal_pos { slice + 1 } else { slice };
 
-    // Four corners in (u, v) order, untransformed. Each corner doubles
-    // as its own UV in tile units: a 1×1 quad spans `(0,0)..(1,1)` in
-    // tile space, an `w×h` greedy quad spans `(0,0)..(w,h)`. The
-    // fragment shader's `fract` then repeats the tile per block cell.
-    let corner_uv: [(u8, u8); 4] = [
+    // Four corners in mesher (u, v) order, used to compute the 3D
+    // vertex positions. This ordering is what the winding fix in
+    // `order` below relies on — DO NOT reshuffle it without also
+    // re-verifying the cross-product test in
+    // `tests::every_face_winds_outward`.
+    let corner_pos_uv: [(u8, u8); 4] = [
         (0, 0),
         (w, 0),
         (w, h),
@@ -317,13 +318,39 @@ fn emit_greedy_quad(
     // Map each cell-relative (u, v) back to a 3D voxel-local position
     // by adding the quad's `(ui, vi)` origin.
     let mut positions = [[0u8; 3]; 4];
-    for (i, (u, v)) in corner_uv.iter().enumerate() {
+    for (i, (u, v)) in corner_pos_uv.iter().enumerate() {
         let mut p = [0u8; 3];
         p[n_axis as usize] = s;
         p[u_axis as usize] = ui + *u;
         p[v_axis as usize] = vi + *v;
         positions[i] = p;
     }
+
+    // Texture UVs in *tile units* per corner. The shader does `fract`
+    // on these, so integer-aligned corner values give per-block tile
+    // repetition automatically across greedy w×h quads.
+    //
+    // The texture must read RIGHT-SIDE UP on every face: PNG-image V=0
+    // (top of the image) needs to land at high world Y (top of the
+    // rendered face). The mesher's (u, v) axes don't agree with world
+    // (X, Y, Z) the same way on every face, so a single UV table can't
+    // be right for all of them:
+    //
+    //   - **PosY / NegY** (top + bottom): no world-Y component on
+    //     the face, so V can map to either horizontal world axis.
+    //   - **PosX / NegZ**: mesher-V *is* world Y; flip V so high
+    //     mesher-V (top of face) lands at low texture V (top of tile).
+    //   - **NegX / PosZ**: mesher-*U* is world Y; swap U/V so texture
+    //     V follows world Y, and flip the new V the same way.
+    //
+    // Without this dispatch, NegX / PosZ render textures rotated 90°
+    // and PosX / NegZ render them upside-down (the visible grass strip
+    // ends up at the bottom of the block instead of the top).
+    let corner_tex_uv: [(u8, u8); 4] = match face {
+        Face::PosY | Face::NegY => [(0, 0), (w, 0), (w, h), (0, h)],
+        Face::PosX | Face::NegZ => [(0, h), (w, h), (w, 0), (0, 0)],
+        Face::NegX | Face::PosZ => [(0, w), (0, 0), (h, 0), (h, w)],
+    };
 
     // Triangle-corner order. The corner_uv layout above gives all six
     // faces correct outward-pointing normals (verified by hand-running
@@ -341,7 +368,7 @@ fn emit_greedy_quad(
     let ao = cell.ao;
     let light = cell.light;
     for i in 0..4 {
-        let (u_tile, v_tile) = corner_uv[order[i]];
+        let (u_tile, v_tile) = corner_tex_uv[order[i]];
         mesh.vertices.push(Vertex {
             pos: positions[order[i]],
             ao: ao[order[i]],

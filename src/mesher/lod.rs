@@ -300,7 +300,14 @@ pub fn mesh_lod(
                     ],
                     _ => unreachable!(),
                 };
-                let uvs: [(u8, u8); 4] = [(0, 0), (0, dy), (f, dy), (f, 0)];
+                // Skirt corners arrive in `[bottom-near, top-near,
+                // top-far, bottom-far]` order (CCW from outside). The
+                // matching UV must put high-Y corners at V=0 (top of
+                // tile) and low-Y corners at V=dy (bottom of tile),
+                // mirroring greedy's per-face flip — otherwise the
+                // grass strip on a `grass_block_side` skirt lands at
+                // the BOTTOM of the cliff face instead of the top.
+                let uvs: [(u8, u8); 4] = [(0, dy), (0, 0), (f, 0), (f, dy)];
                 emit_quad(&mut mesh, face, corners, uvs, bulk_tile, bulk_color, light);
             }
         }
