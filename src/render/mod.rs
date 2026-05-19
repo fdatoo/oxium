@@ -40,8 +40,56 @@ use crate::render::pipelines::hud::{build as build_hud, HudPipeline};
 use crate::render::pipelines::opaque::{build as build_opaque, OpaquePipeline};
 use crate::render::pipelines::sky::{build as build_sky, SkyPipeline};
 use crate::voxel::coords::{BlockPos, ChunkCoord};
-use glam::Vec3;
+use glam::{Mat4, Vec3, Vec4};
 use wgpu::util::DeviceExt;
+
+/// Extract the 6 view-frustum planes from a column-major view-projection
+/// matrix using the Gribb-Hartmann technique. Each returned `Vec4` is
+/// `(nx, ny, nz, d)` such that `n.dot(point) + d >= 0` means the point
+/// is on the inside (camera-visible) side of that plane.
+///
+/// Ordering: `[left, right, bottom, top, near, far]`. The near plane
+/// uses `row2` (for wgpu's `[0, 1]` depth range, not OpenGL's
+/// `[-1, 1]`).
+fn extract_frustum_planes(vp: Mat4) -> [Vec4; 6] {
+    let m = vp.to_cols_array_2d();
+    // glam stores column-major (`m[col][row]`); rebuild rows.
+    let row = |r: usize| Vec4::new(m[0][r], m[1][r], m[2][r], m[3][r]);
+    let r0 = row(0);
+    let r1 = row(1);
+    let r2 = row(2);
+    let r3 = row(3);
+    [
+        r3 + r0, // left
+        r3 - r0, // right
+        r3 + r1, // bottom
+        r3 - r1, // top
+        r2,      // near (wgpu uses [0, 1] depth)
+        r3 - r2, // far
+    ]
+}
+
+/// Conservative AABB-vs-frustum test using the "n-vertex" trick: for
+/// each plane, pick the AABB corner most in the direction of the
+/// plane's normal — if even *that* corner is on the inside-negative
+/// side, the whole AABB must be outside. Two false-positive cases
+/// (chunk straddling a single corner of the frustum) are accepted as
+/// the trade for the test being O(6 dot products) per chunk instead
+/// of O(48).
+fn aabb_in_frustum(planes: &[Vec4; 6], min: Vec3, max: Vec3) -> bool {
+    for p in planes {
+        let n = p.truncate();
+        let positive_vertex = Vec3::new(
+            if n.x >= 0.0 { max.x } else { min.x },
+            if n.y >= 0.0 { max.y } else { min.y },
+            if n.z >= 0.0 { max.z } else { min.z },
+        );
+        if n.dot(positive_vertex) + p.w < 0.0 {
+            return false;
+        }
+    }
+    true
+}
 
 /// Top-level rendering object. Owns the GPU state and a hashmap of all
 /// loaded chunk meshes keyed by their world coordinate.
@@ -468,6 +516,7 @@ impl Renderer {
             }]),
         );
 
+        let frustum = extract_frustum_planes(vp);
         let frame = self.gpu.surface.get_current_texture()?;
         let view = frame
             .texture
@@ -476,7 +525,7 @@ impl Renderer {
             .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        self.encode_opaque_pass(&mut enc, &view, eye);
+        self.encode_opaque_pass(&mut enc, &view, eye, &frustum);
         // HUD: uploaded once per frame into fresh vertex/index
         // buffers (the HUD layout changes every frame as FPS ticks).
         if let Some(hud) = hud {
@@ -576,6 +625,7 @@ impl Renderer {
         enc: &mut wgpu::CommandEncoder,
         color_view: &wgpu::TextureView,
         eye: Vec3,
+        frustum: &[Vec4; 6],
     ) {
         let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("sky+opaque-pass"),
@@ -634,14 +684,21 @@ impl Renderer {
         let cull_sq = CULL_DISTANCE * CULL_DISTANCE;
         let mut draws: u32 = 0;
         for (coord, slots) in &self.chunk_meshes {
-            let center = coord.origin().0;
-            let center_f = Vec3::new(
-                center.x as f32 + 16.0,
-                center.y as f32 + 16.0,
-                center.z as f32 + 16.0,
-            );
+            let origin = coord.origin().0;
+            let chunk_min = Vec3::new(origin.x as f32, origin.y as f32, origin.z as f32);
+            let chunk_max = chunk_min + Vec3::splat(32.0);
+            let center_f = chunk_min + Vec3::splat(16.0);
             let d_sq = (center_f - eye).length_squared();
             if d_sq > cull_sq {
+                continue;
+            }
+            // Frustum cull: skip chunks entirely behind the camera or
+            // out to the sides. Per-frame dot products are cheap;
+            // skipping the draw call avoids the wgpu command-encoding
+            // overhead that the v0.1.32 samply profile identified as
+            // the dominant main-thread cost (`render_pass_end` +
+            // `set_bind_group` × 2 + `set_index_buffer` per chunk).
+            if !aabb_in_frustum(frustum, chunk_min, chunk_max) {
                 continue;
             }
             let preferred = Self::pick_lod(eye, center_f);
@@ -704,11 +761,12 @@ impl Renderer {
             }]),
         );
 
+        let frustum = extract_frustum_planes(vp);
         let mut enc = self
             .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        self.encode_opaque_pass(&mut enc, target, eye);
+        self.encode_opaque_pass(&mut enc, target, eye, &frustum);
         if let Some(hud) = hud {
             self.encode_hud_pass(&mut enc, target, hud);
         }
