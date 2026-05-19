@@ -26,7 +26,7 @@ pub fn physics(ecs: &mut GameEcs, world: &World, dt: f32) {
         .world
         .query_one::<(
             &Aabb,
-            &Movement,
+            &mut Movement,
             &PlayerInput,
             &mut Position,
             &mut Velocity,
@@ -48,4 +48,12 @@ pub fn physics(ecs: &mut GameEcs, world: &World, dt: f32) {
     pos.0 = res.pos;
     vel.0 = res.vel;
     grounded.0 = res.grounded;
+
+    // Auto-land: holding Shift while flying onto solid ground drops the
+    // player out of fly mode so they immediately start walking. The
+    // grounded test ensures we only switch when the foot actually
+    // touched a block this tick — pressing Shift mid-air just descends.
+    if matches!(mov.mode, MovementMode::Fly) && input.wishdir.y < 0.0 && grounded.0 {
+        mov.mode = MovementMode::Walk;
+    }
 }

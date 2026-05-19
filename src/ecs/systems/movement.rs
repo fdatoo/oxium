@@ -25,13 +25,10 @@ pub fn movement(ecs: &mut GameEcs, dt: f32) {
     let (cam, input, mov, vel) = q.get().unwrap();
 
     // Camera basis (right-handed, +Y up):
-    //   forward_3d  — full 3D look direction, used by Fly mode.
-    //   forward_horiz — XZ-plane projection, used by Walk so look-down
-    //                   doesn't drag the player into the ground.
+    //   forward_horiz — XZ-plane projection. Both Walk and Fly use this
+    //                   so look-down doesn't drag the player along Y.
     //   right       — perpendicular to forward in XZ plane.
     let (sy, cy) = cam.yaw.sin_cos();
-    let (sp, cp) = cam.pitch.sin_cos();
-    let forward_3d = Vec3::new(cy * cp, sp, sy * cp).normalize_or_zero();
     let forward_horiz = Vec3::new(cy, 0.0, sy).normalize_or_zero();
     // 90° to the left of `forward_horiz`, in the XZ plane. This is the
     // "strafe right" axis, regardless of where the camera is looking.
@@ -41,19 +38,15 @@ pub fn movement(ecs: &mut GameEcs, dt: f32) {
 
     match mov.mode {
         MovementMode::Fly => {
-            // Forward goes along the *full* 3D camera direction so looking
-            // up + W flies you up. The wishdir.y stick (Space/Shift) adds
-            // pure vertical movement on top. Integration + collision are
-            // both done by `physics::physics` (which calls sweep_player
-            // for Fly the same way it does for Walk, just without
-            // accumulating gravity).
-            let forward = if input.wishdir.z != 0.0 {
-                forward_3d
-            } else {
-                Vec3::ZERO
-            };
+            // Horizontal-only forward (XZ projection) so looking up/down
+            // doesn't pull the player along the camera's Y axis — only
+            // Space (wishdir.y > 0) and Shift (wishdir.y < 0) move you
+            // vertically. Integration + collision are both done by
+            // `physics::physics` (which calls sweep_player for Fly the
+            // same way it does for Walk, just without accumulating
+            // gravity).
             let wish = right * input.wishdir.x
-                + forward * input.wishdir.z
+                + forward_horiz * input.wishdir.z
                 + Vec3::Y * input.wishdir.y;
             vel.0 = wish.normalize_or_zero() * speed;
         }
