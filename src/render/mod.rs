@@ -30,7 +30,9 @@ use crate::render::camera::{
     CameraUniform, ChunkUniform,
 };
 use crate::render::font::{build_font_atlas, ATLAS_H as FONT_ATLAS_H, ATLAS_W as FONT_ATLAS_W};
-use crate::render::gpu::{make_depth_texture, make_msaa_color_texture, Gpu};
+use crate::render::gpu::{
+    make_depth_sample_texture, make_depth_texture, make_msaa_color_texture, Gpu,
+};
 use crate::render::hud::HudFrame;
 use crate::render::mesh::{upload_mesh, GpuMesh};
 use crate::render::pipelines::cursor::{
@@ -102,7 +104,22 @@ fn aabb_in_frustum(planes: &[Vec4; 6], min: Vec3, max: Vec3) -> bool {
 /// a 256-byte uniform buffer is well under a megabyte).
 pub struct Renderer {
     pub gpu: Gpu,
+    /// Live depth attachment for both the opaque and the water render
+    /// passes. The opaque pass writes; the water pass tests but
+    /// doesn't write. Kept as a `Texture` (not just a view) so its
+    /// contents can be copied into `depth_sample_texture` between
+    /// passes.
+    depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
+    /// Sampleable copy of `depth_texture`. The opaque pass's depth
+    /// values get blit-copied into this between the opaque and water
+    /// passes; the water shader then samples it to compute terrain
+    /// depth vs water depth (foam mask + depth tint).
+    depth_sample_texture: wgpu::Texture,
+    depth_sample_view: wgpu::TextureView,
+    /// Bind group exposing `depth_sample_view` at group 3 to the
+    /// water pipeline. Recreated alongside the textures on resize.
+    water_depth_bg: wgpu::BindGroup,
     /// Multisampled colour render target for the world pass. The world
     /// pass draws into this `MSAA_SAMPLES`-sample texture; the render
     /// pass's `resolve_target` is the swapchain texture, which wgpu
@@ -177,8 +194,13 @@ impl Renderer {
     /// reflects real throughput.
     pub fn new_with_present_mode(window: Arc<Window>, present_mode: wgpu::PresentMode) -> Self {
         let gpu = Gpu::new_with_present_mode(window, present_mode);
-        let depth_view =
+        let (depth_texture, depth_view) =
             make_depth_texture(&gpu.device, gpu.surface_cfg.width, gpu.surface_cfg.height);
+        let (depth_sample_texture, depth_sample_view) = make_depth_sample_texture(
+            &gpu.device,
+            gpu.surface_cfg.width,
+            gpu.surface_cfg.height,
+        );
         let msaa_color_view = make_msaa_color_texture(
             &gpu.device,
             gpu.surface_cfg.width,
@@ -344,9 +366,23 @@ impl Renderer {
             &cursor_bgl,
         );
 
+        // Initial water-pass depth bind group. Recreated on resize.
+        let water_depth_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("water-depth-bg"),
+            layout: &water_pipe.depth_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&depth_sample_view),
+            }],
+        });
+
         Self {
             gpu,
+            depth_texture,
             depth_view,
+            depth_sample_texture,
+            depth_sample_view,
+            water_depth_bg,
             msaa_color_view,
             camera_buf,
             camera_bg,
@@ -411,7 +447,24 @@ impl Renderer {
     /// Reconfigure the surface + depth texture for a new window size.
     pub fn resize(&mut self, w: u32, h: u32) {
         self.gpu.resize(w, h);
-        self.depth_view = make_depth_texture(&self.gpu.device, w, h);
+        let (depth_tex, depth_view) = make_depth_texture(&self.gpu.device, w, h);
+        let (depth_sample_tex, depth_sample_view) =
+            make_depth_sample_texture(&self.gpu.device, w, h);
+        // Rebuild the water-pass depth bind group against the new
+        // sample-view — the old bind group still points at the
+        // previous (about-to-drop) view.
+        self.water_depth_bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("water-depth-bg"),
+            layout: &self.water_pipe.depth_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&depth_sample_view),
+            }],
+        });
+        self.depth_texture = depth_tex;
+        self.depth_view = depth_view;
+        self.depth_sample_texture = depth_sample_tex;
+        self.depth_sample_view = depth_sample_view;
         self.msaa_color_view =
             make_msaa_color_texture(&self.gpu.device, w, h, self.gpu.surface_cfg.format);
         // HUD lays out in pixel space so the screen-size uniform also
@@ -668,14 +721,17 @@ impl Renderer {
         eye: Vec3,
         frustum: &[Vec4; 6],
     ) {
+        // PASS A: sky + opaque. Writes MSAA colour + MSAA depth.
+        // Does NOT resolve yet — the water pass below loads the MSAA
+        // samples, blends water on top, and does the final resolve.
+        // The depth texture also gets stored so we can copy it into
+        // `depth_sample_texture` (read by the water shader for foam
+        // and depth-tint) between the two passes.
         let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("sky+opaque-pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                // Draw into the multisampled colour target. wgpu
-                // auto-resolves into `resolve_target` (the single-
-                // sample swapchain or screenshot view) at end of pass.
                 view: msaa_view,
-                resolve_target: Some(resolve_view),
+                resolve_target: None,
                 ops: wgpu::Operations {
                     // The sky pass overwrites every pixel, so this clear
                     // color only shows in degenerate frames (e.g. before
@@ -771,18 +827,74 @@ impl Renderer {
         }
         self.last_draw_calls.set(draws);
 
-        // 3) Water pass. Same vertex buffers as the opaque pass; the
-        // water shader discards every non-water fragment and the
-        // pipeline runs with depth-test on / depth-write off + alpha
-        // blending so transparent surfaces composite correctly over
-        // the already-rendered opaque world. We re-walk the cull
-        // loop instead of merging with the opaque draw above because
-        // both passes need their bind groups (set_pipeline + the
-        // per-chunk bind group) in series for each chunk; trying to
-        // interleave would make state changes worse, not better.
+        // End PASS A so the depth attachment is no longer in use —
+        // we can't sample a texture that's bound as an attachment in
+        // an active render pass.
+        drop(pass);
+
+        // Copy the just-written depth into the sampleable depth
+        // texture so the water shader can read terrain depth and
+        // compute foam + depth-tint per fragment. MSAA → MSAA
+        // 1:1 copy; both textures are 4× sample-count.
+        let (w, h) = (self.gpu.surface_cfg.width, self.gpu.surface_cfg.height);
+        enc.copy_texture_to_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.depth_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::DepthOnly,
+            },
+            wgpu::ImageCopyTexture {
+                texture: &self.depth_sample_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::DepthOnly,
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        // PASS B: water + cursor. Loads MSAA colour and depth from
+        // pass A, blends water on top with alpha, then resolves the
+        // multisampled colour into `resolve_view` (the swapchain or
+        // screenshot target) at end of pass.
+        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("water-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: msaa_view,
+                resolve_target: Some(resolve_view),
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    // No depth write from the water pipeline anyway
+                    // (depth_write_enabled = false), but we still
+                    // need to store so the next frame's clear can
+                    // happen at a defined state.
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        // Water draws. Same vertex buffers as the opaque pass; the
+        // water shader discards every non-water fragment. Group 3
+        // gives the shader the scene-depth sampler it needs for
+        // foam + depth-tint.
         pass.set_pipeline(&self.water_pipe.pipeline);
         pass.set_bind_group(0, &self.camera_bg, &[]);
         pass.set_bind_group(2, &self.atlas.bind_group, &[]);
+        pass.set_bind_group(3, &self.water_depth_bg, &[]);
         for (coord, slots) in &self.chunk_meshes {
             let origin = coord.origin().0;
             let chunk_min = Vec3::new(origin.x as f32, origin.y as f32, origin.z as f32);
@@ -806,7 +918,8 @@ impl Renderer {
             }
         }
 
-        // 4) Cursor wireframe (12 line segments, no vertex buffer).
+        // Cursor wireframe — drawn last so it overlays both opaque
+        // and water without depth-fighting against either.
         if self.cursor_visible {
             pass.set_pipeline(&self.cursor_pipe.pipeline);
             pass.set_bind_group(0, &self.camera_bg, &[]);

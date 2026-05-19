@@ -49,6 +49,12 @@ struct ChunkUniform {
 @group(2) @binding(0) var atlas_tex:     texture_2d<f32>;
 @group(2) @binding(1) var atlas_sampler: sampler;
 
+// Group 3: sampleable copy of the opaque pass's MSAA depth buffer.
+// `multisampled` because our world pass runs at 4× MSAA; we read
+// sample 0 via `textureLoad` — pixel-art-style shorelines don't
+// gain meaningfully from a 4-sample resolve.
+@group(3) @binding(0) var scene_depth: texture_depth_multisampled_2d;
+
 // Atlas geometry — keep in sync with `render::atlas`. The water
 // shader samples tile 8 (`water_still.png`) at scrolling UVs to put
 // an animated ripple pattern on the surface.
@@ -169,6 +175,16 @@ fn fresnel_schlick(cos_theta: f32, f0: f32) -> f32 {
     let m = clamp(1.0 - cos_theta, 0.0, 1.0);
     let m5 = m * m * m * m * m;
     return f0 + (1.0 - f0) * m5;
+}
+
+// Reconstruct linear-space view-distance from a normalised depth
+// value. wgpu uses `[0, 1]` depth (near = 0, far = 1) and our
+// camera matrix has `near = 0.05`, `far = 1000.0` — keep this in
+// sync with `view_proj` in `render::camera`.
+fn linear_depth(d: f32) -> f32 {
+    let near = 0.05;
+    let far  = 1000.0;
+    return near * far / (far - d * (far - near));
 }
 
 // ACES filmic tonemap — same curve as the opaque shader.
@@ -358,6 +374,43 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let fog_end   = 360.0;
     let fog_t = clamp((dist - fog_start) / (fog_end - fog_start), 0.0, 1.0);
     rgb = mix(rgb, horizon, fog_t);
+
+    // Depth-buffer driven effects. `clip_pos.xy` are already in
+    // framebuffer pixel coordinates by the time fs_main runs (wgpu
+    // `@builtin(position)` semantics); convert to integer texel
+    // coords for `textureLoad`. Sample 0 is fine — pixel-art
+    // shorelines don't gain from a 4-sample resolve.
+    let pix = vec2<i32>(in.clip_pos.xy);
+    let scene_d   = textureLoad(scene_depth, pix, 0);
+    let water_d   = in.clip_pos.z;
+    let scene_lin = linear_depth(scene_d);
+    let water_lin = linear_depth(water_d);
+    // `depth_diff` is the world-space distance the camera's view ray
+    // travels through water before hitting the bottom. Zero where
+    // the water surface IS the bottom (i.e., the camera is grazing
+    // a shoreline), grows with depth toward open water.
+    let depth_diff = max(0.0, scene_lin - water_lin);
+
+    // Shoreline foam: brighten the surface toward white in a thin
+    // ribbon where water meets a shallow bottom. The smoothstep
+    // window (0.05..0.6 blocks of vertical separation) is tight on
+    // purpose — a wider window flooded shallow rivers entirely
+    // (RIVER_CARVE = 3 blocks total, so the whole river center
+    // would have been in the foam range). 0.6 blocks gives a fringe
+    // about one block wide at the shore, fading cleanly into the
+    // depth-tinted body.
+    let foam_mask = (1.0 - smoothstep(0.05, 0.6, depth_diff))
+                  * (1.0 - fog_t); // fade foam out in the distance
+    let foam_color = vec3<f32>(0.95, 0.98, 1.00);
+    rgb = mix(rgb, foam_color, foam_mask * 0.85);
+
+    // Depth tint: deeper water reads progressively darker and more
+    // saturated, the cheap stand-in for real light absorption.
+    // 0..14 block depth range — past that the water is fully
+    // deep-coloured.
+    let depth_t = clamp(depth_diff / 14.0, 0.0, 1.0);
+    let deep_tint = vec3<f32>(0.05, 0.20, 0.35);
+    rgb = mix(rgb, rgb * deep_tint * 3.0, depth_t * 0.55);
 
     rgb = aces_tonemap(rgb);
     rgb = underwater_tint(rgb, in.v_world, camera.time, camera.underwater_factor);

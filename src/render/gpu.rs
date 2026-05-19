@@ -136,7 +136,17 @@ impl Gpu {
 /// Allocate a depth texture matching the given dimensions and the world
 /// pass's MSAA sample count. Recreated by `Renderer::resize` whenever
 /// the surface dimensions change.
-pub fn make_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
+///
+/// `COPY_SRC` is included so the depth contents can be copied into a
+/// sampleable depth texture (see [`make_depth_sample_texture`]) for
+/// the water pass to read terrain depth and compute foam / depth tint.
+/// Returns both the texture handle (needed for the copy command) and
+/// a view (needed for the render-pass attachment).
+pub fn make_depth_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth-texture"),
         size: wgpu::Extent3d {
@@ -150,10 +160,49 @@ pub fn make_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> wgp
         sample_count: MSAA_SAMPLES,
         dimension: wgpu::TextureDimension::D2,
         format: DEPTH_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
-    tex.create_view(&wgpu::TextureViewDescriptor::default())
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (tex, view)
+}
+
+/// Allocate the sampleable depth-copy texture the water pass reads
+/// from. Same format + sample count as the live depth attachment so
+/// `copy_texture_to_texture` between them is a 1:1 byte transfer.
+///
+/// A texture can't be simultaneously bound as a depth attachment and
+/// as a shader sampler in the same render pass — the live depth
+/// stays the attachment for the water pass's depth test, and this
+/// copy is what the shader actually reads to compute terrain depth
+/// vs water depth.
+pub fn make_depth_sample_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("depth-sample-texture"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: MSAA_SAMPLES,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        // RENDER_ATTACHMENT is required by wgpu for any multisampled
+        // texture, even one we never actually render to — the
+        // texture is otherwise written exclusively by
+        // `copy_texture_to_texture` from the live depth attachment.
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (tex, view)
 }
 
 /// Allocate the multisampled colour render target the world pass draws
