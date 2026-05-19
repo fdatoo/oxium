@@ -34,7 +34,7 @@ pub fn movement(ecs: &mut GameEcs, dt: f32) {
     // "strafe right" axis, regardless of where the camera is looking.
     let right = Vec3::new(-sy, 0.0, cy).normalize_or_zero();
 
-    let speed = if input.sprint { mov.speed * 2.0 } else { mov.speed };
+    let base_speed = if input.sprint { mov.speed * 2.0 } else { mov.speed };
 
     match mov.mode {
         MovementMode::Fly => {
@@ -45,6 +45,12 @@ pub fn movement(ecs: &mut GameEcs, dt: f32) {
             // `physics::physics` (which calls sweep_player for Fly the
             // same way it does for Walk, just without accumulating
             // gravity).
+            //
+            // Fly gets a fixed speed multiplier on top of `mov.speed`
+            // so creative-mode movement feels distinctly faster than
+            // walking, especially with sprint stacked on top.
+            const FLY_SPEED_MULT: f32 = 3.0;
+            let speed = base_speed * FLY_SPEED_MULT;
             let wish = right * input.wishdir.x
                 + forward_horiz * input.wishdir.z
                 + Vec3::Y * input.wishdir.y;
@@ -60,7 +66,7 @@ pub fn movement(ecs: &mut GameEcs, dt: f32) {
             use crate::physics::sweep::GRAVITY;
 
             let wish = right * input.wishdir.x + forward_horiz * input.wishdir.z;
-            let target = wish.normalize_or_zero() * speed;
+            let target = wish.normalize_or_zero() * base_speed;
             let horiz = Vec3::new(vel.0.x, 0.0, vel.0.z);
             // Move toward target by at most `accel * dt` units per frame.
             let accel: f32 = 60.0;
