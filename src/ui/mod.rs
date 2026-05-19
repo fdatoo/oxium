@@ -183,12 +183,29 @@ impl Ui {
         }
     }
 
-    pub fn on_mouse_button(&mut self, _button: winit::event::MouseButton, _state: ElementState) {
-        // Wired in Task 9.
+    pub fn on_mouse_button(&mut self, button: winit::event::MouseButton, state: ElementState) {
+        if state != ElementState::Pressed { return }
+        if button != winit::event::MouseButton::Left { return }
+        let action = match &self.state {
+            UiState::Paused { menu: MenuNav::Top { hovered } } => {
+                Some(TOP_MENU[*hovered].activate())
+            }
+            _ => None,
+        };
+        if let Some(a) = action {
+            self.apply_menu_action(a);
+        }
     }
 
-    pub fn on_mouse_move(&mut self, _x: f32, _y: f32, _screen_px: (u32, u32)) {
-        // Wired in Task 9.
+    pub fn on_mouse_move(&mut self, x: f32, y: f32, screen_px: (u32, u32)) {
+        let UiState::Paused { menu: MenuNav::Top { hovered } } = &mut self.state else { return };
+        for i in 0..TOP_MENU.len() {
+            let (rx, ry, rw, rh) = crate::ui::render::top_menu_item_rect(i, screen_px);
+            if x >= rx && x < rx + rw && y >= ry && y < ry + rh {
+                *hovered = i;
+                return;
+            }
+        }
     }
 }
 
