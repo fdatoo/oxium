@@ -218,6 +218,15 @@ pub struct ChunkMeta {
     /// True if this chunk has been edited by the player since load.
     /// Persistence uses this to skip saving unmodified, regenerable chunks.
     pub modified: bool,
+    /// Monotonic version of the chunk's *data* — incremented every
+    /// time `set_block` or a relight swap changes the `PalettedChunk`.
+    /// Mesh jobs snapshot this at spawn time and carry it in their
+    /// result; the upload path rejects results whose version is
+    /// older than the chunk's current `mesh_version` so a slow
+    /// streaming mesh job can't overwrite the fresh edit-triggered
+    /// mesh that completed first (the visible "block flickers back
+    /// for a moment" artefact).
+    pub mesh_version: u64,
 }
 
 #[cfg(test)]

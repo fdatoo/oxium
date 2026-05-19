@@ -28,11 +28,15 @@ pub enum JobResult {
         data: PalettedChunk,
     },
     /// A meshing job finished; `mesh` is ready for GPU upload. `lod` is the
-    /// LOD level (0 = full resolution; 1 and 2 added in M8).
+    /// LOD level (0 = full resolution; 1 and 2 added in M8). `version`
+    /// is the chunk's `mesh_version` at spawn time; the upload path
+    /// drops the result if the chunk has since been re-edited so a
+    /// slow streaming mesh job can't overwrite a fresh edit's mesh.
     Meshed {
         coord: ChunkCoord,
         lod: u8,
         mesh: ChunkMesh,
+        version: u64,
     },
     /// A relight job finished; `data` is the re-illuminated paletted chunk
     /// to swap into the World. A follow-up mesh job runs as soon as the
@@ -170,6 +174,7 @@ impl Jobs {
         lod: u8,
         data: Arc<PalettedChunk>,
         registry: Arc<BlockRegistry>,
+        version: u64,
     ) {
         debug_assert!(lod == 1 || lod == 2, "use spawn_mesh_lod0 for LOD0");
         let tx = self.tx.clone();
@@ -178,7 +183,12 @@ impl Jobs {
             let factor: u32 = if lod == 1 { 2 } else { 4 };
             let lod_chunk = crate::mesher::lod::downsample(&dense, factor);
             let mesh = crate::mesher::lod::mesh_lod(&lod_chunk, factor, &registry);
-            let _ = tx.send(JobResult::Meshed { coord, lod, mesh });
+            let _ = tx.send(JobResult::Meshed {
+                coord,
+                lod,
+                mesh,
+                version,
+            });
         });
     }
 
@@ -195,6 +205,7 @@ impl Jobs {
         data: Arc<PalettedChunk>,
         neighbors: [Option<Arc<PalettedChunk>>; 6],
         registry: Arc<BlockRegistry>,
+        version: u64,
     ) {
         let tx = self.tx.clone();
         self.pool.spawn(move || {
@@ -224,6 +235,7 @@ impl Jobs {
                         coord,
                         lod: 0,
                         mesh,
+                        version,
                     });
                 }
                 Err(payload) => {

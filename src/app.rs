@@ -246,28 +246,36 @@ impl AppState {
             crate::ecs::systems::interaction::interaction(&mut self.ecs, &mut self.world)
         });
         self.frame_edit_count = dirty_chunks.len() as u32;
-        time(prof, "edit_dispatch", || {
-            for c in &dirty_chunks {
-                use crate::voxel::world::ChunkSlot;
-                let needs_light = match self.world.chunks.get(c) {
-                    Some(ChunkSlot::Stored { meta, .. }) => meta.dirty.light,
-                    _ => false,
-                };
-                let Some(ChunkSlot::Stored { data, .. }) = self.world.chunks.get(c) else {
-                    continue;
-                };
-                let data_arc = data.clone();
-                let neighbors =
-                    crate::ecs::systems::mesh_upload::gather_neighbors(&self.world, *c);
-                if needs_light {
-                    self.jobs
-                        .spawn_relight(*c, data_arc, neighbors, self.registry.clone());
-                } else {
-                    self.jobs
-                        .spawn_mesh_lod0(*c, data_arc, neighbors, self.registry.clone());
-                }
-            }
-        });
+        // Run the EDIT's relight + LOD0 mesh + upload INLINE on
+        // the main thread. Without this, the player-edit jobs go
+        // to the back of the rayon queue behind hundreds of
+        // streaming gen/mesh jobs from the initial fly-in, and
+        // the visible "block didn't break" lag becomes
+        // multi-second. ~10 ms one-frame stall is far better
+        // than that wait — and avoids the out-of-order race where
+        // streaming meshes for the same chunk overwrite the edit's
+        // mesh. The mesh-version tag still protects against the
+        // latter for the cascade-triggered jobs that *do* go to
+        // the pool.
+        //
+        // Not wrapped in `time(...)` because the closure would need
+        // `&mut self` while `prof` is still borrowed; the cost
+        // shows up in the next step's `WMS` reading instead.
+        let edit_start = std::time::Instant::now();
+        for c in &dirty_chunks {
+            Self::apply_edit_inline(
+                &mut self.world,
+                &mut self.renderer,
+                &self.registry,
+                *c,
+            );
+        }
+        if let Some(p) = self.profiler.as_ref() {
+            p.record(
+                "edit_inline",
+                edit_start.elapsed().as_micros().min(u32::MAX as u128) as u32,
+            );
+        }
         time(prof, "world_stream", || {
             crate::ecs::systems::world_stream::world_stream(
                 &self.ecs,
@@ -361,6 +369,84 @@ impl AppState {
             });
         }
         self.frame_edit_count = 0;
+    }
+
+    /// Run relight + LOD0 mesh + GPU upload for a single edit-dirtied
+    /// chunk synchronously on the main thread. Called once per
+    /// affected chunk in the same step that the edit happened. The
+    /// total cost is roughly one chunk decompress + one BFS + one
+    /// greedy mesh + one wgpu buffer upload — about 5-10 ms even on
+    /// the worst case — which beats every alternative that puts the
+    /// work on a worker pool already saturated with stream-in jobs.
+    fn apply_edit_inline(
+        world: &mut crate::voxel::world::World,
+        renderer: &mut crate::render::Renderer,
+        registry: &crate::voxel::block::BlockRegistry,
+        coord: crate::voxel::coords::ChunkCoord,
+    ) {
+        use crate::voxel::chunk::{ChunkDirty, ChunkState, DenseChunk, Neighbors, PalettedChunk};
+        use crate::voxel::world::ChunkSlot;
+
+        let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get(&coord) else {
+            return;
+        };
+        let needs_light = meta.dirty.light;
+        let data_arc = data.clone();
+
+        // Decompress chunk + neighbours up-front so the greedy mesher
+        // and the BFS (if relighting) can share them.
+        let mut dense = data_arc.decompress();
+        let neighbor_arcs =
+            crate::ecs::systems::mesh_upload::gather_neighbors(world, coord);
+        let neighbor_dense: Vec<Option<DenseChunk>> = neighbor_arcs
+            .iter()
+            .map(|opt| opt.as_ref().map(|p| p.decompress()))
+            .collect();
+        let neighbor_refs: [Option<&DenseChunk>; 6] = [
+            neighbor_dense[0].as_ref(),
+            neighbor_dense[1].as_ref(),
+            neighbor_dense[2].as_ref(),
+            neighbor_dense[3].as_ref(),
+            neighbor_dense[4].as_ref(),
+            neighbor_dense[5].as_ref(),
+        ];
+        let ns = Neighbors {
+            chunks: neighbor_refs,
+        };
+
+        // Relight the edited chunk in-place. Skipped when the edit
+        // only dirtied a neighbour's mesh (no `dirty.light` set).
+        if needs_light {
+            crate::lighting::recompute_chunk(&mut dense, &ns, registry);
+        }
+
+        // Mesh from the (possibly relit) dense data.
+        let mesh = crate::mesher::greedy::mesh_greedy(&dense, &neighbor_refs, registry);
+
+        // Swap the relit data back into the chunk slot if we did
+        // relight; bump the version so any in-flight cascade mesh
+        // for this chunk gets discarded on completion.
+        if needs_light {
+            let new_data = std::sync::Arc::new(PalettedChunk::compress(&dense));
+            if let Some(ChunkSlot::Stored {
+                data: cur,
+                meta,
+            }) = world.chunks.get_mut(&coord)
+            {
+                *cur = new_data;
+                meta.dirty = ChunkDirty {
+                    mesh: true,
+                    light: false,
+                };
+                meta.state = ChunkState::Generated;
+                meta.mesh_version = meta.mesh_version.wrapping_add(1);
+            }
+        }
+
+        // Upload the freshly-built mesh. No version check needed —
+        // we just generated it from the current data on the main
+        // thread, so by definition it's the latest.
+        renderer.upload_chunk_mesh(coord, 0, &mesh);
     }
 
     /// Send every currently-modified chunk through the persistence thread.

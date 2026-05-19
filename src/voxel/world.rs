@@ -119,6 +119,12 @@ impl World {
         meta.dirty.light = true;
         meta.modified = true;
         meta.state = ChunkState::Generated;
+        // Bump version so any in-flight mesh job using the pre-edit
+        // data gets discarded when it eventually completes (the
+        // "block flickers back after editing" bug). The newly-spawned
+        // post-edit mesh job will carry this incremented version and
+        // be the one that lands.
+        meta.mesh_version = meta.mesh_version.wrapping_add(1);
         dirty.push(chunk_coord);
 
         // Border edits propagate to the neighbour on that side: its

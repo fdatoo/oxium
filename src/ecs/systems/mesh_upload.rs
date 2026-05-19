@@ -84,24 +84,38 @@ pub fn drain_jobs(
                 // that's already loaded — generating a new chunk can
                 // reveal previously-hidden faces on its neighbours.
                 for c in std::iter::once(coord).chain(neighbor_coords(coord)) {
-                    if let Some(ChunkSlot::Stored { data, .. }) = world.chunks.get(&c) {
+                    if let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get(&c) {
                         let data_arc = data.clone();
+                        let version = meta.mesh_version;
                         let neighbors = gather_neighbors(world, c);
-                        jobs.spawn_mesh_lod0(c, data_arc, neighbors, registry.clone());
+                        jobs.spawn_mesh_lod0(c, data_arc, neighbors, registry.clone(), version);
                     }
                 }
                 // Also spawn LOD1 and LOD2 jobs for the new chunk so the
                 // far-distance render has something to draw. These don't
                 // need neighbours (boundary precision is invisible at
                 // distance), so they run independently.
-                if let Some(ChunkSlot::Stored { data, .. }) = world.chunks.get(&coord) {
+                if let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get(&coord) {
                     let data_arc = data.clone();
-                    jobs.spawn_mesh_lod(coord, 1, data_arc.clone(), registry.clone());
-                    jobs.spawn_mesh_lod(coord, 2, data_arc, registry.clone());
+                    let version = meta.mesh_version;
+                    jobs.spawn_mesh_lod(coord, 1, data_arc.clone(), registry.clone(), version);
+                    jobs.spawn_mesh_lod(coord, 2, data_arc, registry.clone(), version);
                 }
             }
-            JobResult::Meshed { coord, lod, mesh } => {
-                renderer.upload_chunk_mesh(coord, lod, &mesh);
+            JobResult::Meshed { coord, lod, mesh, version } => {
+                // Drop the upload if the chunk has been re-edited since
+                // this mesh job was spawned. Without this check, a
+                // slow streaming mesh job can complete after a fast
+                // edit-triggered mesh and overwrite the GPU buffer
+                // with stale geometry — the visible "block flickers
+                // back for a moment" artefact the user reported.
+                let current = match world.chunks.get(&coord) {
+                    Some(ChunkSlot::Stored { meta, .. }) => meta.mesh_version,
+                    _ => 0,
+                };
+                if version >= current {
+                    renderer.upload_chunk_mesh(coord, lod, &mesh);
+                }
             }
             JobResult::Relit { coord, data, changed_faces } => {
                 // Swap the freshly-relit chunk into the World and reset
@@ -124,6 +138,11 @@ pub fn drain_jobs(
                         light: false,
                     };
                     meta.state = ChunkState::Generated;
+                    // Relight rewrote the chunk's light bytes, so the
+                    // mesh data has effectively changed — bump
+                    // version so any in-flight pre-relight mesh job
+                    // for this chunk gets discarded on completion.
+                    meta.mesh_version = meta.mesh_version.wrapping_add(1);
                 }
                 // Bounded cascade: only mark the face neighbours whose
                 // boundary actually changed as `dirty.light`. Most
@@ -149,7 +168,15 @@ pub fn drain_jobs(
                 // every relight was ~3× the mesh work per cascade
                 // step with no visible benefit at distance.
                 let neighbors = gather_neighbors(world, coord);
-                jobs.spawn_mesh_lod0(coord, data_arc, neighbors, registry.clone());
+                let version = world
+                    .chunks
+                    .get(&coord)
+                    .and_then(|s| match s {
+                        ChunkSlot::Stored { meta, .. } => Some(meta.mesh_version),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                jobs.spawn_mesh_lod0(coord, data_arc, neighbors, registry.clone(), version);
             }
         }
     }
@@ -254,9 +281,23 @@ pub fn drain_persistence(
                     }
                     let data_arc = Arc::new(data);
                     let neighbors = gather_neighbors(world, coord);
-                    jobs.spawn_mesh_lod0(coord, data_arc.clone(), neighbors, registry.clone());
-                    jobs.spawn_mesh_lod(coord, 1, data_arc.clone(), registry.clone());
-                    jobs.spawn_mesh_lod(coord, 2, data_arc, registry.clone());
+                    let version = world
+                        .chunks
+                        .get(&coord)
+                        .and_then(|s| match s {
+                            ChunkSlot::Stored { meta, .. } => Some(meta.mesh_version),
+                            _ => None,
+                        })
+                        .unwrap_or(0);
+                    jobs.spawn_mesh_lod0(
+                        coord,
+                        data_arc.clone(),
+                        neighbors,
+                        registry.clone(),
+                        version,
+                    );
+                    jobs.spawn_mesh_lod(coord, 1, data_arc.clone(), registry.clone(), version);
+                    jobs.spawn_mesh_lod(coord, 2, data_arc, registry.clone(), version);
                 }
                 None => {
                     // Region file existed but the slot was empty —
