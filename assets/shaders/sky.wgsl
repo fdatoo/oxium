@@ -12,7 +12,7 @@ struct CameraUniform {
     sun_intensity:     f32,
     time:              f32,
     underwater_factor: f32,
-    _pad2:             f32,
+    clip_y_min:        f32,
     eye:               vec4<f32>,
     inv_view_proj:     mat4x4<f32>,
 };

@@ -48,7 +48,12 @@ pub struct CameraUniform {
     /// scaled by this factor — the cheap way to get the "you're
     /// underwater" colour grade without a dedicated post pass.
     pub underwater_factor: f32,
-    pub _pad2: f32,
+    /// Minimum world-space Y a fragment may have before being
+    /// rendered. Defaults to a deep negative for the main world
+    /// pass; set to `SEA_LEVEL` for the reflection pass so anything
+    /// below the water plane is clipped out of the reflection (you
+    /// don't see underwater geometry reflected in the surface).
+    pub clip_y_min: f32,
     /// Camera (eye) world-space position. `w` unused. Used by:
     /// - opaque fog to compute fragment distance from camera
     /// - sky sun-disc to compute world-space ray direction
@@ -69,7 +74,7 @@ impl CameraUniform {
             sun_intensity: 1.0,
             time: 0.0,
             underwater_factor: 0.0,
-            _pad2: 0.0,
+            clip_y_min: -1_000_000.0,
             eye: [0.0; 4],
             inv_view_proj: Mat4::IDENTITY.to_cols_array_2d(),
         }

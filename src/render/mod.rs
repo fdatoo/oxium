@@ -31,7 +31,8 @@ use crate::render::camera::{
 };
 use crate::render::font::{build_font_atlas, ATLAS_H as FONT_ATLAS_H, ATLAS_W as FONT_ATLAS_W};
 use crate::render::gpu::{
-    make_depth_sample_texture, make_depth_texture, make_msaa_color_texture, Gpu,
+    make_depth_sample_texture, make_depth_texture, make_msaa_color_texture,
+    make_reflection_color_textures, make_reflection_depth_texture, Gpu,
 };
 use crate::render::hud::HudFrame;
 use crate::render::mesh::{upload_mesh, GpuMesh};
@@ -126,6 +127,40 @@ pub struct Renderer {
     /// fills with the resolved single-sample result at end of pass.
     /// Recreated by `resize` alongside the depth texture.
     msaa_color_view: wgpu::TextureView,
+
+    // ── Planar reflection resources. The reflection pass renders the
+    // world with a virtual camera mirrored across the water plane
+    // and `clip_y_min = SEA_LEVEL` (so only above-water geometry
+    // appears) into `reflection_msaa_view`, resolving into
+    // `reflection_resolve_texture` for the water shader to sample.
+    /// Mirrored-camera uniform buffer. Written once per frame to the
+    /// reflected view-projection + flipped sun direction etc.
+    reflection_camera_buf: wgpu::Buffer,
+    /// Bind group exposing `reflection_camera_buf` at group 0 for the
+    /// reflection pass. The same opaque and sky pipelines read from
+    /// it — they don't care which buffer backs the group as long as
+    /// the layout matches.
+    reflection_camera_bg: wgpu::BindGroup,
+    /// MSAA colour render target for the reflection pass.
+    reflection_msaa_view: wgpu::TextureView,
+    /// Single-sample resolve target. The MSAA pass auto-resolves
+    /// into this view; the water shader's group-4 bind group points
+    /// at it.
+    #[allow(dead_code)] // kept-alive owner of `reflection_resolve_view`
+    reflection_resolve_texture: wgpu::Texture,
+    reflection_resolve_view: wgpu::TextureView,
+    /// Dedicated depth attachment for the reflection pass. Can't be
+    /// shared with `depth_texture` because that one is still bound
+    /// by the concurrent main world pass in the same encoder.
+    reflection_depth_view: wgpu::TextureView,
+    /// Sampler used by the water shader to read
+    /// `reflection_resolve_view`. Linear filtering across the
+    /// distorted reflection lookup hides wave-aliased pixel-boundaries.
+    reflection_sampler: wgpu::Sampler,
+    /// Bind group at index 4 on the water pipeline — exposes the
+    /// reflection texture + sampler. Recreated on resize alongside
+    /// the textures.
+    water_reflection_bg: wgpu::BindGroup,
     camera_buf: wgpu::Buffer,
     camera_bg: wgpu::BindGroup,
     chunk_bgl: wgpu::BindGroupLayout,
@@ -207,6 +242,28 @@ impl Renderer {
             gpu.surface_cfg.height,
             gpu.surface_cfg.format,
         );
+        // Reflection-pass colour + depth attachments.
+        let (reflection_msaa_view, reflection_resolve_texture, reflection_resolve_view) =
+            make_reflection_color_textures(
+                &gpu.device,
+                gpu.surface_cfg.width,
+                gpu.surface_cfg.height,
+                gpu.surface_cfg.format,
+            );
+        let reflection_depth_view = make_reflection_depth_texture(
+            &gpu.device,
+            gpu.surface_cfg.width,
+            gpu.surface_cfg.height,
+        );
+        let reflection_sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("reflection-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         let camera_bgl = make_camera_bind_group_layout(&gpu.device);
         let camera_buf = make_camera_buffer(&gpu.device);
         let camera_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -215,6 +272,18 @@ impl Renderer {
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: camera_buf.as_entire_binding(),
+            }],
+        });
+        // Separate uniform + bind group for the reflection pass.
+        // Layout matches the main camera so the same opaque + sky
+        // pipelines can read either when bound at group 0.
+        let reflection_camera_buf = make_camera_buffer(&gpu.device);
+        let reflection_camera_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("reflection-camera-bg"),
+            layout: &camera_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: reflection_camera_buf.as_entire_binding(),
             }],
         });
         let chunk_bgl = make_chunk_bind_group_layout(&gpu.device);
@@ -375,6 +444,22 @@ impl Renderer {
                 resource: wgpu::BindingResource::TextureView(&depth_sample_view),
             }],
         });
+        // Initial water-pass reflection bind group. Same lifecycle as
+        // the depth one.
+        let water_reflection_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("water-reflection-bg"),
+            layout: &water_pipe.reflection_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&reflection_resolve_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&reflection_sampler),
+                },
+            ],
+        });
 
         Self {
             gpu,
@@ -384,6 +469,14 @@ impl Renderer {
             depth_sample_view,
             water_depth_bg,
             msaa_color_view,
+            reflection_camera_buf,
+            reflection_camera_bg,
+            reflection_msaa_view,
+            reflection_resolve_texture,
+            reflection_resolve_view,
+            reflection_depth_view,
+            reflection_sampler,
+            water_reflection_bg,
             camera_buf,
             camera_bg,
             chunk_bgl,
@@ -450,9 +543,14 @@ impl Renderer {
         let (depth_tex, depth_view) = make_depth_texture(&self.gpu.device, w, h);
         let (depth_sample_tex, depth_sample_view) =
             make_depth_sample_texture(&self.gpu.device, w, h);
-        // Rebuild the water-pass depth bind group against the new
-        // sample-view — the old bind group still points at the
-        // previous (about-to-drop) view.
+        let (refl_msaa, refl_resolve_tex, refl_resolve_view) = make_reflection_color_textures(
+            &self.gpu.device,
+            w,
+            h,
+            self.gpu.surface_cfg.format,
+        );
+        let refl_depth = make_reflection_depth_texture(&self.gpu.device, w, h);
+        // Rebuild every bind group that references a (now-stale) view.
         self.water_depth_bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("water-depth-bg"),
             layout: &self.water_pipe.depth_bgl,
@@ -461,10 +559,28 @@ impl Renderer {
                 resource: wgpu::BindingResource::TextureView(&depth_sample_view),
             }],
         });
+        self.water_reflection_bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("water-reflection-bg"),
+            layout: &self.water_pipe.reflection_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&refl_resolve_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.reflection_sampler),
+                },
+            ],
+        });
         self.depth_texture = depth_tex;
         self.depth_view = depth_view;
         self.depth_sample_texture = depth_sample_tex;
         self.depth_sample_view = depth_sample_view;
+        self.reflection_msaa_view = refl_msaa;
+        self.reflection_resolve_texture = refl_resolve_tex;
+        self.reflection_resolve_view = refl_resolve_view;
+        self.reflection_depth_view = refl_depth;
         self.msaa_color_view =
             make_msaa_color_texture(&self.gpu.device, w, h, self.gpu.surface_cfg.format);
         // HUD lays out in pixel space so the screen-size uniform also
@@ -603,13 +719,47 @@ impl Renderer {
                 sun_intensity,
                 time,
                 underwater_factor: self.underwater_factor,
-                _pad2: 0.0,
+                clip_y_min: -1_000_000.0,
                 eye: [eye.x, eye.y, eye.z, 0.0],
                 inv_view_proj: inv_vp.to_cols_array_2d(),
             }]),
         );
 
         let frustum = extract_frustum_planes(vp);
+
+        // Build the mirrored camera for the planar reflection pass.
+        // Mirror across the y=SEA_LEVEL plane: eye y → 2H - eye y,
+        // and the look direction's vertical component flips, which
+        // corresponds to inverting pitch.
+        let sea_level = crate::worldgen::SEA_LEVEL as f32;
+        let refl_eye = Vec3::new(eye.x, 2.0 * sea_level - eye.y, eye.z);
+        let refl_pitch = -pitch;
+        let refl_vp = view_proj(refl_eye, yaw, refl_pitch, 70f32.to_radians(), aspect);
+        let refl_inv_vp = refl_vp.inverse();
+        // Sun direction also reflects across the water plane — only
+        // the Y component flips. That puts the sun's image at the
+        // "underwater" position from the mirrored camera's POV,
+        // which is the correct reflected sun position in the
+        // resulting reflection texture.
+        let refl_sun = [sun_dir[0], -sun_dir[1], sun_dir[2]];
+        self.gpu.queue.write_buffer(
+            &self.reflection_camera_buf,
+            0,
+            bytemuck::cast_slice(&[CameraUniform {
+                view_proj: refl_vp.to_cols_array_2d(),
+                sun_dir: [refl_sun[0], refl_sun[1], refl_sun[2], 0.0],
+                sun_intensity,
+                time,
+                underwater_factor: 0.0, // reflections don't get the underwater grade
+                // Clip everything below sea level — only above-water
+                // geometry contributes to the reflected image.
+                clip_y_min: sea_level,
+                eye: [refl_eye.x, refl_eye.y, refl_eye.z, 0.0],
+                inv_view_proj: refl_inv_vp.to_cols_array_2d(),
+            }]),
+        );
+        let refl_frustum = extract_frustum_planes(refl_vp);
+
         let frame = self.gpu.surface.get_current_texture()?;
         let view = frame
             .texture
@@ -618,6 +768,9 @@ impl Renderer {
             .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        // Reflection pass (sky + opaque only, mirrored camera).
+        self.encode_reflection_pass(&mut enc, refl_eye, &refl_frustum);
+        // Main world pass (sky + opaque + water + cursor).
         self.encode_opaque_pass(&mut enc, &self.msaa_color_view, &view, eye, &frustum);
         // HUD: uploaded once per frame into fresh vertex/index
         // buffers (the HUD layout changes every frame as FPS ticks).
@@ -713,6 +866,94 @@ impl Renderer {
     ///
     /// `eye` is used to pick a LOD level per chunk: closer chunks render
     /// at full resolution, distant ones at LOD1/LOD2.
+    /// Render the world from the mirrored camera into
+    /// `reflection_resolve_view` (resolved out of `reflection_msaa_view`).
+    /// Only sky + opaque geometry is drawn — water never reflects itself,
+    /// and the HUD/cursor obviously don't reflect either. The opaque
+    /// shader's `clip_y_min = SEA_LEVEL` rule drops anything below water
+    /// so the reflected image is the upper world only.
+    fn encode_reflection_pass(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        eye: Vec3,
+        frustum: &[Vec4; 6],
+    ) {
+        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("reflection-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.reflection_msaa_view,
+                // Resolve straight into the single-sample texture
+                // the water shader samples. We never re-use the MSAA
+                // contents after the resolve.
+                resolve_target: Some(&self.reflection_resolve_view),
+                ops: wgpu::Operations {
+                    // Sky shader fills every pixel so this clear
+                    // colour shouldn't show, but harmless to pick a
+                    // sky-ish blue as a safety net.
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.20,
+                        g: 0.40,
+                        b: 0.80,
+                        a: 1.0,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.reflection_depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+
+        // 1) Sky — same triangle, but the mirrored inv-view-proj
+        // reconstructs rays going DOWN from the mirrored eye toward
+        // what was originally above the water. The sun position is
+        // also mirrored in the camera uniform so the reflected sun
+        // appears at the geometrically correct spot.
+        pass.set_pipeline(&self.sky_pipe.pipeline);
+        pass.set_bind_group(0, &self.reflection_camera_bg, &[]);
+        pass.draw(0..3, 0..1);
+
+        // 2) Opaque chunks. Use the existing pipeline; the only
+        // thing different here is which camera uniform is bound
+        // (reflection_camera_bg vs camera_bg). `clip_y_min =
+        // SEA_LEVEL` in that uniform makes the fragment shader
+        // discard below-water fragments.
+        pass.set_pipeline(&self.opaque_pipe.pipeline);
+        pass.set_bind_group(0, &self.reflection_camera_bg, &[]);
+        pass.set_bind_group(2, &self.atlas.bind_group, &[]);
+        const CULL_DISTANCE: f32 = 600.0 + 28.0;
+        let cull_sq = CULL_DISTANCE * CULL_DISTANCE;
+        for (coord, slots) in &self.chunk_meshes {
+            let origin = coord.origin().0;
+            let chunk_min = Vec3::new(origin.x as f32, origin.y as f32, origin.z as f32);
+            let chunk_max = chunk_min + Vec3::splat(32.0);
+            let center_f = chunk_min + Vec3::splat(16.0);
+            if (center_f - eye).length_squared() > cull_sq {
+                continue;
+            }
+            if !aabb_in_frustum(frustum, chunk_min, chunk_max) {
+                continue;
+            }
+            let preferred = Self::pick_lod(eye, center_f);
+            let chosen = slots[preferred]
+                .as_ref()
+                .or_else(|| slots.iter().flatten().next());
+            if let Some(cg) = chosen {
+                pass.set_bind_group(1, &cg.bg, &[0]);
+                pass.set_vertex_buffer(0, cg.mesh.vbuf.slice(..));
+                pass.set_index_buffer(cg.mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..cg.mesh.index_count, 0, 0..1);
+            }
+        }
+    }
+
     fn encode_opaque_pass(
         &self,
         enc: &mut wgpu::CommandEncoder,
@@ -895,6 +1136,7 @@ impl Renderer {
         pass.set_bind_group(0, &self.camera_bg, &[]);
         pass.set_bind_group(2, &self.atlas.bind_group, &[]);
         pass.set_bind_group(3, &self.water_depth_bg, &[]);
+        pass.set_bind_group(4, &self.water_reflection_bg, &[]);
         for (coord, slots) in &self.chunk_meshes {
             let origin = coord.origin().0;
             let chunk_min = Vec3::new(origin.x as f32, origin.y as f32, origin.z as f32);
@@ -955,7 +1197,7 @@ impl Renderer {
                 sun_intensity,
                 time,
                 underwater_factor: self.underwater_factor,
-                _pad2: 0.0,
+                clip_y_min: -1_000_000.0,
                 eye: [eye.x, eye.y, eye.z, 0.0],
                 inv_view_proj: inv_vp.to_cols_array_2d(),
             }]),

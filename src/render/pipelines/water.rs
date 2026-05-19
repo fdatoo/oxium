@@ -22,6 +22,13 @@ pub struct WaterPipeline {
     /// pipeline so the renderer can build a bind group against it
     /// whenever the depth-sample texture is (re)allocated.
     pub depth_bgl: wgpu::BindGroupLayout,
+    /// Bind-group layout for the planar reflection texture + its
+    /// sampler (group 4). The reflection pass renders the world
+    /// from a mirrored virtual camera into a single-sample
+    /// `Rgba8UnormSrgb` colour target; the water shader then
+    /// samples it at screen-space UVs (with wave-normal distortion)
+    /// to composite a real reflected image of the upper world.
+    pub reflection_bgl: wgpu::BindGroupLayout,
 }
 
 const SHADER_SRC: &str = include_str!(concat!(
@@ -61,9 +68,34 @@ pub fn build(
         }],
     });
 
+    // Group 4: planar reflection texture + sampler. Filterable
+    // float sample type because we want linear filtering across the
+    // distorted reflection lookup.
+    let reflection_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("water-reflection-bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("water-layout"),
-        bind_group_layouts: &[camera_bgl, chunk_bgl, atlas_bgl, &depth_bgl],
+        bind_group_layouts: &[camera_bgl, chunk_bgl, atlas_bgl, &depth_bgl, &reflection_bgl],
         push_constant_ranges: &[],
     });
 
@@ -150,5 +182,9 @@ pub fn build(
         cache: None,
     });
 
-    WaterPipeline { pipeline, depth_bgl }
+    WaterPipeline {
+        pipeline,
+        depth_bgl,
+        reflection_bgl,
+    }
 }

@@ -36,7 +36,11 @@ struct CameraUniform {
     // toward a deep blue tint scaled by this; it's the cheap
     // alternative to a dedicated underwater post-process pass.
     underwater_factor: f32,
-    _pad2:             f32,
+    // Minimum world-space Y a fragment may have before being kept.
+    // The main pass sets this to a deep negative (no clip); the
+    // reflection pass sets it to SEA_LEVEL so anything under water
+    // is dropped from the reflected image.
+    clip_y_min:        f32,
     eye:               vec4<f32>,
     inv_view_proj:     mat4x4<f32>,
 };
@@ -263,6 +267,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // work in the overlap region is paid only once thanks to early
     // `discard`.
     if (in.v_color.a < 0.95) {
+        discard;
+    }
+
+    // Below-clip-plane cull. For the main pass `clip_y_min` is a
+    // deep negative (everything renders); for the reflection pass
+    // it's SEA_LEVEL, so anything underwater (which has no business
+    // appearing in the reflected image of the sky/upper world) gets
+    // dropped here.
+    if (in.v_world.y < camera.clip_y_min) {
         discard;
     }
 

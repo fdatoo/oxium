@@ -73,7 +73,15 @@ impl Gpu {
             &wgpu::DeviceDescriptor {
                 label: Some("oxium-device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
+                // Bump max_bind_groups from the default 4 to 5 so the
+                // water pipeline can carry both the scene-depth
+                // sampler (group 3) and the planar-reflection sampler
+                // (group 4). The hard cap on most desktop GPUs is 8;
+                // anything ≤ 8 is portable.
+                required_limits: wgpu::Limits {
+                    max_bind_groups: 5,
+                    ..wgpu::Limits::default()
+                },
                 memory_hints: wgpu::MemoryHints::Performance,
             },
             // Trace path: pass a directory to capture an api-trace replay
@@ -165,6 +173,84 @@ pub fn make_depth_texture(
     });
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
     (tex, view)
+}
+
+/// Allocate the sampleable single-sample colour texture the water
+/// shader reads to sample the planar reflection. The reflection pass
+/// renders into a multisampled colour target and resolves into this
+/// texture at end of pass; the water shader then samples it via
+/// screen-space UVs with wave-normal distortion.
+///
+/// Lower-than-screen resolution would be fine for perf (wave
+/// distortion hides reflection detail), but full res keeps the
+/// implementation simple and our scene isn't fragment-bound.
+pub fn make_reflection_color_textures(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+) -> (wgpu::TextureView, wgpu::Texture, wgpu::TextureView) {
+    // The MSAA render target the reflection pass actually draws into.
+    let msaa = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("reflection-color-msaa"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: MSAA_SAMPLES,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    // The single-sample resolve target. Sampled by the water shader.
+    let resolve = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("reflection-color-resolve"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let msaa_view = msaa.create_view(&wgpu::TextureViewDescriptor::default());
+    let resolve_view = resolve.create_view(&wgpu::TextureViewDescriptor::default());
+    (msaa_view, resolve, resolve_view)
+}
+
+/// Allocate a dedicated depth texture for the reflection pass.
+/// We can't reuse the main depth (it's owned by the main world
+/// pass which runs concurrently in the same encoder); reflection
+/// needs its own depth attachment for the opaque draws to depth-
+/// test against each other.
+pub fn make_reflection_depth_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> wgpu::TextureView {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("reflection-depth"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: MSAA_SAMPLES,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    tex.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
 /// Allocate the sampleable depth-copy texture the water pass reads

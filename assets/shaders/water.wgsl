@@ -35,7 +35,7 @@ struct CameraUniform {
     sun_intensity:     f32,
     time:              f32,
     underwater_factor: f32,
-    _pad2:             f32,
+    clip_y_min:        f32,
     eye:               vec4<f32>,
     inv_view_proj:     mat4x4<f32>,
 };
@@ -54,6 +54,14 @@ struct ChunkUniform {
 // sample 0 via `textureLoad` — pixel-art-style shorelines don't
 // gain meaningfully from a 4-sample resolve.
 @group(3) @binding(0) var scene_depth: texture_depth_multisampled_2d;
+
+// Group 4: the planar-reflection texture. The reflection pass renders
+// the world from a virtual camera mirrored across the water plane;
+// here we sample the result at screen-space UVs distorted by the
+// wave normal so the reflected image actually wobbles with the
+// waves instead of reading as a perfect mirror.
+@group(4) @binding(0) var reflection_tex:     texture_2d<f32>;
+@group(4) @binding(1) var reflection_sampler: sampler;
 
 // Atlas geometry — keep in sync with `render::atlas`. The water
 // shader samples tile 8 (`water_still.png`) at scrolling UVs to put
@@ -322,18 +330,32 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // angles; only really visible when looking nearly straight down.
     let water_body = vec3<f32>(0.04, 0.20, 0.38) * max(in.v_light, 0.10);
 
-    // Sky reflection: read the horizon colour for the lower half of
-    // the visible sky and the zenith for the upper. Tonemapping
-    // earlier in the shader doesn't apply here — these values feed
-    // into the final tonemap pass at the end.
+    // Planar reflection sample. The reflection texture was rendered
+    // by a virtual camera mirrored across the water plane (see
+    // `Renderer::encode_reflection_pass`); the screen-space pixel
+    // we're shading corresponds to the same screen-space pixel in
+    // the reflection texture. Wave-normal-distorted UVs make the
+    // reflection wobble with the surface ripples — without the
+    // distortion the reflection would read as a perfect static
+    // mirror.
+    //
+    // `surface_n.xz` carries the wave-induced lateral tilt of the
+    // surface normal. Project it through the view space scaled by a
+    // small factor to get the distortion vector in NDC.
+    let screen_size = vec2<f32>(textureDimensions(reflection_tex));
+    let base_uv = in.clip_pos.xy / screen_size;
+    let distort = surface_n.xz * 0.04;
+    let refl_uv = clamp(base_uv + distort, vec2<f32>(0.0), vec2<f32>(1.0));
+    let sky_reflection = textureSampleLevel(
+        reflection_tex,
+        reflection_sampler,
+        refl_uv,
+        0.0,
+    ).rgb;
+    // Fallback for the still-handy horizon colour (used by the
+    // distance-fog blend below).
     let horizon = vec3<f32>(0.65, 0.80, 1.00) * camera.sun_intensity
                 + vec3<f32>(0.05, 0.07, 0.12) * (1.0 - camera.sun_intensity);
-    let zenith  = vec3<f32>(0.30, 0.50, 0.95) * camera.sun_intensity
-                + vec3<f32>(0.02, 0.03, 0.07) * (1.0 - camera.sun_intensity);
-    // The "reflected up direction" — how vertical the surface is at
-    // this fragment — picks how much zenith vs horizon shows.
-    let sky_t = clamp(surface_n.y, 0.0, 1.0);
-    let sky_reflection = mix(horizon, zenith, sky_t * sky_t);
 
     // Sun reflection: reflect the view direction across the surface
     // normal, dot against the "to-sun" direction. A *wide* exponent
