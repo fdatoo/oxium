@@ -87,8 +87,8 @@ pub use crate::worldgen::tuning::SEA_LEVEL;
 // below are imported into this module's scope for ergonomics.
 use crate::worldgen::tuning::{
     BIOME_JITTER_AMPL, BIOME_JITTER_PERIOD, CAVE_FLOOR_Y, CAVE_SURFACE_BUFFER,
-    COLD_THRESHOLD, FOREST_HUMIDITY, SAND_TRANSITION_BAND, SNOW_LINE, TREE_CELL_SIZE,
-    TREE_MARGIN, TREE_RATE_FOREST, TREE_RATE_PLAINS,
+    COLD_SNOW_MIN_ABOVE_SEA, COLD_THRESHOLD, FOREST_HUMIDITY, SAND_TRANSITION_BAND,
+    SNOW_LINE, TREE_CELL_SIZE, TREE_MARGIN, TREE_RATE_FOREST, TREE_RATE_PLAINS,
 };
 
 /// Pre-built noise fields for one world seed.
@@ -289,11 +289,13 @@ impl Generator {
         let humidity = humidity_raw + self.biome_jitter_rot(wx, wz);
         let biome = Biome::classify(temperature, humidity, is_desert);
 
+        let lake_rim = regions.lake_rim_at(wx, wz);
         ColumnData {
             height,
             is_cliff,
             desertness,
             biome,
+            lake_rim,
         }
     }
 
@@ -326,10 +328,7 @@ impl Generator {
                 let wz = origin.z + z as i32;
                 let col = self.column_data_with(wx, wz, &regions);
                 let height = col.height;
-                // Lake water rim (if this column sits in a sink-filled
-                // basin). Above the column's solid height but below
-                // the rim, the column floods with water.
-                let lake_rim = regions.lake_rim_at(wx, wz);
+                let lake_rim = col.lake_rim;
 
                 for y in 0..CHUNK_DIM_U {
                     let wy = origin.y + y as i32;
@@ -407,7 +406,15 @@ impl Generator {
                                 Block::Sand
                             } else if height >= SNOW_LINE {
                                 Block::Snow
-                            } else if col.biome.snow_capped() {
+                            } else if col.biome.snow_capped()
+                                && height >= SEA_LEVEL + COLD_SNOW_MIN_ABOVE_SEA
+                            {
+                                // Cold-biome snow only applies once
+                                // we're well above sea level —
+                                // coastal cold regions keep their
+                                // grass/dirt surface so we don't get
+                                // an awkward snow-strip-touching-
+                                // water shoreline.
                                 Block::Snow
                             } else if col.biome == Biome::Desert {
                                 Block::Sand
@@ -497,10 +504,6 @@ impl Generator {
     /// cell. Determined entirely by `(seed, cell coords)` so adjacent
     /// chunks agree on which trees exist.
     fn tree_in_cell(&self, cell_x: i32, cell_z: i32) -> Option<Tree> {
-        // First the column-level vetoes — a cell can be a tree
-        // candidate by roll but its column might be a beach, a bare
-        // peak, or above the alpine snow line, in which case no
-        // amount of luck makes a tree grow.
         let wx = cell_x * TREE_CELL_SIZE
             + (tree_hash(self.seed, cell_x, cell_z, 1) % 6) as i32
             + 1;
@@ -508,37 +511,50 @@ impl Generator {
             + (tree_hash(self.seed, cell_x, cell_z, 2) % 6) as i32
             + 1;
         let col = self.column_data(wx, wz);
-        if col.height <= SEA_LEVEL + 1 {
-            return None;
-        }
-        // Trees don't grow on cliffs — replaces v1's mountain-rock-line
-        // veto with a slope-driven equivalent.
+
+        // Trees don't grow on cliffs (bare stone), above the alpine
+        // snow line, or where the column is submerged under a lake.
         if col.is_cliff {
             return None;
         }
         if col.height >= SNOW_LINE {
             return None;
         }
-        // Biome decides both *whether* trees grow here at all and
-        // *how densely* they pack. Tundra and Desert return `None`
-        // outright; the rest carry a percentile (0..100) that the
-        // roll below has to clear. Higher percentile ⇒ denser
-        // forest. Threshold form `(roll mod 100) < rate` so the
-        // distribution stays uniform-ish across cells.
-        let rate = col.biome.tree_rate_percentile()?;
-        let roll = tree_hash(self.seed, cell_x, cell_z, 0) % 100;
-        if roll >= rate {
+        // Lake veto: if this column sits below a lake's water surface,
+        // no tree (even palms can't grow underwater).
+        if let Some(rim) = col.lake_rim {
+            if col.height < rim {
+                return None;
+            }
+        }
+
+        // Sand-surface veto. The beach band runs `[SEA_LEVEL - 1,
+        // SEA_LEVEL + 2]` and surface material in that band is Sand;
+        // oaks don't grow on sand. Palms *do*, but rarely — they're
+        // the iconic tropical-beach silhouette.
+        let on_beach =
+            col.height >= SEA_LEVEL - 1 && col.height <= SEA_LEVEL + 2;
+        let kind = col.biome.tree_kind();
+        if on_beach && kind != TreeKind::Palm {
             return None;
         }
+
+        let rate = col.biome.tree_rate_percentile()?;
+        // Palms on the beach are rarer — divide their rate by 4 so
+        // tropical beaches read as scattered palms, not dense palm
+        // forests.
+        let effective_rate = if on_beach { rate / 4 } else { rate };
+        let roll = tree_hash(self.seed, cell_x, cell_z, 0) % 100;
+        if roll >= effective_rate {
+            return None;
+        }
+
         let height = col.height;
-        let kind = col.biome.tree_kind();
         let trunk_h = match kind {
             TreeKind::Oak => {
-                // Roll #3: oak trunk height in 4..=6 blocks.
                 4 + (tree_hash(self.seed, cell_x, cell_z, 3) % 3) as i32
             }
             TreeKind::Palm => {
-                // Palms are taller and skinnier: 7..=9 blocks.
                 7 + (tree_hash(self.seed, cell_x, cell_z, 3) % 3) as i32
             }
         };
@@ -625,13 +641,18 @@ struct ColumnData {
     /// True if the column's `h_pre` slope exceeds `CLIFF_SLOPE_THRESH`.
     is_cliff: bool,
     /// Jitter-perturbed `desertness` noise value. Used by the
-    /// sand/grass transition band (PR 5): inside the band on the
-    /// grass side of the desert boundary, the surface block is
-    /// rolled stochastically.
+    /// sand/grass transition band: inside the band on the grass side
+    /// of the desert boundary, the surface block is rolled
+    /// stochastically.
     desertness: f32,
     /// Discrete biome label derived from temperature, humidity, and
-    /// the desert mask, with PR 5's threshold perturbation applied.
+    /// the desert mask, with threshold perturbation applied.
     biome: Biome,
+    /// Lake water surface elevation at this column, if it sits inside
+    /// (or adjacent to) a sink-filled basin. `None` outside lakes.
+    /// Used by both the chunk-fill water flood and the tree placer
+    /// (trees veto if the column is submerged in lake water).
+    lake_rim: Option<i32>,
 }
 
 /// Discrete biome label assigned to each column. The set is small on
@@ -747,11 +768,31 @@ impl ChunkRegions {
         self.grid[dz as usize][dx as usize].as_deref()
     }
 
-    /// Lake rim at this column, if it sits inside a sink-filled
-    /// basin. Returns `None` outside lakes or outside the grid.
+    /// Lake rim at this column, if it sits inside (or adjacent to)
+    /// a sink-filled basin. Returns the highest rim among the
+    /// column's own fine cell and the 8 neighbour cells reachable
+    /// through the pre-fetched 3 × 3 region grid.
+    ///
+    /// The 1-cell halo is what makes lake water reach the shore
+    /// cleanly: a fine cell adjacent to a lake (but not flagged
+    /// `is_lake` itself) still inherits the lake's rim when the rim
+    /// is above the column's natural height, so the water surface
+    /// doesn't terrace at fine-cell boundaries.
     fn lake_rim_at(&self, wx: i32, wz: i32) -> Option<i32> {
-        self.region_at(wx, wz)
-            .and_then(|r| hydrology::lake_rim_at(wx, wz, r))
+        use crate::worldgen::tuning::FINE_CELL;
+        let mut best: Option<i32> = None;
+        for dz in -1..=1i32 {
+            for dx in -1..=1i32 {
+                let nx = wx + dx * FINE_CELL;
+                let nz = wz + dz * FINE_CELL;
+                if let Some(region) = self.region_at(nx, nz) {
+                    if let Some(rim) = hydrology::lake_rim_at(nx, nz, region) {
+                        best = Some(best.map_or(rim, |b| b.max(rim)));
+                    }
+                }
+            }
+        }
+        best
     }
 
     /// Collect every cave system in the pre-fetched 3 × 3 grid whose
@@ -917,10 +958,11 @@ mod tests {
     /// future runs catch unintentional behavioural drift.
     #[test]
     fn golden_seed42_chunk_0_2_0() {
-        // Hash re-baselined for PR 5 (Tropical biome + threshold
-        // perturbation + stochastic sand transition band + palm
-        // tree stamps).
-        const GOLDEN_42_002: u64 = 0x8179_F099_EB0F_7C0F;
+        // Hash re-baselined for the post-overhaul polish pass
+        // (smoothstep ridges, lower RIDGE_PEAK_CC, along-boundary
+        // ridge noise fix, snow tuning, lake shoreline halo,
+        // tree-on-sand fixes).
+        const GOLDEN_42_002: u64 = 0xFD7A_B0B9_CBAF_3B81;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);
@@ -1015,18 +1057,25 @@ mod tests {
         }
     }
 
-    /// Cold biomes should plant Snow as their surface block. Pick a
-    /// column known to be Tundra and verify the topmost solid block
-    /// is Snow, not Grass.
+    /// Cold biomes should plant Snow as their surface block — *above*
+    /// the coastal elevation buffer. The polish pass made the cold
+    /// biome cap require `height >= SEA_LEVEL + COLD_SNOW_MIN_ABOVE_SEA`
+    /// so coastal cold regions don't put a snow strip directly
+    /// against the water; pick a tundra column inland enough to be
+    /// above that floor.
     #[test]
     fn cold_biome_caps_with_snow() {
         let g = Generator::new(42);
-        // Find any tundra column by scanning the same area as
-        // `all_biomes_appear_in_a_large_scan`.
+        let min_h = SEA_LEVEL + COLD_SNOW_MIN_ABOVE_SEA;
         let mut found: Option<(i32, i32)> = None;
         'outer: for wz in (-1024..1024).step_by(8) {
             for wx in (-1024..1024).step_by(8) {
-                if g.column_data(wx, wz).biome == Biome::Tundra {
+                let col = g.column_data(wx, wz);
+                if col.biome == Biome::Tundra
+                    && col.height >= min_h
+                    && col.height < SNOW_LINE
+                    && !col.is_cliff
+                {
                     found = Some((wx, wz));
                     break 'outer;
                 }

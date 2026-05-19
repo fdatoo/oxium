@@ -184,40 +184,54 @@ pub fn ridge_peak_for_pair(a: PlateKind, b: PlateKind) -> f32 {
 /// Mountain-ridge contribution (blocks) added on top of the base
 /// continental shelf at world `(wx, wz)`.
 ///
-/// Geometry: triangular falloff with boundary intensity `t`. Inside
-/// `t < BOUNDARY_RIDGE_WIDTH`, lift ramps from `peak` at `t = 0` to 0
-/// at `t = BOUNDARY_RIDGE_WIDTH`. Outside that window, zero.
+/// Geometry: smoothstep falloff with boundary intensity `t`. Inside
+/// `t < BOUNDARY_RIDGE_WIDTH`, lift smoothly tapers from `peak` at
+/// `t = 0` to 0 at `t = BOUNDARY_RIDGE_WIDTH`. Smoothstep (not
+/// linear) so the boundary between ridge band and non-ridge terrain
+/// doesn't read as a sharp mesa edge.
 ///
-/// The `peak` itself is modulated along the boundary curve by a 1D
-/// noise (parameterised by `mix`-hash of the midpoint between the two
-/// seed points) so the chain has saddles and crests, not a uniform
-/// wall. Range: peak * [0.45, 1.0].
-pub fn ridge_lift(look: &PlateLookup, seed: u64) -> f32 {
+/// The `peak` itself is modulated along the boundary by a 1D noise
+/// **sampled at the query position projected onto the boundary axis**
+/// — so the chain has real saddles and crests at the chunk scale,
+/// not a constant value per plate pair.
+pub fn ridge_lift(look: &PlateLookup, query_xz: Vec2, seed: u64) -> f32 {
     // Outside the ridge window — no contribution.
     if look.t >= BOUNDARY_RIDGE_WIDTH {
         return 0.0;
     }
     let peak_max = ridge_peak_for_pair(look.a.kind, look.b.kind);
-    // 1D noise along the boundary: hash the midpoint of the two seed
-    // points, quantised to ~32-block buckets so the noise has spatial
-    // continuity (neighbouring columns hash the same bucket).
-    let mid = (look.a.seed_xz + look.b.seed_xz) * 0.5;
-    // Project the query onto the line between the two seed points to
-    // get a 1D position along the boundary.
+
+    // 1D noise along the boundary, sampled at the *query position*
+    // projected onto the boundary axis. This is the key fix: in the
+    // previous version we used the midpoint of the two seed points,
+    // which is a constant per pair → uniform ridges per chain. With
+    // the query's projection, ridges actually vary along their length.
     let axis = (look.b.seed_xz - look.a.seed_xz).normalize_or_zero();
-    // Use the query distance along that axis as the noise parameter.
-    let along = mid.dot(axis) as i32 / 32; // 32-block bucket
-    // Two adjacent buckets, linearly interpolated by the fractional
-    // remainder of `along` so the lift varies smoothly along the
-    // chain instead of stair-stepping.
-    let along_frac = ((mid.dot(axis) / 32.0) - along as f32).clamp(0.0, 1.0);
-    let pair_salt = mix_u32(seed, &[look.a.id.cell_x, look.a.id.cell_z, look.b.id.cell_x, look.b.id.cell_z]);
-    let n0 = mix_unit(seed, &[pair_salt as i32, along, 0]);
-    let n1 = mix_unit(seed, &[pair_salt as i32, along + 1, 0]);
-    let n = n0 * (1.0 - along_frac) + n1 * along_frac;
-    // Map noise to [0.45, 1.0] so saddles aren't full zero.
-    let mod_factor = 0.45 + 0.55 * n;
-    let falloff = 1.0 - look.t / BOUNDARY_RIDGE_WIDTH;
+    let along_world = query_xz.dot(axis);
+    let bucket = (along_world / 32.0).floor() as i32;
+    let bucket_frac = (along_world / 32.0) - bucket as f32;
+    let pair_salt = mix_u32(
+        seed,
+        &[
+            look.a.id.cell_x,
+            look.a.id.cell_z,
+            look.b.id.cell_x,
+            look.b.id.cell_z,
+        ],
+    );
+    let n0 = mix_unit(seed, &[pair_salt as i32, bucket, 0]);
+    let n1 = mix_unit(seed, &[pair_salt as i32, bucket + 1, 0]);
+    let n = n0 * (1.0 - bucket_frac) + n1 * bucket_frac;
+    // Map noise to [0.35, 1.0] — wider range than before so saddles
+    // dip lower than crests, producing real silhouette variation.
+    let mod_factor = 0.35 + 0.65 * n;
+
+    // Smoothstep falloff (was linear). At `t = 0` the lift is full
+    // peak; at `t = BOUNDARY_RIDGE_WIDTH` it's zero; in between the
+    // Hermite curve produces a soft taper instead of a hard mesa
+    // edge.
+    let u = (look.t / BOUNDARY_RIDGE_WIDTH).clamp(0.0, 1.0);
+    let falloff = 1.0 - u * u * (3.0 - 2.0 * u);
     peak_max * falloff * mod_factor
 }
 
@@ -322,7 +336,7 @@ mod tests {
     fn ridge_lift_zero_outside_band() {
         let mut look = plate_at(42, 0, 0);
         look.t = 0.5; // way outside BOUNDARY_RIDGE_WIDTH
-        assert_eq!(ridge_lift(&look, 42), 0.0);
+        assert_eq!(ridge_lift(&look, Vec2::ZERO, 42), 0.0);
     }
 
     #[test]
@@ -336,7 +350,7 @@ mod tests {
                     && matches!(look.a.kind, PlateKind::Continental)
                     && matches!(look.b.kind, PlateKind::Continental)
                 {
-                    let lift = ridge_lift(&look, 42);
+                    let lift = ridge_lift(&look, Vec2::new(wx as f32, wz as f32), 42);
                     assert!(
                         lift > 0.0,
                         "expected positive ridge lift on CC boundary, got {lift}"

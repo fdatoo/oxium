@@ -38,13 +38,17 @@ pub const ROUGHNESS_RANGE: (f32, f32) = (0.7, 1.4);
 pub const BOUNDARY_RIDGE_WIDTH: f32 = 0.12;
 
 /// Peak ridge height (blocks) at a continental–continental boundary.
-pub const RIDGE_PEAK_CC: f32 = 90.0;
+/// Lowered from 90 → 60 in the post-overhaul polish pass: the
+/// previous value combined with `+28` continental base elevation
+/// pegged `MAX_TERRAIN_Y` constantly, which clipped peaks into the
+/// flat-topped mesa silhouette.
+pub const RIDGE_PEAK_CC: f32 = 60.0;
 /// Peak ridge height at a continental–oceanic boundary (Andes-style
 /// coastal range).
-pub const RIDGE_PEAK_CO: f32 = 54.0;
+pub const RIDGE_PEAK_CO: f32 = 40.0;
 /// Peak ridge height at an oceanic–oceanic boundary (island arc
 /// archipelago).
-pub const RIDGE_PEAK_OO: f32 = 28.0;
+pub const RIDGE_PEAK_OO: f32 = 24.0;
 
 // ── Heightmap ─────────────────────────────────────────────────────────
 
@@ -161,8 +165,16 @@ pub const WORMHOLE_BAND: f64 = 0.05;
 // ── Biomes & surface ─────────────────────────────────────────────────
 
 /// Temperature noise value below which a column is cold (Tundra /
-/// SnowyForest).
-pub const COLD_THRESHOLD: f32 = -0.10;
+/// SnowyForest). The climate noise is roughly distributed in
+/// `[-1, 1]` and centred near 0, so `-0.30` puts ~20% of the world
+/// in the cold belt — down from ~45% at the previous `-0.10` value,
+/// which produced too much surface snow.
+pub const COLD_THRESHOLD: f32 = -0.30;
+/// Minimum height (blocks above sea level) for cold-biome
+/// surface-snow to apply. Below this elevation, cold biomes still
+/// get their grass/dirt surface so coastal cold regions don't put
+/// a strip of snow directly against the ocean.
+pub const COLD_SNOW_MIN_ABOVE_SEA: i32 = 8;
 /// Humidity noise value above which a temperate column is Forest /
 /// Tropical (otherwise Plains / Desert).
 pub const FOREST_HUMIDITY: f32 = 0.05;

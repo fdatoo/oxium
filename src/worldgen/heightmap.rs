@@ -76,7 +76,7 @@ impl HeightmapNoise {
     pub fn h_pre(&self, seed: u64, wx: f32, wz: f32) -> f32 {
         let look = plate_at(seed, wx as i32, wz as i32);
         let shelf = shelf_base(&look);
-        let ridge = ridge_lift(&look, seed);
+        let ridge = ridge_lift(&look, glam::Vec2::new(wx, wz), seed);
         // Domain warp: two independently seeded scalar fields produce
         // a 2D offset that perturbs the FBM input. Breaks the
         // rounded-blob signature of plain FBM.

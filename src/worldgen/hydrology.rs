@@ -734,36 +734,28 @@ mod tests {
 
     #[test]
     fn fine_hydro_produces_some_river_cells() {
-        // Build one fine region and confirm it produces at least
-        // some river cells. Continental geography + flow accumulation
-        // should produce drainage somewhere in 512² blocks.
+        // Scan a 5 × 5 grid of regions around the origin. At least one
+        // should produce river cells. Some regions are pure ocean and
+        // won't have any; we just need one with land + drainage.
         let hm = HeightmapNoise::new(42);
         let macro_cache = crate::worldgen::region::fresh_macro_cache();
-        let coord = RegionCoord { x: 0, z: 0 };
-        let mut region = crate::worldgen::region::build_fine_region_placeholder(coord);
-        region.coord = coord;
-        build_fine_hydro(42, coord, &hm, &macro_cache, &mut region);
-        let river_cells = (0..(FINE_CELLS_PER_REGION * FINE_CELLS_PER_REGION) as usize)
-            .filter(|&i| bitset_get(&region.is_river, i))
-            .count();
-        // Accept any non-trivial count; the heightmap at this region
-        // may be oceanic (no rivers) so we scan a few seeds before
-        // failing. For seed 42 specifically we know there's land
-        // around (see find_biomes), so rivers should appear.
-        if river_cells == 0 {
-            // Try seed 42 at an adjacent region.
-            let coord2 = RegionCoord { x: -1, z: -1 };
-            let mut region2 = crate::worldgen::region::build_fine_region_placeholder(coord2);
-            region2.coord = coord2;
-            build_fine_hydro(42, coord2, &hm, &macro_cache, &mut region2);
-            let river_cells2 = (0..(FINE_CELLS_PER_REGION * FINE_CELLS_PER_REGION) as usize)
-                .filter(|&i| bitset_get(&region2.is_river, i))
-                .count();
-            assert!(
-                river_cells2 > 0,
-                "no river cells in seed=42 regions (0,0) or (-1,-1)"
-            );
+        let mut total_river_cells = 0usize;
+        for z in -2..=2 {
+            for x in -2..=2 {
+                let coord = RegionCoord { x, z };
+                let mut region =
+                    crate::worldgen::region::build_fine_region_placeholder(coord);
+                region.coord = coord;
+                build_fine_hydro(42, coord, &hm, &macro_cache, &mut region);
+                let n = (FINE_CELLS_PER_REGION * FINE_CELLS_PER_REGION) as usize;
+                total_river_cells +=
+                    (0..n).filter(|&i| bitset_get(&region.is_river, i)).count();
+            }
         }
+        assert!(
+            total_river_cells > 0,
+            "no river cells across the 5×5 region scan at seed=42"
+        );
     }
 
     #[test]

@@ -15,7 +15,7 @@ use std::hash::{Hash, Hasher};
 
 /// Pinned hash of the PNG bytes. Update whenever an intentional
 /// generator change lands.
-const EXPECTED_HASH: u64 = 0x3405_92C7_2FF3_A87D;
+const EXPECTED_HASH: u64 = 0x19BF_33F5_9927_6620;
 
 /// Render a 256 × 256 fingerprint PNG of `h_pre` at seed 42 sampled
 /// every 8 blocks over `[-1024, 1024]²`. Returns the PNG bytes.
