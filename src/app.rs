@@ -380,6 +380,31 @@ impl AppState {
 
         let now_secs = self.start_time.elapsed().as_secs_f32();
         let fps = self.fps_meter.fps();
+        // Underwater detection: probe the block at the camera's eye
+        // position. `get_block` returns `None` for unloaded chunks
+        // (shouldn't happen at the player's own coord but be defensive)
+        // so we conservatively assume air in that case. The shaders
+        // own the smoothing; here we just hand them a 0/1 step value.
+        {
+            use crate::ecs::components::{Camera, Position};
+            let mut q = self
+                .ecs
+                .world
+                .query_one::<(&Position, &Camera)>(self.ecs.player)
+                .unwrap();
+            let (pos, cam) = q.get().unwrap();
+            let eye = pos.0 + cam.eye_offset;
+            let block_pos = crate::voxel::coords::BlockPos(glam::IVec3::new(
+                eye.x.floor() as i32,
+                eye.y.floor() as i32,
+                eye.z.floor() as i32,
+            ));
+            let in_water = matches!(
+                self.world.get_block(block_pos),
+                Some(crate::voxel::block::Block::Water)
+            );
+            self.renderer.set_underwater(if in_water { 1.0 } else { 0.0 });
+        }
         time(prof, "render", || {
             if let Err(e) = crate::ecs::systems::render::render(
                 &self.ecs,

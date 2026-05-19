@@ -28,14 +28,17 @@
 // path is for blocks like Torch / Air which don't have an atlas entry.
 
 struct CameraUniform {
-    view_proj:     mat4x4<f32>,
-    sun_dir:       vec4<f32>,
-    sun_intensity: f32,
-    time:          f32,
-    _pad1:         f32,
-    _pad2:         f32,
-    eye:           vec4<f32>,
-    inv_view_proj: mat4x4<f32>,
+    view_proj:         mat4x4<f32>,
+    sun_dir:           vec4<f32>,
+    sun_intensity:     f32,
+    time:              f32,
+    // 0 = camera in air, 1 = submerged. Every fragment colour-grades
+    // toward a deep blue tint scaled by this; it's the cheap
+    // alternative to a dedicated underwater post-process pass.
+    underwater_factor: f32,
+    _pad2:             f32,
+    eye:               vec4<f32>,
+    inv_view_proj:     mat4x4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
 
@@ -122,22 +125,48 @@ fn horizon_color(sun_intensity: f32) -> vec3<f32> {
     return mix(night, day, smoothstep(0.0, 0.7, i)) + dusk * dusk_w * 0.6;
 }
 
-// Two-octave sin/cos wave used to animate water surfaces. Driven by
-// world-space x/z and `camera.time` so adjacent quads stay coherent as
-// the camera moves.
-fn water_shimmer(world: vec3<f32>, t: f32) -> f32 {
-    let a = sin(world.x * 0.45 + t * 1.30) * cos(world.z * 0.37 + t * 1.10);
-    let b = sin(world.x * 0.18 + world.z * 0.21 + t * 0.55);
-    return a * 0.5 + b * 0.5;
+// ACES filmic tone mapping — the cinematographer's go-to curve. Compresses
+// highlights into a soft roll-off (no clip to pure white on bright
+// surfaces) and adds a touch of crispness in the shadows. Operates on
+// linear-space RGB; the output is also linear and gets converted to
+// sRGB by the render-target format. Fitted approximation by Krzysztof
+// Narkowicz — same five constants every modern engine reaches for.
+fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Apply the underwater colour grade. Pulls every channel toward a deep
+// teal tint by `factor` so above-water terrain seen through the
+// camera's water column reads as muted and blue. Composed *after*
+// tonemapping so the tint stays its own pure colour rather than
+// being curve-compressed away.
+fn underwater_tint(rgb: vec3<f32>, factor: f32) -> vec3<f32> {
+    let water_blue = vec3<f32>(0.10, 0.30, 0.45);
+    return mix(rgb, water_blue, factor * 0.65);
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    // Water fragments belong to the dedicated water pipeline. The
+    // mesher still emits them into the same vertex buffer (split
+    // meshes would cost a refactor we don't need yet), so the opaque
+    // pass discards them here and the water pass discards the
+    // not-water fragments. Vertex shader work is repeated; fragment
+    // work in the overlap region is paid only once thanks to early
+    // `discard`.
+    if (in.v_color.a < 0.95) {
+        discard;
+    }
+
     // ── Sample the atlas (or skip for untextured blocks). The tile
     // index is `flat`-interpolated so every fragment inside a quad
     // sees the same integer; rounding here is just defensive.
     var base_rgb = in.v_color.rgb;
-    var base_a   = in.v_color.a;
     if (in.v_tile_index != UNTEXTURED_TILE) {
         // 4×4 grid → (col, row) from index.
         let row = f32(in.v_tile_index / 4u);
@@ -153,14 +182,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         // Vertex colour acts as a tint: grayscale tiles like
         // `grass_block_top.png` pick up the biome's green hue here.
         base_rgb = tex.rgb * in.v_color.rgb;
-        // Vertex alpha gates water shimmer below — keep it from the
-        // vertex side so the texture's own alpha (mainly leaves'
-        // transparency cutout) doesn't bleed in here.
-        base_a = in.v_color.a;
         // Leaves: the texture has true transparency between leaf
         // clusters. Discard those fragments instead of blending so
         // the silhouette stays crisp and depth-correct.
-        if (tex.a < 0.5 && in.v_color.a > 0.95) {
+        if (tex.a < 0.5) {
             discard;
         }
     }
@@ -168,23 +193,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let ao = mix(0.45, 1.0, in.v_ao);
     let lit = max(0.05, in.v_light);
     let shade = ao * lit;
-    var lit_rgb = base_rgb * shade;
-
-    // Water shimmer: any fragment whose vertex alpha came in below
-    // ~0.95 is non-opaque material — water in v0. Modulate brightness
-    // *and* bias the colour toward a cooler/warmer tint with the
-    // shimmer factor, both keyed off world space + time so adjacent
-    // greedy-merged water quads stay coherent.
-    if (base_a < 0.95) {
-        let s = water_shimmer(in.v_world, camera.time);
-        // Brightness ripple: ±30 % around the lit colour.
-        lit_rgb = lit_rgb * (1.0 + 0.30 * s);
-        // Hue lean: bright crests get a touch of foam-cyan, troughs
-        // a touch of deeper blue.
-        let crest = vec3<f32>(0.65, 0.90, 1.00);
-        let trough = vec3<f32>(0.05, 0.15, 0.45);
-        lit_rgb = mix(lit_rgb, mix(trough, crest, s * 0.5 + 0.5), 0.30);
-    }
+    let lit_rgb = base_rgb * shade;
 
     // Distance fog: linear ramp between FOG_START and FOG_END.
     let dist = length(in.v_world - camera.eye.xyz);
@@ -201,7 +210,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let sky_fog = horizon_color(camera.sun_intensity);
     let cave_fog = vec3<f32>(0.02, 0.02, 0.03);
     let fog_col = mix(cave_fog, sky_fog, max(in.v_light, 0.05));
-    let out_rgb = mix(lit_rgb, fog_col, fog_t);
+    var out_rgb = mix(lit_rgb, fog_col, fog_t);
 
-    return vec4<f32>(out_rgb, base_a);
+    // ── Post: tonemap before the underwater tint so the tint stays
+    // a pure pulled colour instead of being compressed by the
+    // filmic curve into something muddier.
+    out_rgb = aces_tonemap(out_rgb);
+    out_rgb = underwater_tint(out_rgb, camera.underwater_factor);
+
+    return vec4<f32>(out_rgb, 1.0);
 }

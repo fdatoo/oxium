@@ -42,7 +42,12 @@ pub struct CameraUniform {
     /// fractional part loses resolution — that's plenty for "subtle
     /// ripples" detail.
     pub time: f32,
-    pub _pad1: f32,
+    /// `0.0` ⇒ camera is in air; `1.0` ⇒ submerged in water; fractional
+    /// values appear during the swim-out transition.  Every fragment
+    /// shader mixes its final colour toward a deep-blue water tint
+    /// scaled by this factor — the cheap way to get the "you're
+    /// underwater" colour grade without a dedicated post pass.
+    pub underwater_factor: f32,
     pub _pad2: f32,
     /// Camera (eye) world-space position. `w` unused. Used by:
     /// - opaque fog to compute fragment distance from camera
@@ -63,7 +68,7 @@ impl CameraUniform {
             sun_dir: [0.0, 1.0, 0.0, 0.0],
             sun_intensity: 1.0,
             time: 0.0,
-            _pad1: 0.0,
+            underwater_factor: 0.0,
             _pad2: 0.0,
             eye: [0.0; 4],
             inv_view_proj: Mat4::IDENTITY.to_cols_array_2d(),

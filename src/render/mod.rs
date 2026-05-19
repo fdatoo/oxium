@@ -142,6 +142,12 @@ pub struct Renderer {
     /// Updated by `encode_opaque_pass`, read by the perf HUD. `Cell`
     /// so the render path can stay `&self` while still recording.
     last_draw_calls: std::cell::Cell<u32>,
+    /// Latest underwater factor handed in by `set_underwater`. Folded
+    /// into the camera uniform every frame so the shaders can blend
+    /// toward a deep-blue tint while the camera is submerged.
+    /// Maintained on the renderer side so callers don't have to thread
+    /// it through the `render()` call chain.
+    underwater_factor: f32,
 }
 
 /// Per-chunk GPU resources: the mesh buffers, the chunk-origin uniform, and
@@ -337,7 +343,17 @@ impl Renderer {
             _hud_sampler: hud_sampler,
             chunk_meshes: HashMap::new(),
             last_draw_calls: std::cell::Cell::new(0),
+            underwater_factor: 0.0,
         }
+    }
+
+    /// Set the `[0, 1]` underwater factor used by the shaders this and
+    /// every following frame. `0` is fully above water; `1` is fully
+    /// submerged. Smoothing is the caller's responsibility — pass a
+    /// step function for an instant transition, or a single-frame
+    /// lerp for the swim-out tint fading.
+    pub fn set_underwater(&mut self, factor: f32) {
+        self.underwater_factor = factor.clamp(0.0, 1.0);
     }
 
     /// Update the wireframe cursor target. Pass `None` to hide it (the
@@ -505,7 +521,7 @@ impl Renderer {
                 sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.0],
                 sun_intensity,
                 time,
-                _pad1: 0.0,
+                underwater_factor: self.underwater_factor,
                 _pad2: 0.0,
                 eye: [eye.x, eye.y, eye.z, 0.0],
                 inv_view_proj: inv_vp.to_cols_array_2d(),
@@ -758,7 +774,7 @@ impl Renderer {
                 sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.0],
                 sun_intensity,
                 time,
-                _pad1: 0.0,
+                underwater_factor: self.underwater_factor,
                 _pad2: 0.0,
                 eye: [eye.x, eye.y, eye.z, 0.0],
                 inv_view_proj: inv_vp.to_cols_array_2d(),
