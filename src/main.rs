@@ -320,25 +320,21 @@ impl ApplicationHandler for App {
                     state.ui.cursor_state_changed = false;
                     if state.ui.is_playing() {
                         grab_cursor(&state.window);
+                        // Snap the cursor to centre on the resume frame
+                        // only. Re-centering every frame breaks mouse-
+                        // look on macOS because winit's
+                        // DeviceEvent::MouseMotion is computed from
+                        // cursor deltas; a warp's negative delta
+                        // cancels the player's motion. CursorGrabMode::
+                        // Locked (set by grab_cursor) is the actual
+                        // pinning mechanism during gameplay.
+                        let (w, h) = state.renderer.framebuffer_size();
+                        let _ = state.window.set_cursor_position(
+                            winit::dpi::PhysicalPosition::new(w as f64 / 2.0, h as f64 / 2.0),
+                        );
                     } else {
                         release_cursor(&state.window);
                     }
-                }
-
-                // Re-center the cursor each frame during gameplay. macOS
-                // doesn't always honour CursorGrabMode::Locked and we fall
-                // back to Confined, where the cursor drifts to whichever
-                // edge the player happened to swipe toward — and once it
-                // hits the edge, further motion in that direction is
-                // silently dropped. Snapping to centre each frame keeps
-                // headroom in every direction and doesn't perturb
-                // mouse-look because DeviceEvent::MouseMotion is delta-
-                // based, not absolute.
-                if state.ui.is_playing() {
-                    let (w, h) = state.renderer.framebuffer_size();
-                    let _ = state.window.set_cursor_position(
-                        winit::dpi::PhysicalPosition::new(w as f64 / 2.0, h as f64 / 2.0),
-                    );
                 }
 
                 if state.ui.wants_quit {
