@@ -698,13 +698,22 @@ impl Renderer {
                 continue;
             }
             let preferred = Self::pick_lod(eye, center_f);
-            // Try preferred → lower-detail neighbour → higher-detail
-            // neighbour so the chunk is never invisible when *some* LOD
-            // is ready.
+            // Try the preferred LOD first; if it isn't uploaded yet,
+            // fall back to *any* available LOD slot rather than
+            // staying invisible. The previous version explicitly
+            // tried `[preferred, preferred-1, preferred+1]` which
+            // for `preferred = 2` collapsed to `[2, 1, 2]` and
+            // missed `slot[0]` — so chunks at LOD2 render distance
+            // that only have a LOD0 mesh (the case since v0.1.39
+            // stopped spawning LOD1/LOD2 at gen time) failed to
+            // draw entirely, painting a sky-shader void over the
+            // ring of "far enough for LOD2, no LOD2/LOD1 baked yet"
+            // chunks. That ring looks like a one-quadrant void
+            // from any oblique top-down view, which is the
+            // "specific quadrant won't load" symptom.
             let chosen = slots[preferred]
                 .as_ref()
-                .or_else(|| slots[preferred.saturating_sub(1)].as_ref())
-                .or_else(|| slots[(preferred + 1).min(2)].as_ref());
+                .or_else(|| slots.iter().flatten().next());
             if let Some(cg) = chosen {
                 pass.set_bind_group(1, &cg.bg, &[0]);
                 pass.set_vertex_buffer(0, cg.mesh.vbuf.slice(..));
