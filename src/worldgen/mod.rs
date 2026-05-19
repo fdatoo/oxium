@@ -11,16 +11,28 @@
 //!    decides where sand replaces grass at the surface. Both are smooth so
 //!    biomes blend instead of stepping.
 //! 2. **Heightmap.** Base FBM gives rolling hills (`±AMPLITUDE` blocks).
-//!    A second `mountain_noise` adds *positive-only* extra elevation
-//!    (`+MOUNTAIN_PEAK`) scaled by `mountainness_map` — only mountainy
-//!    regions get tall peaks, plains stay rolling.
+//!    A *ridged* `mountain_noise` (peaks form along the zero-crossings of
+//!    a smooth field, not at isolated maxima) adds `+MOUNTAIN_PEAK`
+//!    elevation scaled by `mountainness_map` — only mountainy regions
+//!    grow ranges, and the ranges form connected ridges rather than
+//!    scattered bumps.
 //! 3. **Layers.** Top block is grass (sand near sea level *or* in
 //!    deserts, stone on tall mountain peaks); next three are dirt;
 //!    everything below is stone.
-//! 4. **Caves.** A 3D FBM sample whose absolute value exceeds
-//!    `CAVE_THRESH` carves the block into air. Caves only carve below
-//!    the dirt cap so the surface stays intact.
-//! 5. **Sea level.** Any air at or below `SEA_LEVEL` becomes water.
+//! 4. **Caves.** Two interleaved cave systems:
+//!    * **Tunnels** — the intersection of two independent 3D noises'
+//!      zero-crossings. Each noise's `|n| < TUNNEL_BAND` defines an
+//!      infinite warped sheet; where two sheets cross they form
+//!      long winding ribbons ~2-3 blocks wide. Classic voxel-game
+//!      tunnel shape.
+//!    * **Caverns** — a single low-frequency 3D noise whose extreme
+//!      values open into large irregular rooms, occasionally
+//!      intersecting tunnels for big chambers with corridor entries.
+//!    Caves only carve below the dirt cap so surface terrain stays
+//!    intact, and respect a tiny floor so the world doesn't drop
+//!    away to infinity at the chunk-stack bottom.
+//! 5. **Sea level.** Any air at or below `SEA_LEVEL` becomes water —
+//!    flooded cave passages turn into underwater grottos automatically.
 //!
 //! Tree placement (in `add_trees`) reuses the same biome data so
 //! deserts and mountain peaks stay bare.
@@ -42,9 +54,27 @@ const AMPLITUDE: f32 = 24.0;
 /// base heightmap. Capped at 48 so the tallest peaks sit around y≈136 —
 /// inside the loaded vertical radius of 6 chunks above the player chunk.
 const MOUNTAIN_PEAK: f32 = 48.0;
-/// Absolute-value threshold above which the 3D cave noise carves out a block.
-/// Lower values → more cave; higher values → fewer / smaller caves.
-const CAVE_THRESH: f64 = 0.55;
+/// Half-width of the "near-zero" band around each tunnel noise's
+/// zero-crossing surface. Tunnels appear where BOTH
+/// [`Generator::tunnel_a`] and [`Generator::tunnel_b`] sit inside this
+/// band — geometrically, that's the intersection of two warped sheets
+/// in 3D, which traces out long winding ribbons. Wider band → fatter
+/// and more frequent tunnels; narrower → sparse capillaries.
+const TUNNEL_BAND: f64 = 0.08;
+/// Threshold for the cavern noise: cells where the noise exceeds this
+/// open into a cavern. Higher value → rarer / smaller rooms. The
+/// 3D noise's amplitude is roughly `[-1, 1]` so 0.62 keeps caverns
+/// uncommon enough that they read as discoveries, not Swiss cheese.
+const CAVERN_THRESH: f64 = 0.62;
+/// World-space Y below which we leave a thin "floor" so the bottom of
+/// the loaded chunk stack doesn't dissolve into nothing. Caves above
+/// this can carve normally; cells at or below are left as their
+/// non-cave block.
+const CAVE_FLOOR_Y: i32 = -120;
+/// Minimum depth (in blocks) below the surface a cave is allowed to
+/// carve. Anything shallower than this would punch through the dirt
+/// cap and leave holes in the grass, so we leave a buffer.
+const CAVE_SURFACE_BUFFER: i32 = 4;
 /// World-space Y above which a mountain-biome surface block becomes
 /// bare stone (proxy for "above the tree line").
 const MOUNTAIN_ROCK_LINE: i32 = 92;
@@ -79,8 +109,19 @@ pub struct Generator {
     /// mountainness map but uncorrelated (different seed) so deserts and
     /// mountains drift independently.
     desert_map: Fbm<Simplex>,
-    /// 3D cave-carving noise.
-    cave_noise: Fbm<Simplex>,
+    /// First of two 3D noise fields whose zero-crossings intersect to
+    /// form cave tunnels. By itself this would carve a single warped
+    /// sheet through the world; combined with [`Self::tunnel_b`] only
+    /// the tube along the intersection survives.
+    tunnel_a: Fbm<Simplex>,
+    /// Second tunnel noise — seeded independently from [`Self::tunnel_a`]
+    /// so the two sheets cross at random angles rather than running
+    /// parallel.
+    tunnel_b: Fbm<Simplex>,
+    /// Lower-frequency 3D noise that opens into large cavern rooms
+    /// where its value runs hot. Layered on top of the tunnel system
+    /// so a tunnel occasionally widens into a chamber.
+    cavern_noise: Fbm<Simplex>,
     seed: u64,
 }
 
@@ -97,10 +138,6 @@ impl Generator {
             .set_octaves(4)
             .set_frequency(1.0 / 96.0)
             .set_persistence(0.5);
-        let cave_noise = Fbm::<Simplex>::new(seed.wrapping_add(1) as u32)
-            .set_octaves(3)
-            .set_frequency(1.0 / 24.0)
-            .set_persistence(0.55);
         // Mountain noise: smaller period (~64) for sharp peaks, higher
         // persistence so mid-frequency detail is preserved.
         let mountain_noise = Fbm::<Simplex>::new(seed.wrapping_add(2) as u32)
@@ -116,14 +153,68 @@ impl Generator {
             .set_octaves(2)
             .set_frequency(1.0 / 512.0)
             .set_persistence(0.5);
+        // Tunnel system: two independent 3D noises at the same frequency.
+        // 2 octaves keeps the surfaces relatively smooth — too many
+        // octaves and the tunnel walls turn into ragged stair-steps.
+        // Period ~40 blocks ⇒ tunnels meander on a scale of a few
+        // chunks, comfortably explorable.
+        let tunnel_a = Fbm::<Simplex>::new(seed.wrapping_add(5) as u32)
+            .set_octaves(2)
+            .set_frequency(1.0 / 40.0)
+            .set_persistence(0.5);
+        let tunnel_b = Fbm::<Simplex>::new(seed.wrapping_add(6) as u32)
+            .set_octaves(2)
+            .set_frequency(1.0 / 40.0)
+            .set_persistence(0.5);
+        // Caverns: a single low-frequency 3D field. Lower frequency than
+        // tunnels (period ~80 blocks) so each "hot" region is large
+        // enough to read as a room rather than a wider patch of tunnel.
+        let cavern_noise = Fbm::<Simplex>::new(seed.wrapping_add(7) as u32)
+            .set_octaves(2)
+            .set_frequency(1.0 / 80.0)
+            .set_persistence(0.5);
         Self {
             height_noise,
             mountain_noise,
             mountainness_map,
             desert_map,
-            cave_noise,
+            tunnel_a,
+            tunnel_b,
+            cavern_noise,
             seed,
         }
+    }
+
+    /// Decide whether the cell at world-space `(wx, wy, wz)` should be
+    /// carved away as cave.
+    ///
+    /// Returns `true` if either:
+    /// * Both [`Self::tunnel_a`] and [`Self::tunnel_b`] sit inside
+    ///   `±TUNNEL_BAND` (a tunnel passes through here), OR
+    /// * [`Self::cavern_noise`] exceeds [`CAVERN_THRESH`] (a cavern
+    ///   opens here).
+    ///
+    /// The caller is responsible for additional gates (surface buffer,
+    /// floor depth) — this method only answers "does the cave noise
+    /// say air?" so the layer pass can compose it with its own rules.
+    fn is_cave(&self, wx: i32, wy: i32, wz: i32) -> bool {
+        let p = [wx as f64, wy as f64, wz as f64];
+        let a = self.tunnel_a.get(p);
+        let b = self.tunnel_b.get(p);
+        // Tunnel: each noise field's zero level set is a smooth warped
+        // sheet through the world. The intersection of two such sheets
+        // is a 1D curve — the actual tunnel centre. Widening each band
+        // from "zero" to "near-zero" thickens the sheets into slabs,
+        // and their intersection thickens from a curve to a tube of
+        // roughly TUNNEL_BAND × TUNNEL_BAND cross-section. With our
+        // band of 0.08 that's tubes ~2-3 blocks across.
+        if a.abs() < TUNNEL_BAND && b.abs() < TUNNEL_BAND {
+            return true;
+        }
+        // Cavern: a single noise's high-value region. Lower frequency
+        // means the region is larger when it occurs, producing a
+        // "room" instead of a patch of tunnel.
+        self.cavern_noise.get(p) > CAVERN_THRESH
     }
 
     /// Per-column terrain decisions: surface height + biome weights.
@@ -138,11 +229,19 @@ impl Generator {
         // Mountains start contributing at mountainness_raw > -0.05 and
         // fully kick in around 0.45.
         let mountain_weight = smoothstep(-0.05, 0.45, mountainness_raw);
-        // Only the *positive* half of the mountain noise contributes —
-        // negative values would just deepen valleys, which the base
-        // heightmap already does. `pow` accentuates peakiness.
+        // Ridged mountain lift: instead of using the raw positive half
+        // of the mountain noise (which peaks at scattered local maxima
+        // and looks like isolated bumps), invert the absolute value so
+        // the peaks now sit along the noise's *zero-crossing curves*.
+        // Those zero-crossings are continuous lines through the field,
+        // so the resulting elevation traces out connected mountain
+        // ridges — the silhouette of a real range, with sharp crests
+        // dropping into valleys on either side. `pow(2)` accentuates
+        // the ridge crests so the peaks read as sharp instead of
+        // gently domed.
         let mountain_raw = self.mountain_noise.get(xz) as f32;
-        let mountain_lift = mountain_raw.max(0.0).powf(1.4) * MOUNTAIN_PEAK * mountain_weight;
+        let ridge = (1.0 - mountain_raw.abs()).max(0.0).powf(2.0);
+        let mountain_lift = ridge * MOUNTAIN_PEAK * mountain_weight;
         let height = (BASE_HEIGHT + base * AMPLITUDE + mountain_lift) as i32;
 
         let desertness = self.desert_map.get(xz) as f32;
@@ -185,12 +284,20 @@ impl Generator {
                         }
                     } else {
                         let depth = height - wy;
-                        let cave = depth > 3
-                            && self
-                                .cave_noise
-                                .get([wx as f64, wy as f64, wz as f64])
-                                .abs()
-                                > CAVE_THRESH;
+                        // Cave-carve gates:
+                        // * Surface buffer: never carve through the
+                        //   topmost CAVE_SURFACE_BUFFER blocks, so the
+                        //   grass cap stays intact.
+                        // * Floor: don't carve below CAVE_FLOOR_Y so
+                        //   the bottom of the vertical load radius has
+                        //   *something* in it (otherwise the player
+                        //   could see straight down into the sky
+                        //   colour from deep underground).
+                        // * Noise: tunnel-intersection OR cavern (see
+                        //   `is_cave` for the geometry of each).
+                        let cave = depth > CAVE_SURFACE_BUFFER
+                            && wy > CAVE_FLOOR_Y
+                            && self.is_cave(wx, wy, wz);
                         if cave {
                             if wy <= SEA_LEVEL {
                                 Block::Water
@@ -420,6 +527,7 @@ fn tree_hash(seed: u64, x: i32, z: i32, salt: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::voxel::chunk::CHUNK_VOL;
     use glam::IVec3;
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -458,11 +566,9 @@ mod tests {
     /// future runs catch unintentional behavioural drift.
     #[test]
     fn golden_seed42_chunk_0_2_0() {
-        // Hash captured after Task 39's visual confirmation; updated
-        // again after the v0.1.10 tree-placement pass changed chunk
-        // contents. Locks here so any future change to noise/parameters
-        // surfaces immediately.
-        const GOLDEN_42_002: u64 = 0x299D_48F9_3303_B701;
+        // Hash refreshed after the tunnel/cavern + ridged-mountain pass.
+        // Update again whenever an intentional generator change lands.
+        const GOLDEN_42_002: u64 = 0xBC69_F574_93D7_BDC6;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);
@@ -471,6 +577,55 @@ mod tests {
             println!("UPDATE GOLDEN_42_002 to: 0x{:016X}", actual);
         } else {
             assert_eq!(actual, GOLDEN_42_002, "worldgen output changed");
+        }
+    }
+
+    /// Cave system sanity: somewhere underground (below sea level) we
+    /// should see a non-trivial amount of carved-out air, with both
+    /// solid stone present *and* air present in the same chunk. The
+    /// previous Swiss-cheese carving could go either too-empty (huge
+    /// blob caves) or too-solid (sparse pock-marks); this asserts the
+    /// middle ground where caves read as a tunnel network.
+    #[test]
+    fn underground_chunk_has_both_caves_and_solid() {
+        let g = Generator::new(42);
+        // Chunk at y=-1 ⇒ world y range [-32, -1], comfortably below
+        // sea level and above CAVE_FLOOR_Y, so cave carving is
+        // unconditional aside from the noise check.
+        let mut c = DenseChunk::empty();
+        g.fill_chunk(ChunkCoord(IVec3::new(0, -1, 0)), &mut c);
+        let mut air = 0;
+        let mut stone = 0;
+        for b in c.blocks.iter() {
+            match b {
+                Block::Air | Block::Water => air += 1,
+                Block::Stone => stone += 1,
+                _ => {}
+            }
+        }
+        assert!(stone > CHUNK_VOL / 4, "expected mostly stone, got {stone}");
+        assert!(
+            air > CHUNK_VOL / 100,
+            "expected at least 1% carved air to prove caves carve anywhere, got {air}"
+        );
+    }
+
+    /// Ridged mountains: the surface should still respect the height
+    /// cap (BASE + AMPLITUDE + MOUNTAIN_PEAK = 136), so no column
+    /// pokes above the chunk-stack vertical radius. Catches a future
+    /// refactor that accidentally drops the cap.
+    #[test]
+    fn ridged_mountains_respect_height_cap() {
+        let g = Generator::new(42);
+        for cx in -2..=2 {
+            for cz in -2..=2 {
+                let col = g.column_data(cx * 16, cz * 16);
+                assert!(
+                    col.height as f32 <= BASE_HEIGHT + AMPLITUDE + MOUNTAIN_PEAK,
+                    "column height {} broke the cap at ({cx}, {cz})",
+                    col.height
+                );
+            }
         }
     }
 
