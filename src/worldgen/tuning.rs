@@ -69,15 +69,16 @@ pub const WARP_AMPLITUDE: f32 = 40.0;
 pub const WARP_PERIOD: f32 = 400.0;
 /// Slope (in blocks-per-block) above which a column is exposed as a
 /// cliff: surface block becomes `Stone` and the dirt sub-surface is
-/// skipped.
-///
-/// Raised from 1.5 → 2.2 in the cliff-strip fix. The previous value
-/// was tripped by the ridge-band falloff itself, which produced
-/// straight cliff strips parallel to plate boundaries. 2.2 reserves
-/// cliff exposure for genuinely steep terrain (real cliff faces,
-/// canyon walls, sheer mountain sides) instead of the gentler
-/// gradients found on ridge flanks.
+/// skipped. Measured over an ±4-block stencil so small-scale FBM
+/// jitter doesn't register.
 pub const CLIFF_SLOPE_THRESH: f32 = 2.2;
+/// Minimum `h_pre` (world Y) for cliff exposure to apply at all.
+/// Reserved for genuinely tall terrain: any column with `h_pre <
+/// SEA_LEVEL + 28` gets its biome surface material regardless of
+/// slope, so coastal bluffs and low ridges never read as continuous
+/// stone walls. Cliff exposure then becomes a feature of high
+/// mountains only.
+pub const CLIFF_MIN_HEIGHT: i32 = SEA_LEVEL + 28;
 /// Hard upper cap on final terrain Y. Keeps tallest peaks inside the
 /// vertical chunk-load radius.
 pub const MAX_TERRAIN_Y: i32 = 140;

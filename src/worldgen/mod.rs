@@ -448,17 +448,29 @@ impl Generator {
                                     Block::Grass
                                 }
                             }
-                        } else if depth <= 3 {
-                            // Cliff faces are stone all the way down —
-                            // no dirt under sheer rock. Everywhere
-                            // else gets the standard dirt cap.
-                            if col.is_cliff {
-                                Block::Stone
-                            } else {
-                                Block::Dirt
-                            }
                         } else {
-                            Block::Stone
+                            // Subsurface block selection. Cliff faces
+                            // skip the dirt cap (sheer rock). Every
+                            // other column's dirt cap extends down
+                            // to one block below sea level (with a
+                            // 3-block floor for sub-sea-level
+                            // columns), so any block above the
+                            // waterline reads as soil rather than
+                            // bedrock. Stone takes over below that
+                            // line. Visible result: hills and
+                            // mountain *flanks* look like earth
+                            // banks; cliffs still show stone where
+                            // the slope rule has fired.
+                            let dirt_cap = if col.is_cliff {
+                                0
+                            } else {
+                                (height - SEA_LEVEL + 2).max(3)
+                            };
+                            if depth <= dirt_cap {
+                                Block::Dirt
+                            } else {
+                                Block::Stone
+                            }
                         }
                     };
                     out.set(local, block);
@@ -638,7 +650,10 @@ impl Generator {
 struct ColumnData {
     /// Surface height in world Y, post-carve, clamped.
     height: i32,
-    /// True if the column's `h_pre` slope exceeds `CLIFF_SLOPE_THRESH`.
+    /// True if the column's `h_pre` slope exceeds `CLIFF_SLOPE_THRESH`
+    /// AND its elevation is at/above `CLIFF_MIN_HEIGHT`. The
+    /// elevation gate means low / coastal terrain never cliff-
+    /// exposes, regardless of slope.
     is_cliff: bool,
     /// Jitter-perturbed `desertness` noise value. Used by the
     /// sand/grass transition band: inside the band on the grass side
@@ -958,11 +973,11 @@ mod tests {
     /// future runs catch unintentional behavioural drift.
     #[test]
     fn golden_seed42_chunk_0_2_0() {
-        // Hash re-baselined for the cliff-strip fix: wider
-        // `BOUNDARY_RIDGE_WIDTH` (0.12 → 0.30) and higher
-        // `CLIFF_SLOPE_THRESH` (1.5 → 2.2) so the ridge falloff no
-        // longer trips cliff exposure in a straight strip.
-        const GOLDEN_42_002: u64 = 0xC4CA_9989_CEA6_C50E;
+        // Hash re-baselined for the dirt-cap fix: subsurface dirt
+        // now extends down toward sea level for every column (up to
+        // 24 blocks) so coastal hills don't expose stone above the
+        // waterline as a continuous gray wall.
+        const GOLDEN_42_002: u64 = 0xD918_5955_6748_ACBB;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);

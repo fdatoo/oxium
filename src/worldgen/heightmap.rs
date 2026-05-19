@@ -89,29 +89,70 @@ impl HeightmapNoise {
     }
 
     /// Magnitude of the horizontal gradient of `h_pre` at `(wx, wz)`,
-    /// in blocks per block. Cheap finite-difference: samples
-    /// `h_pre` at `±2` in each axis and takes the max of the two
-    /// absolute deltas. Used by `surface.rs::is_cliff`.
+    /// in blocks per block. Cheap finite-difference over an 8-block
+    /// window (±4 blocks each axis). Wider than the obvious ±1 stencil
+    /// because we want cliff detection to fire only on genuinely
+    /// large-scale steepness — small-scale FBM jitter and natural
+    /// land-to-ocean shelf transitions should *not* register as
+    /// cliffs (they were producing straight cliff strips along
+    /// coastlines and plate boundaries).
     pub fn slope_at(&self, seed: u64, wx: f32, wz: f32) -> f32 {
-        // 2-block step is small enough to catch sharp mountain crests
-        // and wide enough to ignore the inevitable per-block jitter
-        // from the warped FBM.
-        let step = 2.0;
+        let step = 4.0;
         let hxp = self.h_pre(seed, wx + step, wz);
         let hxn = self.h_pre(seed, wx - step, wz);
         let hzp = self.h_pre(seed, wx, wz + step);
         let hzn = self.h_pre(seed, wx, wz - step);
-        // Convert sample-delta to per-block gradient (divide by 2 *
-        // step), then take the larger of the two axis gradients.
         let gx = (hxp - hxn).abs() / (2.0 * step);
         let gz = (hzp - hzn).abs() / (2.0 * step);
         gx.max(gz)
     }
 
+    /// True if any of the ±4-block stencil samples around `(wx, wz)`
+    /// dips below sea level. Used by the subsurface block selector
+    /// to extend the dirt cap of coastal columns down to sea level
+    /// so their water-facing sides don't reveal the underlying
+    /// stone bedrock.
+    pub fn is_coastal(&self, seed: u64, wx: f32, wz: f32) -> bool {
+        let step = 4.0;
+        let sea = SEA_LEVEL as f32;
+        self.h_pre(seed, wx + step, wz) < sea
+            || self.h_pre(seed, wx - step, wz) < sea
+            || self.h_pre(seed, wx, wz + step) < sea
+            || self.h_pre(seed, wx, wz - step) < sea
+    }
+
     /// True if the column is steep enough to expose bare rock.
-    /// Replaces the v1 `MOUNTAIN_ROCK_LINE` rule.
+    /// Two gates before the slope test:
+    ///
+    /// 1. The column's own `h_pre` must be at or above
+    ///    `CLIFF_MIN_HEIGHT` — low-elevation columns never cliff
+    ///    regardless of slope.
+    /// 2. **No stencil sample may dip below sea level.** If any of
+    ///    the ±4-block stencil sample positions falls below
+    ///    `SEA_LEVEL`, the column is *coastal* and we leave its
+    ///    surface to the biome rules (grass / sand / etc) so the
+    ///    shoreline doesn't read as a continuous stone wall.
+    ///
+    /// Only inland cliffs (mountain faces, canyon walls) where the
+    /// terrain stays above sea level across the whole stencil pass
+    /// both gates and then face the slope test.
     pub fn is_cliff(&self, seed: u64, wx: f32, wz: f32) -> bool {
-        self.slope_at(seed, wx, wz) > CLIFF_SLOPE_THRESH
+        let h = self.h_pre(seed, wx, wz);
+        if h < CLIFF_MIN_HEIGHT as f32 {
+            return false;
+        }
+        let step = 4.0;
+        let hxp = self.h_pre(seed, wx + step, wz);
+        let hxn = self.h_pre(seed, wx - step, wz);
+        let hzp = self.h_pre(seed, wx, wz + step);
+        let hzn = self.h_pre(seed, wx, wz - step);
+        let sea = SEA_LEVEL as f32;
+        if hxp < sea || hxn < sea || hzp < sea || hzn < sea {
+            return false;
+        }
+        let gx = (hxp - hxn).abs() / (2.0 * step);
+        let gz = (hzp - hzn).abs() / (2.0 * step);
+        gx.max(gz) > CLIFF_SLOPE_THRESH
     }
 }
 
