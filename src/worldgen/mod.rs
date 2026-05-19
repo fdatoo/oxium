@@ -97,6 +97,27 @@ const FOREST_HUMIDITY: f32 = 0.05;
 const TREE_RATE_PLAINS: u32 = 12;
 /// Tree-cell spawn percentile for forest: dense woodland.
 const TREE_RATE_FOREST: u32 = 55;
+/// Half-width of the "near-zero" band on the river noise. Columns
+/// whose `river_noise` value sits inside `±RIVER_BAND` get carved
+/// down toward the river bed; the smaller the band the narrower the
+/// rivers (and the more often they pinch into thin streams). 0.045
+/// produces 3-5 block wide rivers at our river-noise frequency.
+const RIVER_BAND: f64 = 0.045;
+/// Depth below [`SEA_LEVEL`] that the *centre* of a river column
+/// gets carved to. Edges of the band smoothly interpolate up to the
+/// natural heightmap so a river meandering through a mountain valley
+/// reads as a carved bed, not a sheer drop.
+const RIVER_CARVE: i32 = 3;
+/// Lower bound on the lake noise above which the column belongs to a
+/// lake. Values above `LAKE_THRESH + LAKE_RAMP` are fully inside; the
+/// `LAKE_RAMP` window in between smoothly interpolates so shorelines
+/// taper rather than terracing.
+const LAKE_THRESH: f64 = 0.50;
+const LAKE_RAMP: f64 = 0.12;
+/// Depth below [`SEA_LEVEL`] that a fully-inside lake column carves
+/// to. Lakes are slightly deeper than rivers so they read as wider
+/// bodies of standing water rather than fattened streams.
+const LAKE_CARVE: i32 = 5;
 
 /// World is partitioned into `CELL_SIZE × CELL_SIZE` (XZ) tree cells.
 /// Each cell rolls a deterministic hash to decide whether it contains a
@@ -137,6 +158,15 @@ pub struct Generator {
     /// wetter columns earn denser tree cover, drier columns read as
     /// sparser plains.
     humidity_map: Fbm<Simplex>,
+    /// Single-octave 2D noise whose zero-crossings define river
+    /// centerlines. Smooth (1 octave) so the rivers meander as
+    /// continuous curves instead of jagging back on themselves
+    /// every few blocks.
+    river_noise: Fbm<Simplex>,
+    /// 2D noise whose high-value regions define lake basins. Higher
+    /// period than the river noise so lakes are larger and less
+    /// frequent — they punctuate the landscape rather than tiling it.
+    lake_noise: Fbm<Simplex>,
     /// First of two 3D noise fields whose zero-crossings intersect to
     /// form cave tunnels. By itself this would carve a single warped
     /// sheet through the world; combined with [`Self::tunnel_b`] only
@@ -195,6 +225,21 @@ impl Generator {
             .set_octaves(2)
             .set_frequency(1.0 / 512.0)
             .set_persistence(0.5);
+        // River noise: 1 octave for smooth, gently curving zero
+        // crossings — extra octaves would give the river a jagged
+        // bank profile. Period ~150 blocks so rivers feel like
+        // walkable distances, not micro-streams or world-spanning
+        // canals.
+        let river_noise = Fbm::<Simplex>::new(seed.wrapping_add(10) as u32)
+            .set_octaves(1)
+            .set_frequency(1.0 / 150.0);
+        // Lake noise: longer period than the river so lake basins
+        // are the "rare, large" feature. 2 octaves so the shoreline
+        // has some shape instead of being a pure smooth blob.
+        let lake_noise = Fbm::<Simplex>::new(seed.wrapping_add(11) as u32)
+            .set_octaves(2)
+            .set_frequency(1.0 / 280.0)
+            .set_persistence(0.5);
         // Tunnel system: two independent 3D noises at the same frequency.
         // 2 octaves keeps the surfaces relatively smooth — too many
         // octaves and the tunnel walls turn into ragged stair-steps.
@@ -222,6 +267,8 @@ impl Generator {
             desert_map,
             temperature_map,
             humidity_map,
+            river_noise,
+            lake_noise,
             tunnel_a,
             tunnel_b,
             cavern_noise,
@@ -286,7 +333,46 @@ impl Generator {
         let mountain_raw = self.mountain_noise.get(xz) as f32;
         let ridge = (1.0 - mountain_raw.abs()).max(0.0).powf(2.0);
         let mountain_lift = ridge * MOUNTAIN_PEAK * mountain_weight;
-        let height = (BASE_HEIGHT + base * AMPLITUDE + mountain_lift) as i32;
+        let mut height = (BASE_HEIGHT + base * AMPLITUDE + mountain_lift) as i32;
+
+        // Rivers and lakes carve the heightmap downward; the
+        // sea-level flood pass later turns the carved depression into
+        // water. Two independent strengths:
+        //
+        // * **River:** a thin band around the river noise's
+        //   zero-crossing. Strength peaks at the centerline (1.0)
+        //   and falls linearly to 0 at the band edge — interior of
+        //   the river is fully carved down to the bed, banks taper
+        //   smoothly back into the natural heightmap.
+        // * **Lake:** a wide region where the lake noise sits above
+        //   `LAKE_THRESH`. Smoothstep over a `LAKE_RAMP` window
+        //   keeps the shoreline soft instead of stair-stepped.
+        //
+        // When both apply to the same column we lerp toward whichever
+        // bed is deeper (lakes are deeper), then apply the strongest
+        // of the two carve weights — overlapping a river into a lake
+        // shouldn't make the water *less* deep.
+        let r_noise = self.river_noise.get(xz) as f32;
+        let river_strength =
+            (1.0 - (r_noise.abs() / RIVER_BAND as f32)).clamp(0.0, 1.0);
+        let l_noise = self.lake_noise.get(xz) as f32;
+        let lake_strength = smoothstep(
+            LAKE_THRESH as f32,
+            (LAKE_THRESH + LAKE_RAMP) as f32,
+            l_noise,
+        );
+        let carve = river_strength.max(lake_strength);
+        if carve > 0.0 {
+            let bed = if lake_strength > river_strength {
+                (SEA_LEVEL - LAKE_CARVE) as f32
+            } else {
+                (SEA_LEVEL - RIVER_CARVE) as f32
+            };
+            // Lerp from natural height toward the bed by `carve`.
+            // Casting back to `i32` truncates which is fine — a
+            // sub-block fractional height doesn't show.
+            height = (height as f32 * (1.0 - carve) + bed * carve) as i32;
+        }
 
         let desertness = self.desert_map.get(xz) as f32;
         // Hard cutoff (no transition smoothing) so the desert/grass
@@ -708,7 +794,7 @@ mod tests {
     fn golden_seed42_chunk_0_2_0() {
         // Hash refreshed after the tunnel/cavern + ridged-mountain pass.
         // Update again whenever an intentional generator change lands.
-        const GOLDEN_42_002: u64 = 0xB396_96E4_79ED_4A1C;
+        const GOLDEN_42_002: u64 = 0xC2A6_4558_3088_5B74;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);
@@ -826,6 +912,49 @@ mod tests {
             "tundra surface block at ({wx}, {wz}) y={} was {:?}, expected Snow",
             col.height,
             surface
+        );
+    }
+
+    /// Rivers and lakes should produce a non-trivial amount of
+    /// inland water — somewhere in a generous scan we expect at
+    /// least one column carved below sea level *and* high enough
+    /// that the carve is the cause (not just baseline ocean from
+    /// the height noise). Catches future refactors that
+    /// inadvertently neutralise the carve pass.
+    #[test]
+    fn rivers_or_lakes_carve_inland_water() {
+        let g = Generator::new(42);
+        // A "carved" column is one whose height landed *below* sea
+        // level while the heightmap *without* the river/lake pass
+        // would have stayed on dry land. We approximate "would have
+        // stayed dry" by sampling far from any river/lake band —
+        // but since `column_data` already runs the carve, easier to
+        // just count columns at SEA_LEVEL-1 or below where the
+        // surrounding 5-block disc has at least one dry column.
+        // That rules out the smooth ocean background.
+        let mut inland_water_columns = 0usize;
+        for wz in (-512..512).step_by(4) {
+            for wx in (-512..512).step_by(4) {
+                let h = g.column_data(wx, wz).height;
+                if h >= SEA_LEVEL {
+                    continue;
+                }
+                // Inland if any neighbour 24 blocks away is above
+                // sea level.
+                let neighbours = [
+                    g.column_data(wx + 24, wz).height,
+                    g.column_data(wx - 24, wz).height,
+                    g.column_data(wx, wz + 24).height,
+                    g.column_data(wx, wz - 24).height,
+                ];
+                if neighbours.iter().any(|&n| n > SEA_LEVEL + 4) {
+                    inland_water_columns += 1;
+                }
+            }
+        }
+        assert!(
+            inland_water_columns > 0,
+            "expected at least one inland water column from river/lake carving, found none"
         );
     }
 
