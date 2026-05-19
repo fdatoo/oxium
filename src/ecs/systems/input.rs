@@ -165,6 +165,21 @@ pub fn apply_input(ecs: &mut GameEcs, buf: &InputBuf, state: &mut InputState) {
         };
     }
 
+    // Double-tap Space within 280 ms also toggles Walk ⇄ Fly.
+    const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(280);
+    if buf.key_pressed_this_frame.contains(&KeyCode::Space) {
+        let now = Instant::now();
+        if state.last_space_press_at.map_or(false, |t| now - t <= DOUBLE_TAP_WINDOW) {
+            movement.mode = match movement.mode {
+                MovementMode::Walk => MovementMode::Fly,
+                MovementMode::Fly  => MovementMode::Walk,
+            };
+            state.last_space_press_at = None;
+        } else {
+            state.last_space_press_at = Some(now);
+        }
+    }
+
     // Hold-to-act with `ACTION_REPEAT` cooldown. Press fires immediately
     // (edge flag), then while still held, fires once every cooldown.
     // Release resets the timer so the *next* tap fires immediately too.
@@ -251,6 +266,7 @@ mod tests {
     use crate::ecs::GameEcs;
     use glam::Vec3;
     use std::thread::sleep;
+    use winit::keyboard::KeyCode;
 
     fn ecs() -> GameEcs { GameEcs::new(Vec3::new(0.0, 64.0, 0.0)) }
 
@@ -303,5 +319,53 @@ mod tests {
         buf.lmb_down = false;
         apply_input(&mut e, &buf, &mut st);
         assert!(st.last_break_at.is_none());
+    }
+
+    #[test]
+    fn double_tap_space_toggles_fly() {
+        let mut e = ecs();
+        let mut buf = InputBuf::default();
+        let mut st = InputState::default();
+        buf.key_pressed_this_frame.insert(KeyCode::Space);
+        buf.keys_down.insert(KeyCode::Space);
+        apply_input(&mut e, &buf, &mut st);
+        let mv = e.world.query_one::<&crate::ecs::components::Movement>(e.player)
+            .unwrap().get().unwrap().mode;
+        assert_eq!(mv, crate::ecs::components::MovementMode::Walk);
+
+        buf.key_pressed_this_frame.clear();
+        buf.key_pressed_this_frame.insert(KeyCode::Space);
+        apply_input(&mut e, &buf, &mut st);
+        let mv = e.world.query_one::<&crate::ecs::components::Movement>(e.player)
+            .unwrap().get().unwrap().mode;
+        assert_eq!(mv, crate::ecs::components::MovementMode::Fly);
+    }
+
+    #[test]
+    fn slow_space_presses_do_not_toggle() {
+        let mut e = ecs();
+        let mut buf = InputBuf::default();
+        let mut st = InputState::default();
+        buf.key_pressed_this_frame.insert(KeyCode::Space);
+        apply_input(&mut e, &buf, &mut st);
+        sleep(Duration::from_millis(350));
+        buf.key_pressed_this_frame.clear();
+        buf.key_pressed_this_frame.insert(KeyCode::Space);
+        apply_input(&mut e, &buf, &mut st);
+        let mv = e.world.query_one::<&crate::ecs::components::Movement>(e.player)
+            .unwrap().get().unwrap().mode;
+        assert_eq!(mv, crate::ecs::components::MovementMode::Walk);
+    }
+
+    #[test]
+    fn f_still_toggles_fly() {
+        let mut e = ecs();
+        let mut buf = InputBuf::default();
+        let mut st = InputState::default();
+        buf.key_pressed_this_frame.insert(KeyCode::KeyF);
+        apply_input(&mut e, &buf, &mut st);
+        let mv = e.world.query_one::<&crate::ecs::components::Movement>(e.player)
+            .unwrap().get().unwrap().mode;
+        assert_eq!(mv, crate::ecs::components::MovementMode::Fly);
     }
 }
