@@ -392,6 +392,141 @@ fn build_system(
 
 // ── Per-chunk carve ──────────────────────────────────────────────────
 
+/// Soft SDF: positive inside chambers / tunnels, 0 outside.
+/// Peak `CAVE_SDF_INTENSITY` deep inside; tapers smoothly to 0 at
+/// the strict geometric boundary. The density-based fill chunk
+/// subtracts this from the per-voxel density so cave walls have
+/// soft, chamfered edges instead of the pixel-sharp ellipsoid /
+/// capsule boundaries.
+pub fn cave_sdf(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> f32 {
+    let p = Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
+    let mut max_sdf: f32 = 0.0;
+    for sys in systems {
+        if !system_bb_contains(sys, wx, wy, wz) {
+            continue;
+        }
+        // Chamber ellipsoid: normalised squared distance. <= 1 inside,
+        // > 1 outside. Soft falloff over the [0, 1] range.
+        for c in &sys.chambers {
+            let d = p - c.center;
+            let ratio = (d.x / c.radii.x).powi(2)
+                + (d.y / c.radii.y).powi(2)
+                + (d.z / c.radii.z).powi(2);
+            if ratio <= 1.0 {
+                // 1.0 at center → 0.0 at boundary.
+                let sdf = (1.0 - ratio) * CAVE_SDF_INTENSITY;
+                if sdf > max_sdf {
+                    max_sdf = sdf;
+                }
+            }
+        }
+        // Tunnel capsule along control polyline.
+        for t in &sys.tunnels {
+            if t.control_points.len() < 2 {
+                continue;
+            }
+            for i in 0..t.control_points.len() - 1 {
+                let a = t.control_points[i];
+                let b = t.control_points[i + 1];
+                let ab = b - a;
+                let len_sq = ab.length_squared();
+                if len_sq < 1e-6 {
+                    continue;
+                }
+                let t_param = ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+                let closest = a + ab * t_param;
+                let dist = (p - closest).length();
+                if dist <= t.radius {
+                    let sdf = (1.0 - dist / t.radius) * CAVE_SDF_INTENSITY;
+                    if sdf > max_sdf {
+                        max_sdf = sdf;
+                    }
+                }
+            }
+        }
+    }
+    max_sdf
+}
+
+/// Soft SDF for entrance features (sinkholes, cliff mouths,
+/// skylights). Always punches through regardless of surface buffer;
+/// peak intensity twice the regular cave SDF so entrances reliably
+/// breach the density even right at the surface.
+pub fn entrance_sdf(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> f32 {
+    let p = Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
+    let mut max_sdf: f32 = 0.0;
+    for sys in systems {
+        if !system_bb_contains(sys, wx, wy, wz) {
+            continue;
+        }
+        for e in &sys.entrances {
+            let ch = match sys.chambers.get(e.chamber_idx as usize) {
+                Some(c) => c,
+                None => continue,
+            };
+            let intensity = CAVE_SDF_INTENSITY * 2.0;
+            match e.kind {
+                EntranceKind::Sinkhole => {
+                    let chamber_top_y = ch.center.y + ch.radii.y;
+                    if wy as f32 >= chamber_top_y - 1.0
+                        && wy as f32 <= e.surface.y as f32
+                    {
+                        let dx = p.x - e.surface.x as f32;
+                        let dz = p.z - e.surface.z as f32;
+                        let depth = (e.surface.y as f32 - wy as f32).max(0.0);
+                        let max_depth = (e.surface.y as f32 - chamber_top_y).max(1.0);
+                        let r = 2.0 + (depth / max_depth) * 1.0;
+                        let d = (dx * dx + dz * dz).sqrt();
+                        if d <= r {
+                            let sdf = (1.0 - d / r) * intensity;
+                            if sdf > max_sdf {
+                                max_sdf = sdf;
+                            }
+                        }
+                    }
+                }
+                EntranceKind::Skylight => {
+                    let chamber_top_y = ch.center.y + ch.radii.y;
+                    if wy as f32 >= chamber_top_y - 1.0
+                        && wy as f32 <= e.surface.y as f32
+                    {
+                        let dx = p.x - e.surface.x as f32;
+                        let dz = p.z - e.surface.z as f32;
+                        let d = (dx * dx + dz * dz).sqrt();
+                        if d <= 1.5 {
+                            let sdf = (1.0 - d / 1.5) * intensity;
+                            if sdf > max_sdf {
+                                max_sdf = sdf;
+                            }
+                        }
+                    }
+                }
+                EntranceKind::CliffMouth => {
+                    let chamber_p = ch.center;
+                    let cliff_p =
+                        Vec3::new(e.surface.x as f32, chamber_p.y, e.surface.z as f32);
+                    let ab = cliff_p - chamber_p;
+                    let len_sq = ab.length_squared();
+                    if len_sq < 1e-6 {
+                        continue;
+                    }
+                    let t_param =
+                        ((p - chamber_p).dot(ab) / len_sq).clamp(0.0, 1.0);
+                    let closest = chamber_p + ab * t_param;
+                    let d = (p - closest).length();
+                    if d <= 2.5 {
+                        let sdf = (1.0 - d / 2.5) * intensity;
+                        if sdf > max_sdf {
+                            max_sdf = sdf;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    max_sdf
+}
+
 /// Does the cell at `(wx, wy, wz)` lie inside any chamber or tunnel
 /// of any cave system whose bounding box covers it? Surface buffer is
 /// enforced *outside* this function; this only answers the geometric

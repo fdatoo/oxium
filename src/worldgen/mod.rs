@@ -86,10 +86,10 @@ pub use crate::worldgen::tuning::SEA_LEVEL;
 // All other tuning constants live in `worldgen::tuning`. The names
 // below are imported into this module's scope for ergonomics.
 use crate::worldgen::tuning::{
-    BIOME_JITTER_AMPL, BIOME_JITTER_PERIOD, CAVE_FLOOR_Y, CAVE_SURFACE_BUFFER,
-    COLD_SNOW_MIN_ABOVE_SEA, COLD_THRESHOLD, FOREST_HUMIDITY, SAND_TRANSITION_BAND,
-    SNOW_LINE, SURFACE_BAND, TREE_CELL_SIZE, TREE_MARGIN, TREE_RATE_FOREST,
-    TREE_RATE_PLAINS,
+    BIOME_JITTER_AMPL, BIOME_JITTER_PERIOD, CAVE_FLOOR_Y, CAVE_SDF_INTENSITY,
+    CAVE_SURFACE_BUFFER, COLD_SNOW_MIN_ABOVE_SEA, COLD_THRESHOLD, FOREST_HUMIDITY,
+    SAND_TRANSITION_BAND, SNOW_LINE, SURFACE_BAND, TREE_CELL_SIZE, TREE_MARGIN,
+    TREE_RATE_FOREST, TREE_RATE_PLAINS,
 };
 
 /// Pre-built noise fields for one world seed.
@@ -353,34 +353,48 @@ impl Generator {
                     let wy = origin.y + y as i32;
                     let local = LocalPos(UVec3::new(x, y, z));
 
-                    // Density-driven solid/air: full eval inside the
-                    // surface band; cheap fallback outside.
-                    let solid_from_density = if wy < height - SURFACE_BAND {
-                        true
-                    } else if wy > height + SURFACE_BAND {
-                        false
-                    } else {
-                        self.density.evaluate(h_target, wx, wy, wz) > 0.0
-                    };
-
-                    // Cave overrides (kept boolean for PR A; soft SDF
-                    // arrives in PR B). The surface buffer uses the
-                    // heightmap target as the reference depth — the
-                    // 3D noise can shift the actual surface by a few
-                    // blocks but caves should still respect the
-                    // intended buffer.
+                    // PR B: density evaluated for every voxel — no
+                    // surface-band short-circuit, so the 3D noise can
+                    // dig overhangs / floating spurs anywhere. Caves
+                    // contribute as a soft SDF subtracted from
+                    // density: chamber walls fade smoothly at the
+                    // density crossing instead of being pixel-sharp
+                    // ellipsoid boundaries.
+                    //
+                    // Deep underground the bias term (`h_target - wy)
+                    // / DENSITY_FALLOFF`) grows without bound, which
+                    // would otherwise prevent cave SDFs from carving
+                    // air at any depth. We cap the density at a
+                    // small positive value *for the cave-vs-density
+                    // comparison only* whenever a cave contribution
+                    // is in play — preserving the unbounded bias
+                    // for natural terrain while letting caves carve
+                    // at any depth.
                     let approx_depth = height - wy;
-                    let in_entrance = !cave_systems.is_empty()
-                        && caves::entrance_air(wx, wy, wz, &cave_systems);
-                    let in_chamber_or_tunnel = approx_depth > CAVE_SURFACE_BUFFER
-                        && !cave_systems.is_empty()
-                        && caves::cave_air(wx, wy, wz, &cave_systems);
-                    let in_wormhole = approx_depth > CAVE_SURFACE_BUFFER
-                        && self.wormhole_noise.carve(wx, wy, wz);
-                    let cave_air = wy > CAVE_FLOOR_Y
-                        && (in_entrance || in_chamber_or_tunnel || in_wormhole);
+                    let raw_density = self.density.evaluate(h_target, wx, wy, wz);
 
-                    let solid = solid_from_density && !cave_air;
+                    let mut cave_contribution = 0.0_f32;
+                    if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y {
+                        if approx_depth > CAVE_SURFACE_BUFFER {
+                            cave_contribution +=
+                                caves::cave_sdf(wx, wy, wz, &cave_systems);
+                        }
+                        cave_contribution +=
+                            caves::entrance_sdf(wx, wy, wz, &cave_systems);
+                    }
+                    if approx_depth > CAVE_SURFACE_BUFFER
+                        && wy > CAVE_FLOOR_Y
+                        && self.wormhole_noise.carve(wx, wy, wz)
+                    {
+                        cave_contribution += CAVE_SDF_INTENSITY;
+                    }
+
+                    let density_for_compare = if cave_contribution > 0.0 {
+                        raw_density.min(2.0)
+                    } else {
+                        raw_density
+                    };
+                    let solid = (density_for_compare - cave_contribution) > 0.0;
 
                     let block = if !solid {
                         // Air — flood with water at/below the
@@ -1080,14 +1094,20 @@ mod tests {
     #[test]
     fn cold_biome_caps_with_snow() {
         let g = Generator::new(42);
-        let min_h = SEA_LEVEL + COLD_SNOW_MIN_ABOVE_SEA + SURFACE_BAND + 4;
+        // With 3D density the surface can deviate from `col.height`
+        // by up to `DENSITY_FALLOFF` (~4) blocks. Pick a column
+        // where `col.height` is comfortably between the cold-snow
+        // floor and the snow line so the actual surface lands in
+        // the cold-biome cap band.
+        let min_h = SEA_LEVEL + COLD_SNOW_MIN_ABOVE_SEA + 6;
+        let max_h = SNOW_LINE - 6;
         let mut found: Option<(i32, i32)> = None;
         'outer: for wz in (-1024..1024).step_by(8) {
             for wx in (-1024..1024).step_by(8) {
                 let col = g.column_data(wx, wz);
                 if col.biome == Biome::Tundra
                     && col.height >= min_h
-                    && col.height < SNOW_LINE - SURFACE_BAND - 4
+                    && col.height < max_h
                     && !col.is_cliff
                 {
                     found = Some((wx, wz));

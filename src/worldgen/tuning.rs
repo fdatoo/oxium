@@ -100,12 +100,17 @@ pub const RELIEF_AMP: f32 = 1.0;
 /// Spatial period of the 3D relief noise's base octave. Smaller →
 /// bumpier surface; larger → smoother.
 pub const RELIEF_PERIOD: f32 = 32.0;
-/// Half-width of the band around `h_target` where 3D density is
-/// evaluated per voxel. Outside this band, voxels are assumed solid
-/// (deep underground) or air (well above the surface). PR A ships
-/// `8`; PR B raises this to a much larger value so the noise can
-/// dig actual overhangs into the terrain.
-pub const SURFACE_BAND: i32 = 8;
+/// Half-width of the band around `h_target` used by the
+/// `topmost_solid` helper that finds tree-trunk anchor points.
+/// `fill_chunk` no longer short-circuits density evaluation by this
+/// band (PR B evaluates 3D density at every voxel so overhangs can
+/// appear anywhere); only the tree placer uses it as a search bound.
+pub const SURFACE_BAND: i32 = 16;
+/// Peak intensity of the cave SDF carve. The 3D density (bias +
+/// noise) ranges roughly in `[-2, +2]`; setting the SDF intensity
+/// to `4.0` means cave interiors definitely carve to air and
+/// chamber walls soften gracefully where the SDF tapers to zero.
+pub const CAVE_SDF_INTENSITY: f32 = 4.0;
 
 // ── Rivers (fine) ─────────────────────────────────────────────────────
 
