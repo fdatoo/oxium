@@ -29,32 +29,32 @@ use std::sync::Arc;
 /// the FIFO channel to fill with gen results so far ahead of mesh results
 /// that meshing never gets a turn at the receiver.
 const MAX_PER_FRAME: usize = 64;
-/// Separate cap on `Meshed` results — those land on `upload_chunk_mesh`
-/// which creates a fresh wgpu vertex/index buffer + bind group on the
-/// main thread. Profiling caught a 61 ms `drain_jobs` spike right
-/// after a player edit: 64 mesh results all landed at once and the
-/// per-upload ~1 ms Metal buffer-create cost compounded. Capping
-/// uploads per frame keeps the worst-case stall under ~10 ms even
-/// when the worker pool floods us with completed meshes.
-const MAX_MESH_UPLOADS_PER_FRAME: usize = 8;
 
 /// Drain up to [`MAX_PER_FRAME`] job results and act on them.
+///
+/// We deliberately do NOT cap `Meshed` results separately. A previous
+/// attempt to cap at 8/frame fixed a 61 ms spike during cascade-driven
+/// mesh bursts but broke a more important property: while the world
+/// is streaming in, `JobResult::Generated` handler spawns up to 9
+/// downstream mesh jobs per generated chunk (self + 6 neighbours +
+/// LOD1 + LOD2), so mesh-result production rate can easily exceed
+/// any small per-frame cap. Capping meant a player-edit's mesh
+/// queued behind streaming traffic effectively never reached the
+/// GPU — the user reported breaks where collision flipped (world
+/// data correct) but the block stayed visible. The 61 ms spike
+/// happens once during initial cascade; the broken-edit symptom
+/// happens constantly. We pick the spike.
 pub fn drain_jobs(
     world: &mut World,
     jobs: &Jobs,
     renderer: &mut Renderer,
     registry: &Arc<BlockRegistry>,
 ) {
-    let mut mesh_uploads = 0usize;
     for _ in 0..MAX_PER_FRAME {
         let result = match jobs.rx.try_recv() {
             Ok(r) => r,
             Err(_) => return,
         };
-        let is_mesh = matches!(result, JobResult::Meshed { .. });
-        if is_mesh {
-            mesh_uploads += 1;
-        }
         match result {
             JobResult::Generated { coord, data } => {
                 // Install the new chunk first so neighbour mesh jobs can
@@ -151,15 +151,6 @@ pub fn drain_jobs(
                 let neighbors = gather_neighbors(world, coord);
                 jobs.spawn_mesh_lod0(coord, data_arc, neighbors, registry.clone());
             }
-        }
-        // After processing this result, if we were a mesh AND we've
-        // hit the per-frame upload cap, bail. Leftover meshes drain
-        // next frame at the front of the channel; Generated/Relit
-        // results behind them wait too, but only by one frame,
-        // which is fine given we'd otherwise stall for ~60 ms on a
-        // burst of mesh uploads (Metal buffer-create cost).
-        if is_mesh && mesh_uploads >= MAX_MESH_UPLOADS_PER_FRAME {
-            return;
         }
     }
 }
