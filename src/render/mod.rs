@@ -689,13 +689,14 @@ impl Renderer {
             if d_sq > cull_sq {
                 continue;
             }
-            // Frustum cull: skip chunks entirely behind the camera or
-            // out to the sides. Per-frame dot products are cheap;
-            // skipping the draw call avoids the wgpu command-encoding
-            // overhead that the v0.1.32 samply profile identified as
-            // the dominant main-thread cost (`render_pass_end` +
-            // `set_bind_group` × 2 + `set_index_buffer` per chunk).
-            if !aabb_in_frustum(frustum, chunk_min, chunk_max) {
+            // Frustum cull DISABLED temporarily to isolate the
+            // persistent "+X+Z quadrant void" bug. If draws now
+            // hit every loaded chunk in the cull radius and the
+            // void disappears, the frustum extraction or the
+            // AABB test has a sign error.
+            let _ = frustum;
+            let _ = chunk_max;
+            if false && !aabb_in_frustum(frustum, chunk_min, chunk_max) {
                 continue;
             }
             let preferred = Self::pick_lod(eye, center_f);
