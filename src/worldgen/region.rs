@@ -108,9 +108,10 @@ pub struct FineRegion {
 }
 
 impl FineRegion {
-    /// An empty placeholder with all data buffers zero-filled. Used by
-    /// PR 1 as a stand-in until PRs 2–4 fill the fields.
-    fn empty(coord: RegionCoord) -> Self {
+    /// An empty `FineRegion` with all data buffers zero-filled and
+    /// the coord set. Callers populate the fields via the hydrology
+    /// and (PR 4) caves builders.
+    pub fn empty(coord: RegionCoord) -> Self {
         let n = (FINE_CELLS_PER_REGION * FINE_CELLS_PER_REGION) as usize;
         let bitset_bytes = n.div_ceil(8);
         Self {

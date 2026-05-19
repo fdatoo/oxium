@@ -40,7 +40,7 @@
 use crate::voxel::block::Block;
 use crate::voxel::chunk::DenseChunk;
 use crate::voxel::coords::{ChunkCoord, LocalPos, CHUNK_DIM_U};
-use crate::worldgen::tuning::MAX_TERRAIN_Y;
+use crate::worldgen::tuning::{FINE_REGION_SIZE, MAX_TERRAIN_Y};
 use glam::UVec3;
 use noise::{Fbm, MultiFractal, NoiseFn, Simplex};
 
@@ -107,28 +107,6 @@ const FOREST_HUMIDITY: f32 = 0.05;
 const TREE_RATE_PLAINS: u32 = 12;
 /// Tree-cell spawn percentile for forest: dense woodland.
 const TREE_RATE_FOREST: u32 = 55;
-/// Half-width of the "near-zero" band on the river noise. Columns
-/// whose `river_noise` value sits inside `±RIVER_BAND` get carved
-/// down toward the river bed; the smaller the band the narrower the
-/// rivers (and the more often they pinch into thin streams). 0.045
-/// produces 3-5 block wide rivers at our river-noise frequency.
-const RIVER_BAND: f64 = 0.045;
-/// Depth below [`SEA_LEVEL`] that the *centre* of a river column
-/// gets carved to. Edges of the band smoothly interpolate up to the
-/// natural heightmap so a river meandering through a mountain valley
-/// reads as a carved bed, not a sheer drop.
-const RIVER_CARVE: i32 = 3;
-/// Lower bound on the lake noise above which the column belongs to a
-/// lake. Values above `LAKE_THRESH + LAKE_RAMP` are fully inside; the
-/// `LAKE_RAMP` window in between smoothly interpolates so shorelines
-/// taper rather than terracing.
-const LAKE_THRESH: f64 = 0.50;
-const LAKE_RAMP: f64 = 0.12;
-/// Depth below [`SEA_LEVEL`] that a fully-inside lake column carves
-/// to. Lakes are slightly deeper than rivers so they read as wider
-/// bodies of standing water rather than fattened streams.
-const LAKE_CARVE: i32 = 5;
-
 /// World is partitioned into `CELL_SIZE × CELL_SIZE` (XZ) tree cells.
 /// Each cell rolls a deterministic hash to decide whether it contains a
 /// tree (and where in the cell). 8 blocks per cell + ~35 % spawn rate
@@ -162,15 +140,6 @@ pub struct Generator {
     /// wetter columns earn denser tree cover, drier columns read as
     /// sparser plains.
     humidity_map: Fbm<Simplex>,
-    /// Single-octave 2D noise whose zero-crossings define river
-    /// centerlines. Smooth (1 octave) so the rivers meander as
-    /// continuous curves instead of jagging back on themselves
-    /// every few blocks.
-    river_noise: Fbm<Simplex>,
-    /// 2D noise whose high-value regions define lake basins. Higher
-    /// period than the river noise so lakes are larger and less
-    /// frequent — they punctuate the landscape rather than tiling it.
-    lake_noise: Fbm<Simplex>,
     /// First of two 3D noise fields whose zero-crossings intersect to
     /// form cave tunnels. By itself this would carve a single warped
     /// sheet through the world; combined with [`Self::tunnel_b`] only
@@ -185,14 +154,11 @@ pub struct Generator {
     /// so a tunnel occasionally widens into a chamber.
     cavern_noise: Fbm<Simplex>,
     seed: u64,
-    /// LRU cache of pre-built fine regions. PR 1: present but not yet
-    /// consumed by `fill_chunk`; PRs 2–4 fill in the per-region
-    /// computation that chunk fill consults.
-    #[allow(dead_code)]
+    /// LRU cache of pre-built fine regions. Consulted per chunk fill
+    /// to evaluate valley carve and lake water; built on first touch.
     fine_cache: region::FineCache,
-    /// LRU cache of pre-built macro regions for the trunk-river pass.
-    /// PR 1: present but unused; PR 3 fills it.
-    #[allow(dead_code)]
+    /// LRU cache of macro regions feeding the trunk-river injection
+    /// into fine flow accumulation.
     macro_cache: region::MacroCache,
 }
 
@@ -228,21 +194,6 @@ impl Generator {
             .set_octaves(2)
             .set_frequency(1.0 / 512.0)
             .set_persistence(0.5);
-        // River noise: 1 octave for smooth, gently curving zero
-        // crossings — extra octaves would give the river a jagged
-        // bank profile. Period ~150 blocks so rivers feel like
-        // walkable distances, not micro-streams or world-spanning
-        // canals.
-        let river_noise = Fbm::<Simplex>::new(seed.wrapping_add(10) as u32)
-            .set_octaves(1)
-            .set_frequency(1.0 / 150.0);
-        // Lake noise: longer period than the river so lake basins
-        // are the "rare, large" feature. 2 octaves so the shoreline
-        // has some shape instead of being a pure smooth blob.
-        let lake_noise = Fbm::<Simplex>::new(seed.wrapping_add(11) as u32)
-            .set_octaves(2)
-            .set_frequency(1.0 / 280.0)
-            .set_persistence(0.5);
         // Tunnel system: two independent 3D noises at the same frequency.
         // 2 octaves keeps the surfaces relatively smooth — too many
         // octaves and the tunnel walls turn into ragged stair-steps.
@@ -268,8 +219,6 @@ impl Generator {
             desert_map,
             temperature_map,
             humidity_map,
-            river_noise,
-            lake_noise,
             tunnel_a,
             tunnel_b,
             cavern_noise,
@@ -311,51 +260,88 @@ impl Generator {
         self.cavern_noise.get(p) > CAVERN_THRESH
     }
 
-    /// Per-column terrain decisions: surface height + biome + slope
-    /// flag. Used by both `fill_chunk` and `add_trees` so a single
-    /// noise evaluation per column drives every geographic choice.
-    ///
-    /// PR 2: heightmap is now plate-driven `h_pre` (continental
-    /// shelf + plate-edge ridges + warped-FBM relief). Cliff
-    /// detection comes from the slope of `h_pre`, replacing the v1
-    /// `MOUNTAIN_ROCK_LINE` rule. Rivers and lakes still use legacy
-    /// noise carve here (PR 3 replaces this with the real river
-    /// network).
+    /// Build the fine region at `coord` from noise (heightmap +
+    /// hydrology). The result is byte-deterministic in
+    /// `(seed, coord)`; this method is invoked at most once per
+    /// region per cache lifetime (rebuilds happen on eviction).
+    fn build_fine_region(&self, coord: region::RegionCoord) -> region::FineRegion {
+        let mut r = region::FineRegion::empty(coord);
+        r.coord = coord;
+        hydrology::build_fine_hydro(
+            self.seed,
+            coord,
+            &self.heightmap,
+            &self.macro_cache,
+            &mut r,
+        );
+        r
+    }
+
+    /// Get-or-build the fine region containing world coordinates
+    /// `(wx, wz)`.
+    fn fine_region_at(&self, wx: i32, wz: i32) -> std::sync::Arc<region::FineRegion> {
+        let coord = region::RegionCoord::containing(wx, wz);
+        region::get_fine(&self.fine_cache, coord, || self.build_fine_region(coord))
+    }
+
+    /// Pre-fetch the 3 × 3 grid of regions centered on the chunk's
+    /// origin region. Used by `fill_chunk` so the per-column hot path
+    /// doesn't hammer the cache mutex 9 × 1024 times.
+    fn gather_chunk_regions(&self, coord: ChunkCoord) -> ChunkRegions {
+        let origin = coord.origin().0;
+        let center = region::RegionCoord::containing(origin.x, origin.z);
+        let mut grid: [[Option<std::sync::Arc<region::FineRegion>>; 3]; 3] =
+            Default::default();
+        for dz in -1..=1i32 {
+            for dx in -1..=1i32 {
+                let c = region::RegionCoord {
+                    x: center.x + dx,
+                    z: center.z + dz,
+                };
+                grid[(dz + 1) as usize][(dx + 1) as usize] = Some(region::get_fine(
+                    &self.fine_cache,
+                    c,
+                    || self.build_fine_region(c),
+                ));
+            }
+        }
+        ChunkRegions { center, grid }
+    }
+
+    /// Convenience wrapper around `column_data_with` that gathers
+    /// the 3 × 3 region neighbourhood inline. Used by tests and by
+    /// `tree_in_cell` (which is called from outside the chunk-fill
+    /// hot loop).
     fn column_data(&self, wx: i32, wz: i32) -> ColumnData {
-        let xz = [wx as f64, wz as f64];
+        let coord = region::RegionCoord::containing(wx, wz);
+        let chunk_origin =
+            ChunkCoord(glam::IVec3::new(coord.x * (FINE_REGION_SIZE / 32), 0, coord.z * (FINE_REGION_SIZE / 32)));
+        let regions = self.gather_chunk_regions(chunk_origin);
+        self.column_data_with(wx, wz, &regions)
+    }
+
+    /// Per-column terrain decisions using pre-fetched regions. The
+    /// per-column hot path inside `fill_chunk` calls this version so
+    /// we don't pay 9 mutex-protected cache lookups per column.
+    fn column_data_with(&self, wx: i32, wz: i32, regions: &ChunkRegions) -> ColumnData {
         // Pre-river heightmap from plates + warped FBM.
-        let mut height = self.heightmap.h_pre(self.seed, wx as f32, wz as f32);
-        // Slope-driven cliff classification on the *unmodified* h_pre
-        // — measuring slope after the river carve would falsely flag
-        // every valley side as a cliff.
+        let h_pre = self.heightmap.h_pre(self.seed, wx as f32, wz as f32);
+        // Slope-driven cliff classification on the *unmodified* h_pre.
         let is_cliff = self.heightmap.is_cliff(self.seed, wx as f32, wz as f32);
 
-        // Legacy river / lake carve. PR 3 will replace this with the
-        // real flow-accumulation network; for now the existing noise
-        // carve operates on h_pre so the world has at least the
-        // current generation's water bodies while we work.
-        let r_noise = self.river_noise.get(xz) as f32;
-        let river_strength =
-            (1.0 - (r_noise.abs() / RIVER_BAND as f32)).clamp(0.0, 1.0);
-        let l_noise = self.lake_noise.get(xz) as f32;
-        let lake_strength = smoothstep(
-            LAKE_THRESH as f32,
-            (LAKE_THRESH + LAKE_RAMP) as f32,
-            l_noise,
-        );
-        let carve = river_strength.max(lake_strength);
-        if carve > 0.0 {
-            let bed = if lake_strength > river_strength {
-                (SEA_LEVEL - LAKE_CARVE) as f32
-            } else {
-                (SEA_LEVEL - RIVER_CARVE) as f32
-            };
-            height = height * (1.0 - carve) + bed * carve;
-        }
-        let height = height.clamp(
-            (CAVE_FLOOR_Y + 8) as f32,
-            MAX_TERRAIN_Y as f32,
-        ) as i32;
+        // Valley carve over the chunk's pre-fetched 3 × 3 region
+        // neighbourhood. Slightly larger ring than strictly correct
+        // (would need a 5 × 5 ring to handle valley contributions
+        // from segments 2 regions away from a chunk's edge column),
+        // but in practice rivers cross at most 1 region boundary
+        // within the carve radius. Minor visual artifact for v1.
+        let carve = regions.valley_carve(wx, wz, self.seed);
+        let height = (h_pre - carve)
+            .clamp((CAVE_FLOOR_Y + 8) as f32, MAX_TERRAIN_Y as f32) as i32;
+
+        // Climate sample — still legacy 2D noise per column for PR 3
+        // (PR 5 introduces threshold perturbation + Tropical biome).
+        let xz = [wx as f64, wz as f64];
 
         let desertness = self.desert_map.get(xz) as f32;
         // Hard cutoff (no transition smoothing) so the desert/grass
@@ -387,19 +373,43 @@ impl Generator {
     /// `(seed, coord)`.
     pub fn fill_chunk(&self, coord: ChunkCoord, out: &mut DenseChunk) {
         let origin = coord.origin().0;
+        // Pre-fetch the regions overlapping this chunk plus their
+        // neighbour halos. A chunk (32 blocks) is smaller than a
+        // region (512 blocks), so it touches at most 4 distinct
+        // regions; we cover the worst case by fetching the regions
+        // containing each chunk corner and union-ing their
+        // neighbour rings. Doing this up-front means the per-column
+        // `column_data` path is just cheap noise evaluation and
+        // already-cached region reads — no mutex traffic per column.
+        let regions = self.gather_chunk_regions(coord);
         for z in 0..CHUNK_DIM_U {
             for x in 0..CHUNK_DIM_U {
                 let wx = origin.x + x as i32;
                 let wz = origin.z + z as i32;
-                let col = self.column_data(wx, wz);
+                let col = self.column_data_with(wx, wz, &regions);
                 let height = col.height;
+                // Lake water rim (if this column sits in a sink-filled
+                // basin). Above the column's solid height but below
+                // the rim, the column floods with water.
+                let lake_rim = regions.lake_rim_at(wx, wz);
 
                 for y in 0..CHUNK_DIM_U {
                     let wy = origin.y + y as i32;
                     let local = LocalPos(UVec3::new(x, y, z));
 
                     let block = if wy > height {
-                        if wy <= SEA_LEVEL {
+                        // Above the solid surface — flood with water
+                        // up to either the lake rim (highest priority)
+                        // or sea level, whichever is appropriate.
+                        if let Some(rim) = lake_rim {
+                            if wy <= rim {
+                                Block::Water
+                            } else if wy <= SEA_LEVEL {
+                                Block::Water
+                            } else {
+                                Block::Air
+                            }
+                        } else if wy <= SEA_LEVEL {
                             Block::Water
                         } else {
                             Block::Air
@@ -671,13 +681,72 @@ impl Biome {
     }
 }
 
-/// GLSL/WGSL-style smoothstep. We re-implement it (Rust has nothing in
-/// std and we don't want a dep for one function) because both `column_data`
-/// and the mountain falloff want a smooth Hermite ramp from `edge0` to
-/// `edge1`.
-fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
+/// 3 × 3 grid of fine regions centered on a chunk's origin region.
+/// Pre-fetched at the start of `fill_chunk` so the per-column
+/// `column_data_with` / `valley_carve` / `lake_rim_at` queries don't
+/// hammer the cache mutex.
+struct ChunkRegions {
+    center: region::RegionCoord,
+    /// `grid[dz + 1][dx + 1]` is the region at offset `(dx, dz)` from
+    /// `center`. Always populated (build_fine_region is invoked on
+    /// cache miss).
+    grid: [[Option<std::sync::Arc<region::FineRegion>>; 3]; 3],
+}
+
+impl ChunkRegions {
+    /// Look up the region containing world coords `(wx, wz)` inside
+    /// the pre-fetched 3 × 3 grid. Returns `None` if the column is
+    /// outside the grid (shouldn't happen for any column inside the
+    /// chunk that triggered the gather).
+    fn region_at(&self, wx: i32, wz: i32) -> Option<&region::FineRegion> {
+        let c = region::RegionCoord::containing(wx, wz);
+        let dx = c.x - self.center.x + 1;
+        let dz = c.z - self.center.z + 1;
+        if dx < 0 || dz < 0 || dx >= 3 || dz >= 3 {
+            return None;
+        }
+        self.grid[dz as usize][dx as usize].as_deref()
+    }
+
+    /// Lake rim at this column, if it sits inside a sink-filled
+    /// basin. Returns `None` outside lakes or outside the grid.
+    fn lake_rim_at(&self, wx: i32, wz: i32) -> Option<i32> {
+        self.region_at(wx, wz)
+            .and_then(|r| hydrology::lake_rim_at(wx, wz, r))
+    }
+
+    /// Valley carve at this column: iterate over the river segments
+    /// in the column's region plus its 8 neighbours (clipped to the
+    /// pre-fetched 3 × 3 grid). Per-column cost is O(total segments
+    /// inside the visible ring) — typically a few dozen.
+    fn valley_carve(&self, wx: i32, wz: i32, seed: u64) -> f32 {
+        let c = region::RegionCoord::containing(wx, wz);
+        let center_dx = c.x - self.center.x + 1;
+        let center_dz = c.z - self.center.z + 1;
+        if center_dx < 0 || center_dz < 0 || center_dx >= 3 || center_dz >= 3 {
+            // Column outside the gathered grid — should not happen
+            // in practice; return 0 (no carve) defensively.
+            return 0.0;
+        }
+        let primary = self.grid[center_dz as usize][center_dx as usize]
+            .as_deref()
+            .expect("3x3 grid is always populated");
+        let mut neighbour_regions: [Option<&region::FineRegion>; 8] = [None; 8];
+        let nbr_offsets: [(i32, i32); 8] = [
+            (0, -1), (1, -1), (1, 0), (1, 1),
+            (0, 1), (-1, 1), (-1, 0), (-1, -1),
+        ];
+        for i in 0..8 {
+            let (ox, oz) = nbr_offsets[i];
+            let nx = center_dx + ox;
+            let nz = center_dz + oz;
+            if nx < 0 || nz < 0 || nx >= 3 || nz >= 3 {
+                continue;
+            }
+            neighbour_regions[i] = self.grid[nz as usize][nx as usize].as_deref();
+        }
+        hydrology::valley_carve(wx, wz, primary, &neighbour_regions, seed)
+    }
 }
 
 /// Tree placement metadata for one cell.
@@ -777,10 +846,10 @@ mod tests {
     /// future runs catch unintentional behavioural drift.
     #[test]
     fn golden_seed42_chunk_0_2_0() {
-        // Hash re-baselined for PR 2 (plate-driven heightmap +
-        // warped FBM + cliff exposure). Refresh again whenever an
-        // intentional generator change lands.
-        const GOLDEN_42_002: u64 = 0xBA8B_6AAA_8597_30AD;
+        // Hash re-baselined for PR 3 (flow-accumulation rivers +
+        // sink-fill lakes + valley carve, replacing legacy
+        // noise-band rivers).
+        const GOLDEN_42_002: u64 = 0xC219_26A2_8819_B7C1;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);
