@@ -546,14 +546,34 @@ impl AppState {
                 self.ui.wants_quit = true;
             }
             UiEffect::Save => self.flush_modified(),
-            UiEffect::Teleport(_p) => {
-                // Wired in task 11.
+            UiEffect::Teleport(p) => {
+                use crate::ecs::components::{Position, Velocity};
+                if let Ok(mut q) = self.ecs.world.query_one::<(&mut Position, &mut Velocity)>(self.ecs.player) {
+                    if let Some((pos, vel)) = q.get() {
+                        pos.0 = p;
+                        vel.0 = glam::Vec3::ZERO;
+                    }
+                }
             }
-            UiEffect::SetTime(_t) => {
-                // Wired in task 11.
+            UiEffect::SetTime(t) => {
+                let t = t.clamp(0.0, 1.0);
+                for (_, tod) in self.ecs.world
+                    .query::<&mut crate::ecs::components::TimeOfDay>()
+                    .iter()
+                {
+                    tod.t = t;
+                }
             }
             UiEffect::ToggleFly => {
-                // Wired in task 11.
+                use crate::ecs::components::{Movement, MovementMode};
+                if let Ok(mut q) = self.ecs.world.query_one::<&mut Movement>(self.ecs.player) {
+                    if let Some(mv) = q.get() {
+                        mv.mode = match mv.mode {
+                            MovementMode::Walk => MovementMode::Fly,
+                            MovementMode::Fly  => MovementMode::Walk,
+                        };
+                    }
+                }
             }
             UiEffect::PostMessage(msg) => {
                 self.ui.log.push_system(msg);
