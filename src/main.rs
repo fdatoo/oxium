@@ -18,6 +18,7 @@ mod app;
 mod ecs;
 mod profiler;
 mod render;
+mod ui;
 
 use std::path::PathBuf;
 use std::sync::Arc;
