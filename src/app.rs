@@ -202,6 +202,16 @@ impl AppState {
             &self.generator,
             &self.registry,
         );
+        // Relight pump runs after the two job-drain stages so it picks
+        // up the `dirty.light` flags those handlers just set on newly
+        // loaded/generated chunks. Each frame queues a bounded number
+        // of relight jobs; over a few seconds the world converges to
+        // a fixed lighting state with correct cross-chunk propagation.
+        crate::ecs::systems::mesh_upload::relight_pump(
+            &mut self.world,
+            &self.jobs,
+            &self.registry,
+        );
         crate::ecs::systems::world_stream::world_unload(
             &self.ecs,
             &mut self.world,

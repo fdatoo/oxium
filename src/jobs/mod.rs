@@ -38,9 +38,17 @@ pub enum JobResult {
     /// to swap into the World. A follow-up mesh job runs as soon as the
     /// caller drains this — without that, the new sky/block light bytes
     /// never reach the GPU.
+    ///
+    /// `changed_faces[i]` is `true` when the chunk's boundary cells in
+    /// the [`crate::mesher::Face`]`(i)` direction differ between the
+    /// pre-BFS and post-BFS snapshots. The Relit handler uses this to
+    /// cascade `dirty.light` only to the neighbours whose seed values
+    /// would actually change — bounded propagation that converges in
+    /// `O(loaded-chunk-diameter)` iterations without exploding.
     Relit {
         coord: ChunkCoord,
         data: PalettedChunk,
+        changed_faces: [bool; 6],
     },
 }
 
@@ -133,9 +141,19 @@ impl Jobs {
                 neighbor_dense[5].as_ref(),
             ];
             let ns = crate::voxel::chunk::Neighbors { chunks: n_refs };
+            // Snapshot per-face boundary lighting before the BFS so we
+            // can detect which faces actually changed and only cascade
+            // dirty.light to those neighbours.
+            let pre = crate::lighting::snapshot_face_boundaries(&dense);
             crate::lighting::recompute_chunk(&mut dense, &ns, &registry);
+            let post = crate::lighting::snapshot_face_boundaries(&dense);
+            let changed_faces: [bool; 6] = std::array::from_fn(|i| pre[i] != post[i]);
             let data = PalettedChunk::compress(&dense);
-            let _ = tx.send(JobResult::Relit { coord, data });
+            let _ = tx.send(JobResult::Relit {
+                coord,
+                data,
+                changed_faces,
+            });
         });
     }
 

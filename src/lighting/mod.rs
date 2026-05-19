@@ -147,6 +147,42 @@ fn seed_from_neighbors(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, is_sky
     }
 }
 
+/// Snapshot the chunk's per-face boundary lighting (`sky_light` and
+/// `block_light` interleaved) into one `Vec<u8>` per face, ordered by
+/// [`crate::mesher::Face`] discriminant. Used by the relight worker
+/// to detect which faces' boundary values actually changed after the
+/// BFS — the Relit handler then cascades `dirty.light` only to the
+/// neighbours that would consume the changed values.
+///
+/// Each face's `Vec` is `D² × 2` bytes: alternating sky / block
+/// light, walked in the same `(u, v)` order as `mirror_boundary`. The
+/// per-byte comparison is cheap (~6 KB total per chunk) and exact —
+/// no hash collisions to worry about.
+pub fn snapshot_face_boundaries(chunk: &crate::voxel::chunk::DenseChunk) -> [Vec<u8>; 6] {
+    use crate::mesher::Face;
+    std::array::from_fn(|face_i| {
+        let face = match face_i {
+            0 => Face::PosX,
+            1 => Face::NegX,
+            2 => Face::PosY,
+            3 => Face::NegY,
+            4 => Face::PosZ,
+            5 => Face::NegZ,
+            _ => unreachable!(),
+        };
+        let mut out = Vec::with_capacity((D * D * 2) as usize);
+        for v in 0..D {
+            for u in 0..D {
+                let (our_lp, _) = mirror_boundary(face, u, v);
+                let idx = our_lp.to_index();
+                out.push(chunk.sky_light[idx]);
+                out.push(chunk.block_light[idx]);
+            }
+        }
+        out
+    })
+}
+
 /// Return `(our_boundary_cell, neighbour_mirror_cell)` for a given
 /// face's `(u, v)` boundary coordinate. `(u, v)` covers the 2D slice
 /// in the two axes orthogonal to the face's normal; `face` decides
