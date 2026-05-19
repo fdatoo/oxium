@@ -80,6 +80,11 @@ pub struct AppState {
     /// into the profile CSV so we can grep for the frames where
     /// the user triggered an edit.
     pub frame_edit_count: u32,
+    /// UI state machine: pause menu, chat log, command dispatcher.
+    /// When `ui.is_playing()` is false, `step` skips the game schedule
+    /// (full freeze); the renderer still draws the last frame plus the
+    /// UI overlay so the menu/chat is visible.
+    pub ui: crate::ui::Ui,
 }
 
 /// Per-frame counters shown in the debug HUD. Cheap to keep around;
@@ -227,6 +232,7 @@ impl AppState {
                 }
             }),
             frame_edit_count: 0,
+            ui: crate::ui::Ui::new(),
         }
     }
 
@@ -241,143 +247,155 @@ impl AppState {
         // render `present()` call so the measurement excludes
         // wall-clock time we spend waiting on vsync.
         let work_start = now;
-
-        let prof = self.profiler.as_ref();
         use crate::profiler::time;
 
-        time(prof, "input", || {
-            crate::ecs::systems::input::apply_input(&mut self.ecs, &self.input_buf)
-        });
-        time(prof, "time_of_day", || {
-            crate::ecs::systems::time_of_day::advance(&mut self.ecs, dt)
-        });
-        time(prof, "movement", || {
-            crate::ecs::systems::movement::movement(&mut self.ecs, dt)
-        });
-        time(prof, "physics", || {
-            crate::ecs::systems::physics::physics(&mut self.ecs, &self.world, dt)
-        });
+        self.ui.tick(dt);
 
-        // Interaction: raycast + place/break. Returns chunks the edit
-        // dirtied; we immediately spawn relight (followed by remesh) on
-        // each so the player sees the result within a frame or two.
-        let dirty_chunks = time(prof, "interaction", || {
-            crate::ecs::systems::interaction::interaction(&mut self.ecs, &mut self.world)
-        });
-        self.frame_edit_count = dirty_chunks.len() as u32;
-        // Run the EDIT's relight + LOD0 mesh + upload INLINE on
-        // the main thread. Without this, the player-edit jobs go
-        // to the back of the rayon queue behind hundreds of
-        // streaming gen/mesh jobs from the initial fly-in, and
-        // the visible "block didn't break" lag becomes
-        // multi-second. ~10 ms one-frame stall is far better
-        // than that wait — and avoids the out-of-order race where
-        // streaming meshes for the same chunk overwrite the edit's
-        // mesh. The mesh-version tag still protects against the
-        // latter for the cascade-triggered jobs that *do* go to
-        // the pool.
-        //
-        // Not wrapped in `time(...)` because the closure would need
-        // `&mut self` while `prof` is still borrowed; the cost
-        // shows up in the next step's `WMS` reading instead.
-        let edit_start = std::time::Instant::now();
-        for c in &dirty_chunks {
-            Self::apply_edit_inline(
-                &mut self.world,
-                &mut self.renderer,
-                &self.registry,
-                *c,
-            );
-        }
-        if let Some(p) = self.profiler.as_ref() {
-            p.record(
-                "edit_inline",
-                edit_start.elapsed().as_micros().min(u32::MAX as u128) as u32,
-            );
-        }
-        time(prof, "world_stream", || {
-            crate::ecs::systems::world_stream::world_stream(
+        if self.ui.is_playing() {
+            let prof = self.profiler.as_ref();
+
+            time(prof, "input", || {
+                crate::ecs::systems::input::apply_input(&mut self.ecs, &self.input_buf)
+            });
+            time(prof, "time_of_day", || {
+                crate::ecs::systems::time_of_day::advance(&mut self.ecs, dt)
+            });
+            time(prof, "movement", || {
+                crate::ecs::systems::movement::movement(&mut self.ecs, dt)
+            });
+            time(prof, "physics", || {
+                crate::ecs::systems::physics::physics(&mut self.ecs, &self.world, dt)
+            });
+
+            // Interaction: raycast + place/break. Returns chunks the edit
+            // dirtied; we immediately spawn relight (followed by remesh) on
+            // each so the player sees the result within a frame or two.
+            let dirty_chunks = time(prof, "interaction", || {
+                crate::ecs::systems::interaction::interaction(&mut self.ecs, &mut self.world)
+            });
+            self.frame_edit_count = dirty_chunks.len() as u32;
+            // Run the EDIT's relight + LOD0 mesh + upload INLINE on
+            // the main thread. Without this, the player-edit jobs go
+            // to the back of the rayon queue behind hundreds of
+            // streaming gen/mesh jobs from the initial fly-in, and
+            // the visible "block didn't break" lag becomes
+            // multi-second. ~10 ms one-frame stall is far better
+            // than that wait — and avoids the out-of-order race where
+            // streaming meshes for the same chunk overwrite the edit's
+            // mesh. The mesh-version tag still protects against the
+            // latter for the cascade-triggered jobs that *do* go to
+            // the pool.
+            //
+            // Not wrapped in `time(...)` because the closure would need
+            // `&mut self` while `prof` is still borrowed; the cost
+            // shows up in the next step's `WMS` reading instead.
+            let edit_start = std::time::Instant::now();
+            for c in &dirty_chunks {
+                Self::apply_edit_inline(
+                    &mut self.world,
+                    &mut self.renderer,
+                    &self.registry,
+                    *c,
+                );
+            }
+            if let Some(p) = self.profiler.as_ref() {
+                p.record(
+                    "edit_inline",
+                    edit_start.elapsed().as_micros().min(u32::MAX as u128) as u32,
+                );
+            }
+            time(prof, "world_stream", || {
+                crate::ecs::systems::world_stream::world_stream(
+                    &self.ecs,
+                    &mut self.world,
+                    &self.jobs,
+                    &self.generator,
+                    &self.registry,
+                    &self.persistence,
+                    &mut self.save_index,
+                    &self.saves_dir,
+                )
+            });
+            time(prof, "drain_jobs", || {
+                crate::ecs::systems::mesh_upload::drain_jobs(
+                    &mut self.world,
+                    &self.jobs,
+                    &mut self.renderer,
+                    &self.registry,
+                )
+            });
+            time(prof, "drain_persistence", || {
+                crate::ecs::systems::mesh_upload::drain_persistence(
+                    &mut self.world,
+                    &self.jobs,
+                    &self.persistence,
+                    &self.generator,
+                    &self.registry,
+                )
+            });
+            // Relight pump runs after the two job-drain stages so it picks
+            // up the `dirty.light` flags those handlers just set on newly
+            // loaded/generated chunks. Each frame queues a bounded number
+            // of relight jobs; over a few seconds the world converges to
+            // a fixed lighting state with correct cross-chunk propagation.
+            // The return value is the *total* (not just dispatched) count
+            // of `dirty.light` chunks, which the HUD prints so we can see
+            // whether the cascade is terminating.
+            self.perf.light_queue = time(prof, "relight_pump", || {
+                crate::ecs::systems::mesh_upload::relight_pump(
+                    &mut self.world,
+                    &self.jobs,
+                    &self.registry,
+                )
+            }) as u32 as _;
+            self.perf.chunks_rendered = self.renderer.chunk_mesh_count();
+            self.perf.draw_calls = self.renderer.last_draw_calls();
+            // Walk the world chunks once to count Stored vs Pending so
+            // the HUD can show whether the missing chunks are simply
+            // un-generated yet vs generated-but-not-meshed.
+            let mut stored = 0usize;
+            let mut pending = 0usize;
+            for slot in self.world.chunks.values() {
+                match slot {
+                    crate::voxel::world::ChunkSlot::Stored { .. } => stored += 1,
+                    crate::voxel::world::ChunkSlot::Pending => pending += 1,
+                }
+            }
+            self.perf.chunks_loaded = stored;
+            self.perf.chunks_pending = pending;
+            crate::ecs::systems::world_stream::world_unload(
                 &self.ecs,
                 &mut self.world,
-                &self.jobs,
-                &self.generator,
-                &self.registry,
+                &mut self.renderer,
                 &self.persistence,
                 &mut self.save_index,
-                &self.saves_dir,
-            )
-        });
-        time(prof, "drain_jobs", || {
-            crate::ecs::systems::mesh_upload::drain_jobs(
-                &mut self.world,
-                &self.jobs,
-                &mut self.renderer,
-                &self.registry,
-            )
-        });
-        time(prof, "drain_persistence", || {
-            crate::ecs::systems::mesh_upload::drain_persistence(
-                &mut self.world,
-                &self.jobs,
-                &self.persistence,
-                &self.generator,
-                &self.registry,
-            )
-        });
-        // Relight pump runs after the two job-drain stages so it picks
-        // up the `dirty.light` flags those handlers just set on newly
-        // loaded/generated chunks. Each frame queues a bounded number
-        // of relight jobs; over a few seconds the world converges to
-        // a fixed lighting state with correct cross-chunk propagation.
-        // The return value is the *total* (not just dispatched) count
-        // of `dirty.light` chunks, which the HUD prints so we can see
-        // whether the cascade is terminating.
-        self.perf.light_queue = time(prof, "relight_pump", || {
-            crate::ecs::systems::mesh_upload::relight_pump(
-                &mut self.world,
-                &self.jobs,
-                &self.registry,
-            )
-        }) as u32 as _;
-        self.perf.chunks_rendered = self.renderer.chunk_mesh_count();
-        self.perf.draw_calls = self.renderer.last_draw_calls();
-        // Walk the world chunks once to count Stored vs Pending so
-        // the HUD can show whether the missing chunks are simply
-        // un-generated yet vs generated-but-not-meshed.
-        let mut stored = 0usize;
-        let mut pending = 0usize;
-        for slot in self.world.chunks.values() {
-            match slot {
-                crate::voxel::world::ChunkSlot::Stored { .. } => stored += 1,
-                crate::voxel::world::ChunkSlot::Pending => pending += 1,
+            );
+
+            // Autosave: every AUTOSAVE_INTERVAL, push every modified chunk
+            // through to the persistence thread. Cheap if no chunks are
+            // modified.
+            //
+            // `flush_modified` takes `&mut self` because it stamps
+            // `save_index`, which conflicts with the immutable borrow
+            // of `self.profiler` that the `prof` binding above holds.
+            // We rebind `prof` afterwards so the render pass below can
+            // still time itself; NLL narrows the original binding's
+            // scope to end at the rebind.
+            if self.last_autosave.elapsed() >= AUTOSAVE_INTERVAL {
+                self.last_autosave = Instant::now();
+                self.flush_modified();
             }
         }
-        self.perf.chunks_loaded = stored;
-        self.perf.chunks_pending = pending;
-        crate::ecs::systems::world_stream::world_unload(
-            &self.ecs,
-            &mut self.world,
-            &mut self.renderer,
-            &self.persistence,
-            &mut self.save_index,
-        );
 
-        // Autosave: every AUTOSAVE_INTERVAL, push every modified chunk
-        // through to the persistence thread. Cheap if no chunks are
-        // modified.
-        //
-        // `flush_modified` takes `&mut self` because it stamps
-        // `save_index`, which conflicts with the immutable borrow
-        // of `self.profiler` that the `prof` binding above holds.
-        // We rebind `prof` afterwards so the render pass below can
-        // still time itself; NLL narrows the original binding's
-        // scope to end at the rebind.
-        if self.last_autosave.elapsed() >= AUTOSAVE_INTERVAL {
-            self.last_autosave = Instant::now();
-            self.flush_modified();
+        // Drain UI effects every frame (so menu actions work while paused).
+        // Collect first so `apply_ui_effect`'s `&mut self` doesn't conflict
+        // with the `prof` borrow that the render block below needs.
+        let effects: Vec<_> = self.ui.drain_effects();
+        for eff in effects {
+            self.apply_ui_effect(eff);
         }
-        let prof = self.profiler.as_ref();
 
+        let prof = self.profiler.as_ref();
         let now_secs = self.start_time.elapsed().as_secs_f32();
         let fps = self.fps_meter.fps();
         // Underwater detection: probe the block at the camera's eye
@@ -514,6 +532,36 @@ impl AppState {
         // we just generated it from the current data on the main
         // thread, so by definition it's the latest.
         renderer.upload_chunk_mesh(coord, 0, &mesh);
+    }
+
+    /// Apply one UI-emitted intent. Each variant maps to a small piece
+    /// of game-state mutation (or a process-level action like Quit).
+    /// Kept small so adding a command is one match arm here plus one
+    /// variant on `UiEffect`.
+    fn apply_ui_effect(&mut self, eff: crate::ui::effect::UiEffect) {
+        use crate::ui::effect::UiEffect;
+        match eff {
+            UiEffect::Quit => {
+                // main.rs polls this on `Ui` directly via a flag we'll
+                // set in a later task. For now, no-op.
+            }
+            UiEffect::Save => self.flush_modified(),
+            UiEffect::Teleport(_p) => {
+                // Wired in task 11.
+            }
+            UiEffect::SetTime(_t) => {
+                // Wired in task 11.
+            }
+            UiEffect::ToggleFly => {
+                // Wired in task 11.
+            }
+            UiEffect::PostMessage(msg) => {
+                self.ui.log.push_system(msg);
+            }
+            UiEffect::ClearChat => {
+                self.ui.log.clear();
+            }
+        }
     }
 
     /// Send every currently-modified chunk through the persistence thread.
