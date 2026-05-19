@@ -39,6 +39,7 @@ use crate::render::pipelines::cursor::{
 use crate::render::pipelines::hud::{build as build_hud, HudPipeline};
 use crate::render::pipelines::opaque::{build as build_opaque, OpaquePipeline};
 use crate::render::pipelines::sky::{build as build_sky, SkyPipeline};
+use crate::render::pipelines::water::{build as build_water, WaterPipeline};
 use crate::voxel::coords::{BlockPos, ChunkCoord};
 use glam::{Mat4, Vec3, Vec4};
 use wgpu::util::DeviceExt;
@@ -106,6 +107,10 @@ pub struct Renderer {
     camera_bg: wgpu::BindGroup,
     chunk_bgl: wgpu::BindGroupLayout,
     opaque_pipe: OpaquePipeline,
+    /// Transparent water pipeline, drawn after the opaque pass over
+    /// the same chunk vertex buffers — the shader filters out
+    /// non-water fragments at the top of `fs_main`.
+    water_pipe: WaterPipeline,
     /// Sky-gradient pipeline, drawn before opaque each frame.
     sky_pipe: SkyPipeline,
     /// Wireframe cursor pipeline + its uniform/bind group. Drawn last
@@ -193,6 +198,13 @@ impl Renderer {
         let atlas = upload_atlas(&gpu.device, &gpu.queue, &atlas_image);
 
         let opaque_pipe = build_opaque(
+            &gpu.device,
+            gpu.surface_cfg.format,
+            &camera_bgl,
+            &chunk_bgl,
+            &atlas.bind_group_layout,
+        );
+        let water_pipe = build_water(
             &gpu.device,
             gpu.surface_cfg.format,
             &camera_bgl,
@@ -327,6 +339,7 @@ impl Renderer {
             camera_bg,
             chunk_bgl,
             opaque_pipe,
+            water_pipe,
             sky_pipe,
             cursor_pipe,
             cursor_buf,
@@ -739,7 +752,42 @@ impl Renderer {
         }
         self.last_draw_calls.set(draws);
 
-        // 3) Cursor wireframe (12 line segments, no vertex buffer).
+        // 3) Water pass. Same vertex buffers as the opaque pass; the
+        // water shader discards every non-water fragment and the
+        // pipeline runs with depth-test on / depth-write off + alpha
+        // blending so transparent surfaces composite correctly over
+        // the already-rendered opaque world. We re-walk the cull
+        // loop instead of merging with the opaque draw above because
+        // both passes need their bind groups (set_pipeline + the
+        // per-chunk bind group) in series for each chunk; trying to
+        // interleave would make state changes worse, not better.
+        pass.set_pipeline(&self.water_pipe.pipeline);
+        pass.set_bind_group(0, &self.camera_bg, &[]);
+        pass.set_bind_group(2, &self.atlas.bind_group, &[]);
+        for (coord, slots) in &self.chunk_meshes {
+            let origin = coord.origin().0;
+            let chunk_min = Vec3::new(origin.x as f32, origin.y as f32, origin.z as f32);
+            let chunk_max = chunk_min + Vec3::splat(32.0);
+            let center_f = chunk_min + Vec3::splat(16.0);
+            if (center_f - eye).length_squared() > cull_sq {
+                continue;
+            }
+            if !aabb_in_frustum(frustum, chunk_min, chunk_max) {
+                continue;
+            }
+            let preferred = Self::pick_lod(eye, center_f);
+            let chosen = slots[preferred]
+                .as_ref()
+                .or_else(|| slots.iter().flatten().next());
+            if let Some(cg) = chosen {
+                pass.set_bind_group(1, &cg.bg, &[0]);
+                pass.set_vertex_buffer(0, cg.mesh.vbuf.slice(..));
+                pass.set_index_buffer(cg.mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..cg.mesh.index_count, 0, 0..1);
+            }
+        }
+
+        // 4) Cursor wireframe (12 line segments, no vertex buffer).
         if self.cursor_visible {
             pass.set_pipeline(&self.cursor_pipe.pipeline);
             pass.set_bind_group(0, &self.camera_bg, &[]);
