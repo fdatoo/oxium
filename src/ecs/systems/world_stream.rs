@@ -14,8 +14,8 @@
 use crate::ecs::components::Position;
 use crate::ecs::GameEcs;
 use crate::jobs::Jobs;
-use crate::persistence::region::region_path;
 use crate::persistence::thread::{PersistRequest, Persistence};
+use crate::persistence::SaveIndex;
 use crate::voxel::block::BlockRegistry;
 use crate::voxel::coords::ChunkCoord;
 use crate::voxel::world::{ChunkSlot, World};
@@ -59,6 +59,7 @@ pub fn world_stream(
     generator: &Arc<Generator>,
     registry: &Arc<BlockRegistry>,
     persistence: &Persistence,
+    save_index: &mut SaveIndex,
     saves_dir: &Path,
 ) {
     let mut q = ecs.world.query_one::<&Position>(ecs.player).unwrap();
@@ -116,19 +117,33 @@ pub fn world_stream(
         // `entry` avoids the double-hash of contains_key + insert.
         if let std::collections::hash_map::Entry::Vacant(slot) = world.chunks.entry(c) {
             slot.insert(ChunkSlot::Pending);
-            // Prefer loading from disk when a region file exists —
-            // persisted edits should reappear next session. Reads
-            // go through the persistence I/O thread (single-threaded
-            // but safe to interleave with the persistence thread's
-            // own concurrent writes). A previous attempt to run
-            // Loads on the rayon pool (`spawn_load`) introduced a
-            // bug where chunks the player had previously edited
-            // came back showing a flat fog-coloured plain — the
-            // root cause is somewhere in concurrent-read vs the
-            // chunk's saved light/block arrays, and reverting the
-            // parallel path until we identify it.
-            let path = region_path(saves_dir, c);
-            if path.exists() {
+            // Prefer loading from disk when a saved chunk exists for
+            // this *specific* coord — persisted edits should reappear
+            // next session.
+            //
+            // The presence check goes through `SaveIndex`, which
+            // reads the region file's 16 KB header *once* per region
+            // per session and answers in O(1) thereafter. Before
+            // adding this cache, the check was `path.exists()` —
+            // true for every chunk in a region as soon as the
+            // player saved one of its 4096 slots, so every empty
+            // sibling slot paid a round-trip through the
+            // single-threaded persistence worker just to be told
+            // NotPresent. With ~10 000 chunks in the load radius
+            // that turned a single edit into seconds of useless
+            // serial I/O at the next launch ("everything streams in
+            // fast, but as soon as I edit anything, the next launch
+            // takes ages to render"). The bitmap lookup turns the
+            // empty-slot case back into a one-frame procedural gen.
+            //
+            // Loads still go through the persistence I/O thread
+            // (single-threaded, but only N requests now where N =
+            // chunks the player actually edited — not N = chunks in
+            // the load radius). A previous attempt to run Loads on
+            // the rayon pool (`spawn_load`) introduced a separate
+            // out-of-order arrival bug; with the empty-slot case
+            // pruned away here, parallel reads aren't urgent.
+            if save_index.has(saves_dir, c) {
                 let _ = persistence.req_tx.send(PersistRequest::Load { coord: c });
             } else {
                 jobs.spawn_gen(c, generator.clone(), registry.clone());
@@ -145,6 +160,7 @@ pub fn world_unload(
     world: &mut World,
     renderer: &mut crate::render::Renderer,
     persistence: &Persistence,
+    save_index: &mut SaveIndex,
 ) {
     let mut q = ecs.world.query_one::<&Position>(ecs.player).unwrap();
     let pos = q.get().unwrap();
@@ -170,6 +186,14 @@ pub fn world_unload(
                 coord: c,
                 data: data.clone(),
             });
+            // Keep the in-memory presence cache in lockstep with the
+            // queued write — the chunk hasn't reached disk yet but
+            // it's about to, and a subsequent `world_stream` pass
+            // for this coord (or a sibling in the same region) must
+            // see "yes, there's saved data here" so it routes the
+            // Load through the persistence thread rather than
+            // re-generating from seed.
+            save_index.mark(c);
         }
         world.chunks.remove(&c);
         renderer.remove_chunk_mesh(c);

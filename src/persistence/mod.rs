@@ -7,4 +7,7 @@
 //! then `zstd`-compressed.
 
 pub mod region;
+pub mod save_index;
 pub mod thread;
+
+pub use save_index::SaveIndex;

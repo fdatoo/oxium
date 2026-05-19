@@ -70,11 +70,64 @@ pub fn region_path(saves_dir: &std::path::Path, chunk_coord: ChunkCoord) -> Path
 
 /// Slot index for a given chunk coord (0..4096). Includes Y so two
 /// chunks at the same XZ but different Y don't collide on disk.
-fn slot_index(chunk_coord: ChunkCoord) -> usize {
+pub fn slot_index(chunk_coord: ChunkCoord) -> usize {
     let lx = chunk_coord.0.x.rem_euclid(REGION_DIM) as usize;
     let ly = chunk_coord.0.y.rem_euclid(REGION_DIM) as usize;
     let lz = chunk_coord.0.z.rem_euclid(REGION_DIM) as usize;
     (lx * (REGION_DIM as usize) + ly) * (REGION_DIM as usize) + lz
+}
+
+/// Number of slots in one region file (4096). Exposed so callers can
+/// size their per-region bookkeeping without re-deriving it from
+/// [`REGION_DIM`].
+pub const REGION_SLOTS: usize = (REGION_DIM as usize).pow(3);
+
+/// The (rx, ry, rz) region grid coordinate that owns `chunk_coord`.
+/// Mirrors the math in [`region_path`] so callers can group chunks by
+/// their region file without parsing the filename.
+pub fn region_coord(chunk_coord: ChunkCoord) -> (i32, i32, i32) {
+    (
+        chunk_coord.0.x.div_euclid(REGION_DIM),
+        chunk_coord.0.y.div_euclid(REGION_DIM),
+        chunk_coord.0.z.div_euclid(REGION_DIM),
+    )
+}
+
+/// Read just the slot table of a region file and return a
+/// [`REGION_SLOTS`]-element bitmap of "is this slot non-empty".
+///
+/// One 16 KB sequential read; skips the per-chunk seek + decompress
+/// that [`read_chunk`] does. Used by [`crate::persistence::SaveIndex`]
+/// to answer "does any chunk in this region exist on disk" in O(1)
+/// per chunk after a single per-region O(16 KB) header read — the
+/// difference between "spawn 10 000 NotPresent Loads at startup" and
+/// "spawn one Load per chunk the player actually edited".
+///
+/// Returns `Ok(None)` when the file doesn't exist; `Err` only for
+/// real I/O errors (corrupt header, permission denied, …).
+pub fn read_presence_bitmap(
+    path: &std::path::Path,
+) -> Result<Option<Box<[bool; REGION_SLOTS]>>, RegionError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut f = File::open(path)?;
+    let mut header = vec![0u8; (HEADER_SECTORS * SECTOR) as usize];
+    // Short files (truncated mid-write) yield ErrorKind::UnexpectedEof
+    // here; treat that as "no slots present" rather than bubbling — a
+    // partial header from a long-ago crash shouldn't stall startup.
+    if let Err(e) = f.read_exact(&mut header) {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            return Ok(None);
+        }
+        return Err(e.into());
+    }
+    let mut bm: Box<[bool; REGION_SLOTS]> = Box::new([false; REGION_SLOTS]);
+    for i in 0..REGION_SLOTS {
+        let entry = u32::from_le_bytes(header[i * 4..i * 4 + 4].try_into().unwrap());
+        bm[i] = entry != 0;
+    }
+    Ok(Some(bm))
 }
 
 /// Encode → compress → append at EOF → update the header. Creates the

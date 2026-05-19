@@ -22,6 +22,7 @@ use crate::ecs::systems::input::InputBuf;
 use crate::ecs::GameEcs;
 use crate::jobs::Jobs;
 use crate::persistence::thread::{PersistRequest, Persistence};
+use crate::persistence::SaveIndex;
 use crate::render::Renderer;
 use crate::voxel::block::BlockRegistry;
 use crate::voxel::world::{ChunkSlot, World};
@@ -44,6 +45,14 @@ pub struct AppState {
     pub registry: Arc<BlockRegistry>,
     /// Dedicated I/O thread for chunk save/load.
     pub persistence: Persistence,
+    /// In-memory mirror of which region slots have data on disk. The
+    /// streaming system consults this on every chunk it considers
+    /// requesting from disk; without it, every empty sibling slot in
+    /// a region file the player has touched would round-trip the
+    /// single-threaded persistence worker for a `NotPresent`
+    /// response. See [`crate::persistence::SaveIndex`] for the full
+    /// rationale.
+    pub save_index: SaveIndex,
     /// Root directory for region files this session writes to.
     pub saves_dir: PathBuf,
     /// Wall-clock time of the previous autosave tick. Autosave runs every
@@ -199,6 +208,7 @@ impl AppState {
             generator,
             registry,
             persistence,
+            save_index: SaveIndex::new(),
             saves_dir,
             last_autosave: Instant::now(),
             input_buf: InputBuf::default(),
@@ -293,6 +303,7 @@ impl AppState {
                 &self.generator,
                 &self.registry,
                 &self.persistence,
+                &mut self.save_index,
                 &self.saves_dir,
             )
         });
@@ -348,15 +359,24 @@ impl AppState {
             &mut self.world,
             &mut self.renderer,
             &self.persistence,
+            &mut self.save_index,
         );
 
         // Autosave: every AUTOSAVE_INTERVAL, push every modified chunk
         // through to the persistence thread. Cheap if no chunks are
         // modified.
+        //
+        // `flush_modified` takes `&mut self` because it stamps
+        // `save_index`, which conflicts with the immutable borrow
+        // of `self.profiler` that the `prof` binding above holds.
+        // We rebind `prof` afterwards so the render pass below can
+        // still time itself; NLL narrows the original binding's
+        // scope to end at the rebind.
         if self.last_autosave.elapsed() >= AUTOSAVE_INTERVAL {
             self.last_autosave = Instant::now();
             self.flush_modified();
         }
+        let prof = self.profiler.as_ref();
 
         let now_secs = self.start_time.elapsed().as_secs_f32();
         let fps = self.fps_meter.fps();
@@ -473,7 +493,12 @@ impl AppState {
 
     /// Send every currently-modified chunk through the persistence thread.
     /// Used by both autosave and the `Drop` flush-on-close path.
-    fn flush_modified(&self) {
+    ///
+    /// Also stamps each saved coord into `save_index` so the next
+    /// `world_stream` pass that considers the chunk routes it through
+    /// the persistence thread instead of (incorrectly) regenerating
+    /// it from seed.
+    fn flush_modified(&mut self) {
         for (c, slot) in &self.world.chunks {
             if let ChunkSlot::Stored { data, meta } = slot
                 && meta.modified
@@ -482,6 +507,7 @@ impl AppState {
                     coord: *c,
                     data: data.clone(),
                 });
+                self.save_index.mark(*c);
             }
         }
     }
