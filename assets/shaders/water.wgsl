@@ -83,6 +83,14 @@ struct VsOut {
     @location(2) v_light:           f32,
     @location(3) v_world:           vec3<f32>,
     @location(4) v_normal:          vec3<f32>,
+    /// Clip-space position of the vertex *before* wave displacement,
+    /// in `(x, y, w)` form. The fragment shader uses this for the
+    /// reflection lookup so the sampling UV stays locked to the
+    /// undisturbed water plane — using the displaced `clip_pos`
+    /// would let animated wave Y propagate into the screen-space
+    /// UV and shimmer the reflection content every frame even when
+    /// the camera was still.
+    @location(5) v_undisp_clip:     vec3<f32>,
 };
 
 // Multi-octave value-noise wave height. Driven by world-space xz and
@@ -245,6 +253,16 @@ fn vs_main(in: VsIn) -> VsOut {
     // discontinuities that broke the previous 32-block-greedy
     // version are gone at this resolution, and what was a "seam
     // hairline" becomes part of the wave detail.
+    // Capture the *undisplaced* clip-space position now, BEFORE the
+    // wave displacement modifies world_pos.y. Used by the fragment
+    // shader to compute the screen-space UV for the reflection
+    // texture — sampling at the displaced clip position would let
+    // animated wave Y propagate into the reflection UV, causing the
+    // reflected content to shimmer every frame regardless of camera
+    // motion. Keying the lookup off the undisplaced plane keeps the
+    // reflection geometrically locked to the world.
+    let undisp_clip = camera.view_proj * vec4<f32>(world_pos, 1.0);
+
     if (face == 2u) {
         // Wave displacement is biased so the *crest* sits at the
         // water-block top and the surface only dips DOWN from
@@ -262,6 +280,7 @@ fn vs_main(in: VsIn) -> VsOut {
 
     var out: VsOut;
     out.clip_pos = camera.view_proj * vec4<f32>(world_pos, 1.0);
+    out.v_undisp_clip = vec3<f32>(undisp_clip.x, undisp_clip.y, undisp_clip.w);
     out.v_world = world_pos;
     out.v_color = in.color;
     out.v_face = f32(face);
@@ -342,15 +361,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // `surface_n.xz` carries the wave-induced lateral tilt of the
     // surface normal. Project it through the view space scaled by a
     // small factor to get the distortion vector in NDC.
-    let screen_size = vec2<f32>(textureDimensions(reflection_tex));
-    let base_uv = in.clip_pos.xy / screen_size;
+    // Reflection UV is derived from the *undisplaced* clip-space
+    // position so wave Y animation doesn't shimmer the sample point
+    // each frame. NDC -> [0,1] UV; Y is flipped because wgpu's NDC
+    // has +Y up while texture v=0 is at the top.
+    let ndc = in.v_undisp_clip.xy / in.v_undisp_clip.z;
+    let base_uv = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
     // Distortion magnitude is intentionally small. Wave normals are
     // time-animated, so a large distortion factor multiplied by a
-    // changing normal injects a per-frame wobble that read as a
+    // changing normal injects a per-frame wobble that reads as a
     // shimmering, motion-amplifying reflection. ~1% of screen width
     // gives just enough ripple to break the perfect-mirror look
-    // without making the reflected content slosh around when the
-    // camera moves.
+    // without making the reflected content slosh around.
     let distort = surface_n.xz * 0.012;
     let refl_uv = clamp(base_uv + distort, vec2<f32>(0.0), vec2<f32>(1.0));
     let sky_reflection = textureSampleLevel(

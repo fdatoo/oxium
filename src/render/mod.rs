@@ -211,15 +211,6 @@ pub struct Renderer {
     /// Maintained on the renderer side so callers don't have to thread
     /// it through the `render()` call chain.
     underwater_factor: f32,
-    /// Low-pass-filtered eye position used to derive the reflection
-    /// camera's mirror. The main camera bobs every frame for walk
-    /// feel, but feeding that bob straight into the mirrored camera
-    /// makes the *reflected content* slosh — the mirror eye moves
-    /// opposite to the real eye, so the relative shift is ~2× the
-    /// bob amplitude. Smoothing here damps the bob out of the
-    /// reflection without compromising rotation responsiveness
-    /// (yaw + pitch still come straight through unsmoothed).
-    smoothed_eye: Vec3,
 }
 
 /// Per-chunk GPU resources: the mesh buffers, the chunk-origin uniform, and
@@ -508,7 +499,6 @@ impl Renderer {
             chunk_meshes: HashMap::new(),
             last_draw_calls: std::cell::Cell::new(0),
             underwater_factor: 0.0,
-            smoothed_eye: Vec3::ZERO,
         }
     }
 
@@ -737,27 +727,22 @@ impl Renderer {
 
         let frustum = extract_frustum_planes(vp);
 
-        // Smooth the eye for the reflection mirror. The main view
-        // uses the unbobbed `eye` directly, but the mirrored eye
-        // tracks a low-pass-filtered version — that way a 0.07-block
-        // bob doesn't slosh ~0.14 blocks of relative motion into
-        // the reflected content every frame. `0.18` lerp factor
-        // reaches ~65 % over 5 frames, fast enough that real
-        // teleport-y camera moves still update promptly.
-        if self.smoothed_eye == Vec3::ZERO {
-            // First-frame seed so we don't lerp out of the world origin.
-            self.smoothed_eye = eye;
-        } else {
-            self.smoothed_eye = self.smoothed_eye.lerp(eye, 0.18);
-        }
-
         // Build the mirrored camera for the planar reflection pass.
         // Mirror across the y=SEA_LEVEL plane: eye y → 2H - eye y,
         // and the look direction's vertical component flips, which
         // corresponds to inverting pitch.
+        //
+        // The mirror eye MUST use the same source eye position as
+        // the main view — they're geometrically coupled. The water
+        // shader samples the reflection at `clip_pos.xy` (computed
+        // from the main view-proj); for that lookup to land on the
+        // geometric reflection of the right world point, the
+        // mirrored camera must be the true mirror of the actual
+        // main camera. An earlier attempt to smooth the mirror eye
+        // alone broke this correspondence and caused the reflection
+        // to slide independently from the main view.
         let sea_level = crate::worldgen::SEA_LEVEL as f32;
-        let smooth_eye = self.smoothed_eye;
-        let refl_eye = Vec3::new(smooth_eye.x, 2.0 * sea_level - smooth_eye.y, smooth_eye.z);
+        let refl_eye = Vec3::new(eye.x, 2.0 * sea_level - eye.y, eye.z);
         let refl_pitch = -pitch;
         let refl_vp = view_proj(refl_eye, yaw, refl_pitch, 70f32.to_radians(), aspect);
         let refl_inv_vp = refl_vp.inverse();
