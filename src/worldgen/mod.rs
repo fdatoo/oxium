@@ -67,18 +67,6 @@ pub mod tuning;
 /// World-space Y at which the sea surface sits. Blocks above this with no
 /// solid above turn into air; air below this turns into water.
 pub const SEA_LEVEL: i32 = 62;
-/// Half-width of the "near-zero" band around each tunnel noise's
-/// zero-crossing surface. Tunnels appear where BOTH
-/// [`Generator::tunnel_a`] and [`Generator::tunnel_b`] sit inside this
-/// band — geometrically, that's the intersection of two warped sheets
-/// in 3D, which traces out long winding ribbons. Wider band → fatter
-/// and more frequent tunnels; narrower → sparse capillaries.
-const TUNNEL_BAND: f64 = 0.08;
-/// Threshold for the cavern noise: cells where the noise exceeds this
-/// open into a cavern. Higher value → rarer / smaller rooms. The
-/// 3D noise's amplitude is roughly `[-1, 1]` so 0.62 keeps caverns
-/// uncommon enough that they read as discoveries, not Swiss cheese.
-const CAVERN_THRESH: f64 = 0.62;
 /// World-space Y below which we leave a thin "floor" so the bottom of
 /// the loaded chunk stack doesn't dissolve into nothing. Caves above
 /// this can carve normally; cells at or below are left as their
@@ -140,19 +128,10 @@ pub struct Generator {
     /// wetter columns earn denser tree cover, drier columns read as
     /// sparser plains.
     humidity_map: Fbm<Simplex>,
-    /// First of two 3D noise fields whose zero-crossings intersect to
-    /// form cave tunnels. By itself this would carve a single warped
-    /// sheet through the world; combined with [`Self::tunnel_b`] only
-    /// the tube along the intersection survives.
-    tunnel_a: Fbm<Simplex>,
-    /// Second tunnel noise — seeded independently from [`Self::tunnel_a`]
-    /// so the two sheets cross at random angles rather than running
-    /// parallel.
-    tunnel_b: Fbm<Simplex>,
-    /// Lower-frequency 3D noise that opens into large cavern rooms
-    /// where its value runs hot. Layered on top of the tunnel system
-    /// so a tunnel occasionally widens into a chamber.
-    cavern_noise: Fbm<Simplex>,
+    /// Deep-band wormhole filler: sparse 3D noise that supplements
+    /// the graph-based cave systems below `WORMHOLE_BAND_Y`. Above
+    /// that, caves come exclusively from the cave-system graph.
+    wormhole_noise: caves::WormholeNoise,
     seed: u64,
     /// LRU cache of pre-built fine regions. Consulted per chunk fill
     /// to evaluate valley carve and lake water; built on first touch.
@@ -194,70 +173,17 @@ impl Generator {
             .set_octaves(2)
             .set_frequency(1.0 / 512.0)
             .set_persistence(0.5);
-        // Tunnel system: two independent 3D noises at the same frequency.
-        // 2 octaves keeps the surfaces relatively smooth — too many
-        // octaves and the tunnel walls turn into ragged stair-steps.
-        // Period ~40 blocks ⇒ tunnels meander on a scale of a few
-        // chunks, comfortably explorable.
-        let tunnel_a = Fbm::<Simplex>::new(seed.wrapping_add(5) as u32)
-            .set_octaves(2)
-            .set_frequency(1.0 / 40.0)
-            .set_persistence(0.5);
-        let tunnel_b = Fbm::<Simplex>::new(seed.wrapping_add(6) as u32)
-            .set_octaves(2)
-            .set_frequency(1.0 / 40.0)
-            .set_persistence(0.5);
-        // Caverns: a single low-frequency 3D field. Lower frequency than
-        // tunnels (period ~80 blocks) so each "hot" region is large
-        // enough to read as a room rather than a wider patch of tunnel.
-        let cavern_noise = Fbm::<Simplex>::new(seed.wrapping_add(7) as u32)
-            .set_octaves(2)
-            .set_frequency(1.0 / 80.0)
-            .set_persistence(0.5);
+        let wormhole_noise = caves::WormholeNoise::new(seed);
         Self {
             heightmap,
             desert_map,
             temperature_map,
             humidity_map,
-            tunnel_a,
-            tunnel_b,
-            cavern_noise,
+            wormhole_noise,
             seed,
             fine_cache: region::fresh_fine_cache(),
             macro_cache: region::fresh_macro_cache(),
         }
-    }
-
-    /// Decide whether the cell at world-space `(wx, wy, wz)` should be
-    /// carved away as cave.
-    ///
-    /// Returns `true` if either:
-    /// * Both [`Self::tunnel_a`] and [`Self::tunnel_b`] sit inside
-    ///   `±TUNNEL_BAND` (a tunnel passes through here), OR
-    /// * [`Self::cavern_noise`] exceeds [`CAVERN_THRESH`] (a cavern
-    ///   opens here).
-    ///
-    /// The caller is responsible for additional gates (surface buffer,
-    /// floor depth) — this method only answers "does the cave noise
-    /// say air?" so the layer pass can compose it with its own rules.
-    fn is_cave(&self, wx: i32, wy: i32, wz: i32) -> bool {
-        let p = [wx as f64, wy as f64, wz as f64];
-        let a = self.tunnel_a.get(p);
-        let b = self.tunnel_b.get(p);
-        // Tunnel: each noise field's zero level set is a smooth warped
-        // sheet through the world. The intersection of two such sheets
-        // is a 1D curve — the actual tunnel centre. Widening each band
-        // from "zero" to "near-zero" thickens the sheets into slabs,
-        // and their intersection thickens from a curve to a tube of
-        // roughly TUNNEL_BAND × TUNNEL_BAND cross-section. With our
-        // band of 0.08 that's tubes ~2-3 blocks across.
-        if a.abs() < TUNNEL_BAND && b.abs() < TUNNEL_BAND {
-            return true;
-        }
-        // Cavern: a single noise's high-value region. Lower frequency
-        // means the region is larger when it occurs, producing a
-        // "room" instead of a patch of tunnel.
-        self.cavern_noise.get(p) > CAVERN_THRESH
     }
 
     /// Build the fine region at `coord` from noise (heightmap +
@@ -274,14 +200,8 @@ impl Generator {
             &self.macro_cache,
             &mut r,
         );
+        caves::build_systems_for_region(self.seed, coord, &self.heightmap, &mut r);
         r
-    }
-
-    /// Get-or-build the fine region containing world coordinates
-    /// `(wx, wz)`.
-    fn fine_region_at(&self, wx: i32, wz: i32) -> std::sync::Arc<region::FineRegion> {
-        let coord = region::RegionCoord::containing(wx, wz);
-        region::get_fine(&self.fine_cache, coord, || self.build_fine_region(coord))
     }
 
     /// Pre-fetch the 3 × 3 grid of regions centered on the chunk's
@@ -382,6 +302,11 @@ impl Generator {
         // `column_data` path is just cheap noise evaluation and
         // already-cached region reads — no mutex traffic per column.
         let regions = self.gather_chunk_regions(coord);
+        // Pre-collect every cave system whose bounding box intersects
+        // this chunk so the per-cell cave SDF query iterates a short
+        // list rather than walking the full region's system list.
+        let chunk_max = origin + glam::IVec3::splat(CHUNK_DIM_U as i32);
+        let cave_systems = regions.cave_systems_intersecting(origin, chunk_max);
         for z in 0..CHUNK_DIM_U {
             for x in 0..CHUNK_DIM_U {
                 let wx = origin.x + x as i32;
@@ -417,19 +342,29 @@ impl Generator {
                     } else {
                         let depth = height - wy;
                         // Cave-carve gates:
-                        // * Surface buffer: never carve through the
-                        //   topmost CAVE_SURFACE_BUFFER blocks, so the
-                        //   grass cap stays intact.
                         // * Floor: don't carve below CAVE_FLOOR_Y so
                         //   the bottom of the vertical load radius has
                         //   *something* in it (otherwise the player
-                        //   could see straight down into the sky
-                        //   colour from deep underground).
-                        // * Noise: tunnel-intersection OR cavern (see
-                        //   `is_cave` for the geometry of each).
-                        let cave = depth > CAVE_SURFACE_BUFFER
-                            && wy > CAVE_FLOOR_Y
-                            && self.is_cave(wx, wy, wz);
+                        //   could see straight down into the sky from
+                        //   deep underground).
+                        // * Surface buffer: chambers and tunnels never
+                        //   carve within CAVE_SURFACE_BUFFER blocks of
+                        //   the surface — except where an explicit
+                        //   entrance feature (sinkhole / cliff mouth
+                        //   / skylight) punches through.
+                        // * Deep wormholes: a sparse 3D-noise band
+                        //   layered only below WORMHOLE_BAND_Y.
+                        let in_entrance =
+                            !cave_systems.is_empty()
+                                && caves::entrance_air(wx, wy, wz, &cave_systems);
+                        let in_chamber_or_tunnel = depth > CAVE_SURFACE_BUFFER
+                            && !cave_systems.is_empty()
+                            && caves::cave_air(wx, wy, wz, &cave_systems);
+                        let in_wormhole =
+                            depth > CAVE_SURFACE_BUFFER
+                                && self.wormhole_noise.carve(wx, wy, wz);
+                        let cave =
+                            wy > CAVE_FLOOR_Y && (in_entrance || in_chamber_or_tunnel || in_wormhole);
                         if cave {
                             if wy <= SEA_LEVEL {
                                 Block::Water
@@ -715,6 +650,35 @@ impl ChunkRegions {
             .and_then(|r| hydrology::lake_rim_at(wx, wz, r))
     }
 
+    /// Collect every cave system in the pre-fetched 3 × 3 grid whose
+    /// bounding box intersects `[chunk_min, chunk_max]`. Called once
+    /// per `fill_chunk`; the result drives the cave SDF query.
+    fn cave_systems_intersecting(
+        &self,
+        chunk_min: glam::IVec3,
+        chunk_max: glam::IVec3,
+    ) -> Vec<&region::CaveSystem> {
+        let mut out = Vec::new();
+        for row in &self.grid {
+            for slot in row {
+                if let Some(r) = slot {
+                    for sys in &r.cave_systems {
+                        if sys.bb_max.x >= chunk_min.x
+                            && sys.bb_min.x <= chunk_max.x
+                            && sys.bb_max.y >= chunk_min.y
+                            && sys.bb_min.y <= chunk_max.y
+                            && sys.bb_max.z >= chunk_min.z
+                            && sys.bb_min.z <= chunk_max.z
+                        {
+                            out.push(sys);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Valley carve at this column: iterate over the river segments
     /// in the column's region plus its 8 neighbours (clipped to the
     /// pre-fetched 3 × 3 grid). Per-column cost is O(total segments
@@ -846,10 +810,10 @@ mod tests {
     /// future runs catch unintentional behavioural drift.
     #[test]
     fn golden_seed42_chunk_0_2_0() {
-        // Hash re-baselined for PR 3 (flow-accumulation rivers +
-        // sink-fill lakes + valley carve, replacing legacy
-        // noise-band rivers).
-        const GOLDEN_42_002: u64 = 0xC219_26A2_8819_B7C1;
+        // Hash re-baselined for PR 4 (graph-based cave systems +
+        // surface entrances + deep-band wormholes, replacing the
+        // legacy 3D-noise tunnel + cavern carve).
+        const GOLDEN_42_002: u64 = 0x2ED7_ED31_7446_C056;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);
@@ -862,32 +826,51 @@ mod tests {
     }
 
     /// Cave system sanity: somewhere underground (below sea level) we
-    /// should see a non-trivial amount of carved-out air, with both
-    /// solid stone present *and* air present in the same chunk. The
-    /// previous Swiss-cheese carving could go either too-empty (huge
-    /// blob caves) or too-solid (sparse pock-marks); this asserts the
-    /// middle ground where caves read as a tunnel network.
+    /// Cave system sanity: graph-based caves are spatially
+    /// structured — not every chunk has carving (that's the point;
+    /// systems are discoverable). But across a generous scan of
+    /// underground chunks, at least one should have caves AND every
+    /// scanned chunk should still be mostly solid stone (no chunk
+    /// blown wide open by an oversized chamber).
     #[test]
     fn underground_chunk_has_both_caves_and_solid() {
         let g = Generator::new(42);
-        // Chunk at y=-1 ⇒ world y range [-32, -1], comfortably below
-        // sea level and above CAVE_FLOOR_Y, so cave carving is
-        // unconditional aside from the noise check.
-        let mut c = DenseChunk::empty();
-        g.fill_chunk(ChunkCoord(IVec3::new(0, -1, 0)), &mut c);
-        let mut air = 0;
-        let mut stone = 0;
-        for b in c.blocks.iter() {
-            match b {
-                Block::Air | Block::Water => air += 1,
-                Block::Stone => stone += 1,
-                _ => {}
+        let mut found_carved_chunk = false;
+        // Scan a 16 × 16 grid of chunks (one region's worth) at
+        // chunk y=-2 (world y [-64, -33]). This depth straddles the
+        // Middle / Deep cave bands and the wormhole noise band
+        // (`WORMHOLE_BAND_Y` = -40), so at least one chunk should
+        // hit something.
+        for cx in -8..8 {
+            for cz in -8..8 {
+                let mut c = DenseChunk::empty();
+                g.fill_chunk(ChunkCoord(IVec3::new(cx, -2, cz)), &mut c);
+                let mut air = 0;
+                let mut stone = 0;
+                for b in c.blocks.iter() {
+                    match b {
+                        Block::Air | Block::Water => air += 1,
+                        Block::Stone => stone += 1,
+                        _ => {}
+                    }
+                }
+                // Every chunk should still be mostly stone — no
+                // system carves more than half a chunk.
+                assert!(
+                    stone > CHUNK_VOL / 2,
+                    "chunk ({cx}, -2, {cz}) had insufficient stone: stone={stone}"
+                );
+                if air > CHUNK_VOL / 200 {
+                    // Lowered to 0.5% per chunk because tunnels can
+                    // pass through a chunk and only intersect a
+                    // narrow strip of cells.
+                    found_carved_chunk = true;
+                }
             }
         }
-        assert!(stone > CHUNK_VOL / 4, "expected mostly stone, got {stone}");
         assert!(
-            air > CHUNK_VOL / 100,
-            "expected at least 1% carved air to prove caves carve anywhere, got {air}"
+            found_carved_chunk,
+            "expected ≥1 chunk in 16×16 scan to overlap a cave feature; found none"
         );
     }
 
