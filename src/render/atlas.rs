@@ -49,6 +49,7 @@ fn tile_files() -> &'static [&'static str] {
         "oak_log_top.png",
         "oak_leaves.png",
         "water_still.png",
+        "snow.png",
     ]
 }
 

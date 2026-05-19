@@ -448,22 +448,28 @@ impl Generator {
                             //   1. Beach (column at/below sea level + 1) wins
                             //      over every biome so coastlines always
                             //      read as sand → water.
-                            //   2. Bare rock above the mountain tree line.
-                            //   3. Snow above the alpine SNOW_LINE — even
-                            //      temperate forests gather snow on their
-                            //      upper flanks.
-                            //   4. The column's biome dictates the rest:
-                            //      Tundra / SnowyForest get Snow,
-                            //      Desert keeps Sand, Plains / Forest
-                            //      get Grass.
+                            //   2. **Snow line wins over mountain rock.**
+                            //      Anything at or above SNOW_LINE picks up
+                            //      a Snow cap regardless of biome — real
+                            //      mountains have snow on top, not bare
+                            //      grey at the summit. Earlier the
+                            //      mountain-rock rule fired first and
+                            //      every tall peak read as a wall of
+                            //      stone.
+                            //   3. Bare mountain rock in the band between
+                            //      MOUNTAIN_ROCK_LINE and SNOW_LINE: the
+                            //      crag belt below the snowline.
+                            //   4. Cold biomes (Tundra, SnowyForest) lay
+                            //      Snow at any elevation.
+                            //   5. Desert keeps Sand; the rest get Grass.
                             if height <= SEA_LEVEL + 1 {
                                 Block::Sand
+                            } else if height >= SNOW_LINE {
+                                Block::Snow
                             } else if col.mountain_weight > 0.45
                                 && height > MOUNTAIN_ROCK_LINE
                             {
                                 Block::Stone
-                            } else if height >= SNOW_LINE {
-                                Block::Snow
                             } else if col.biome.snow_capped() {
                                 Block::Snow
                             } else if col.biome == Biome::Desert {

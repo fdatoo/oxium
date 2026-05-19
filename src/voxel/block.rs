@@ -36,6 +36,7 @@ pub enum Tile {
     OakLogTop = 6,
     OakLeaves = 7,
     WaterStill = 8,
+    Snow = 9,
 }
 
 impl Tile {
@@ -271,18 +272,19 @@ impl BlockRegistry {
             tile_bottom: None,
         };
         infos[Snow as usize] = BlockInfo {
-            // Snow blanket: visually similar to grass-as-a-block but
-            // tinted near-white. Reuses `grass_block_top.png` on every
-            // face — the grayscale tile multiplied by our cool tint
-            // reads as crisp snow without needing a separate asset.
-            // A faint blue cast in the tint keeps it from looking
-            // identical to the sand tile's near-white midtones.
+            // Snow blanket: dedicated cool-white pixel-noise texture
+            // (`snow.png`). The tint is neutral white so the
+            // texture's own pre-baked colour wins — earlier versions
+            // re-used `grass_block_top.png` with a near-white tint,
+            // but that texture's grayscale midtones average around
+            // 0.6, so even a near-white tint multiplied by ~0.6 read
+            // as medium gray instead of snow.
             solid: true,
             opaque: true,
             emission: 0,
-            color: [0.95, 0.96, 1.0, 1.0],
+            color: [1.0, 1.0, 1.0, 1.0],
             top_color: None,
-            tile_side: Some(Tile::GrassTop),
+            tile_side: Some(Tile::Snow),
             tile_top: None,
             tile_bottom: None,
         };
