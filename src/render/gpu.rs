@@ -16,6 +16,13 @@ use winit::window::Window;
 /// horizon and is widely supported.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
+/// MSAA sample count for the world-rendering pass (opaque + water + sky +
+/// cursor). Higher than 1 smooths every chunk edge by averaging coverage
+/// across this many sub-samples per pixel; 4× is the standard sweet spot
+/// — anti-aliasing reads as crisp without the GPU cost of 8×. The HUD
+/// pass stays at 1× because it draws after the MSAA resolve happens.
+pub const MSAA_SAMPLES: u32 = 4;
+
 /// Owns the long-lived `wgpu` objects. Shared by reference everywhere.
 pub struct Gpu {
     /// Instance — the wgpu entry point. Held so the surface (which borrows
@@ -126,10 +133,9 @@ impl Gpu {
     }
 }
 
-/// Allocate a depth texture matching the given dimensions.
-///
-/// We treat the depth texture as a sized-by-current-window resource — it's
-/// recreated by `Renderer::resize`.
+/// Allocate a depth texture matching the given dimensions and the world
+/// pass's MSAA sample count. Recreated by `Renderer::resize` whenever
+/// the surface dimensions change.
 pub fn make_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("depth-texture"),
@@ -139,9 +145,37 @@ pub fn make_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> wgp
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
-        sample_count: 1,
+        // Depth must match the colour target's sample count — otherwise
+        // wgpu rejects the pipeline binding at draw time.
+        sample_count: MSAA_SAMPLES,
         dimension: wgpu::TextureDimension::D2,
         format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    tex.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// Allocate the multisampled colour render target the world pass draws
+/// into. Resolved automatically into the swapchain texture each frame
+/// by the `resolve_target` field of the render pass colour attachment.
+pub fn make_msaa_color_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+) -> wgpu::TextureView {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("msaa-color-texture"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: MSAA_SAMPLES,
+        dimension: wgpu::TextureDimension::D2,
+        format,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });

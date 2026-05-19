@@ -7,7 +7,7 @@
 //! The pipeline shares the camera bind group with the opaque pipeline so
 //! `sun_intensity` is just there.
 
-use crate::render::gpu::DEPTH_FORMAT;
+use crate::render::gpu::{DEPTH_FORMAT, MSAA_SAMPLES};
 
 /// Compile-time-embedded WGSL source for the sky shader.
 const SHADER_SRC: &str = include_str!(concat!(
@@ -72,7 +72,11 @@ pub fn build(
             stencil: Default::default(),
             bias: Default::default(),
         }),
-        multisample: wgpu::MultisampleState::default(),
+        multisample: wgpu::MultisampleState {
+            count: MSAA_SAMPLES,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
         multiview: None,
         cache: None,
     });

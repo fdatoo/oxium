@@ -30,7 +30,7 @@ use crate::render::camera::{
     CameraUniform, ChunkUniform,
 };
 use crate::render::font::{build_font_atlas, ATLAS_H as FONT_ATLAS_H, ATLAS_W as FONT_ATLAS_W};
-use crate::render::gpu::{make_depth_texture, Gpu};
+use crate::render::gpu::{make_depth_texture, make_msaa_color_texture, Gpu};
 use crate::render::hud::HudFrame;
 use crate::render::mesh::{upload_mesh, GpuMesh};
 use crate::render::pipelines::cursor::{
@@ -103,6 +103,12 @@ fn aabb_in_frustum(planes: &[Vec4; 6], min: Vec3, max: Vec3) -> bool {
 pub struct Renderer {
     pub gpu: Gpu,
     depth_view: wgpu::TextureView,
+    /// Multisampled colour render target for the world pass. The world
+    /// pass draws into this `MSAA_SAMPLES`-sample texture; the render
+    /// pass's `resolve_target` is the swapchain texture, which wgpu
+    /// fills with the resolved single-sample result at end of pass.
+    /// Recreated by `resize` alongside the depth texture.
+    msaa_color_view: wgpu::TextureView,
     camera_buf: wgpu::Buffer,
     camera_bg: wgpu::BindGroup,
     chunk_bgl: wgpu::BindGroupLayout,
@@ -173,6 +179,12 @@ impl Renderer {
         let gpu = Gpu::new_with_present_mode(window, present_mode);
         let depth_view =
             make_depth_texture(&gpu.device, gpu.surface_cfg.width, gpu.surface_cfg.height);
+        let msaa_color_view = make_msaa_color_texture(
+            &gpu.device,
+            gpu.surface_cfg.width,
+            gpu.surface_cfg.height,
+            gpu.surface_cfg.format,
+        );
         let camera_bgl = make_camera_bind_group_layout(&gpu.device);
         let camera_buf = make_camera_buffer(&gpu.device);
         let camera_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -335,6 +347,7 @@ impl Renderer {
         Self {
             gpu,
             depth_view,
+            msaa_color_view,
             camera_buf,
             camera_bg,
             chunk_bgl,
@@ -399,6 +412,8 @@ impl Renderer {
     pub fn resize(&mut self, w: u32, h: u32) {
         self.gpu.resize(w, h);
         self.depth_view = make_depth_texture(&self.gpu.device, w, h);
+        self.msaa_color_view =
+            make_msaa_color_texture(&self.gpu.device, w, h, self.gpu.surface_cfg.format);
         // HUD lays out in pixel space so the screen-size uniform also
         // needs the new dimensions; otherwise the HUD shrinks/expands
         // to fill the old framebuffer rect.
@@ -550,7 +565,7 @@ impl Renderer {
             .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        self.encode_opaque_pass(&mut enc, &view, eye, &frustum);
+        self.encode_opaque_pass(&mut enc, &self.msaa_color_view, &view, eye, &frustum);
         // HUD: uploaded once per frame into fresh vertex/index
         // buffers (the HUD layout changes every frame as FPS ticks).
         if let Some(hud) = hud {
@@ -648,15 +663,19 @@ impl Renderer {
     fn encode_opaque_pass(
         &self,
         enc: &mut wgpu::CommandEncoder,
-        color_view: &wgpu::TextureView,
+        msaa_view: &wgpu::TextureView,
+        resolve_view: &wgpu::TextureView,
         eye: Vec3,
         frustum: &[Vec4; 6],
     ) {
         let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("sky+opaque-pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: color_view,
-                resolve_target: None,
+                // Draw into the multisampled colour target. wgpu
+                // auto-resolves into `resolve_target` (the single-
+                // sample swapchain or screenshot view) at end of pass.
+                view: msaa_view,
+                resolve_target: Some(resolve_view),
                 ops: wgpu::Operations {
                     // The sky pass overwrites every pixel, so this clear
                     // color only shows in degenerate frames (e.g. before
@@ -834,7 +853,13 @@ impl Renderer {
             .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        self.encode_opaque_pass(&mut enc, target, eye, &frustum);
+        // Screenshot targets are sized to match the surface
+        // (`capture_offscreen` in `main.rs` clones the
+        // `surface_cfg`), so the renderer's existing MSAA colour
+        // view is the right shape to resolve into the screenshot
+        // texture. Future callers that pass an off-size target
+        // would need to allocate their own MSAA intermediate.
+        self.encode_opaque_pass(&mut enc, &self.msaa_color_view, target, eye, &frustum);
         if let Some(hud) = hud {
             self.encode_hud_pass(&mut enc, target, hud);
         }

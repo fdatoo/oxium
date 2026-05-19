@@ -13,7 +13,7 @@
 //! * **Shader:** `water.wgsl` discards non-water fragments and emits
 //!   vertex wave displacement + fresnel + sun specular for the rest.
 
-use crate::render::gpu::DEPTH_FORMAT;
+use crate::render::gpu::{DEPTH_FORMAT, MSAA_SAMPLES};
 
 pub struct WaterPipeline {
     pub pipeline: wgpu::RenderPipeline,
@@ -116,7 +116,11 @@ pub fn build(
             stencil: Default::default(),
             bias: Default::default(),
         }),
-        multisample: wgpu::MultisampleState::default(),
+        multisample: wgpu::MultisampleState {
+            count: MSAA_SAMPLES,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
         multiview: None,
         cache: None,
     });

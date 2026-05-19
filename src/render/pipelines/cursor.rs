@@ -5,7 +5,7 @@
 //! ties against the block's own faces) but depth-writes are off so we
 //! don't disturb the depth buffer for any subsequent passes.
 
-use crate::render::gpu::DEPTH_FORMAT;
+use crate::render::gpu::{DEPTH_FORMAT, MSAA_SAMPLES};
 
 /// Compile-time-embedded WGSL source for the cursor shader.
 const SHADER_SRC: &str = include_str!(concat!(
@@ -64,7 +64,11 @@ pub fn build(
             stencil: Default::default(),
             bias: Default::default(),
         }),
-        multisample: wgpu::MultisampleState::default(),
+        multisample: wgpu::MultisampleState {
+            count: MSAA_SAMPLES,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
         multiview: None,
         cache: None,
     });

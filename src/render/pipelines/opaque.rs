@@ -4,7 +4,7 @@
 //! The wgsl shader source is embedded at compile time via `include_str!` so
 //! the binary is self-contained (no separate shader files at runtime).
 
-use crate::render::gpu::DEPTH_FORMAT;
+use crate::render::gpu::{DEPTH_FORMAT, MSAA_SAMPLES};
 
 /// Wraps the built `wgpu::RenderPipeline` for opaque chunk drawing.
 pub struct OpaquePipeline {
@@ -110,7 +110,11 @@ pub fn build(
             stencil: Default::default(),
             bias: Default::default(),
         }),
-        multisample: wgpu::MultisampleState::default(),
+        multisample: wgpu::MultisampleState {
+            count: MSAA_SAMPLES,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
         multiview: None,
         cache: None,
     });
