@@ -8,7 +8,9 @@
 //! Sprint doubles the speed regardless of mode. The "wishdir" is *local* to
 //! the camera basis: `+z = forward`, `+x = right`, `+y = up`.
 
-use crate::ecs::components::{Camera, Movement, MovementMode, PlayerInput, Position, Velocity};
+use crate::ecs::components::{
+    Camera, Grounded, Movement, MovementMode, PlayerInput, Position, Velocity,
+};
 use crate::ecs::GameEcs;
 use glam::Vec3;
 
@@ -21,14 +23,15 @@ pub fn movement(ecs: &mut GameEcs, dt: f32) {
     let mut q = ecs
         .world
         .query_one::<(
-            &Camera,
+            &mut Camera,
             &PlayerInput,
             &Movement,
             &mut Position,
             &mut Velocity,
+            &Grounded,
         )>(ecs.player)
         .unwrap();
-    let (cam, input, mov, pos, vel) = q.get().unwrap();
+    let (cam, input, mov, pos, vel, grounded) = q.get().unwrap();
 
     // Camera basis (right-handed, +Y up):
     //   forward_3d  — full 3D look direction, used by Fly mode.
@@ -90,6 +93,27 @@ pub fn movement(ecs: &mut GameEcs, dt: f32) {
             vel.0.y += GRAVITY * dt;
             // Integration is handled by `physics::physics` — don't `pos.0
             // += vel.0 * dt` here, or the player will move twice.
+        }
+    }
+
+    // Walk-bob phase. Advances only when the player is on foot AND on
+    // the ground AND actually moving horizontally — Fly mode, falling,
+    // and standing still all hold the phase fixed.  Advancement rate
+    // is proportional to horizontal speed so a sprint produces a
+    // faster head-bob than a stroll. Held phase (when not walking)
+    // keeps the eye centred so there's no oscillation while flying.
+    let horiz_speed = Vec3::new(vel.0.x, 0.0, vel.0.z).length();
+    let walking_on_ground =
+        matches!(mov.mode, MovementMode::Walk) && grounded.0 && horiz_speed > 0.5;
+    if walking_on_ground {
+        // 1.6 rad per metre walked → about one full sin cycle every
+        // ~4 m of travel, which matches a comfortable footstep
+        // cadence at the player's 5 m/s walk speed.
+        cam.bob_phase += horiz_speed * 1.6 * dt;
+        // Wrap to keep the float from drifting toward precision loss
+        // over very long sessions.
+        if cam.bob_phase > std::f32::consts::TAU * 32.0 {
+            cam.bob_phase -= std::f32::consts::TAU * 32.0;
         }
     }
 }

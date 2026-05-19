@@ -55,6 +55,7 @@ impl GameEcs {
                 fov: 70f32.to_radians(),
                 // Eye is 1.6 m above the feet — a touch below the AABB top.
                 eye_offset: glam::Vec3::new(0.0, 1.6, 0.0),
+                bob_phase: 0.0,
             },
             PlayerInput::default(),
             Grounded::default(),
