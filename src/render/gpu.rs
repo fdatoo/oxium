@@ -175,21 +175,31 @@ pub fn make_depth_texture(
     (tex, view)
 }
 
+/// Reflection texture downsample factor relative to the main
+/// framebuffer. Half-resolution gives bilinear filtering across
+/// fewer pixels, which naturally smooths the reflection content
+/// and damps the per-frame "sliding" that appears as the camera
+/// moves through a sharp full-res reflection. Cuts reflection-pass
+/// fragment + fill cost to 1/4 too.
+pub const REFLECTION_SCALE: u32 = 2;
+
 /// Allocate the sampleable single-sample colour texture the water
 /// shader reads to sample the planar reflection. The reflection pass
 /// renders into a multisampled colour target and resolves into this
 /// texture at end of pass; the water shader then samples it via
 /// screen-space UVs with wave-normal distortion.
 ///
-/// Lower-than-screen resolution would be fine for perf (wave
-/// distortion hides reflection detail), but full res keeps the
-/// implementation simple and our scene isn't fragment-bound.
+/// Sized down by [`REFLECTION_SCALE`] so the natural bilinear blur
+/// damps reflection-sliding artefacts and reduces the cost of the
+/// extra render pass.
 pub fn make_reflection_color_textures(
     device: &wgpu::Device,
     width: u32,
     height: u32,
     format: wgpu::TextureFormat,
 ) -> (wgpu::TextureView, wgpu::Texture, wgpu::TextureView) {
+    let width = (width / REFLECTION_SCALE).max(1);
+    let height = (height / REFLECTION_SCALE).max(1);
     // The MSAA render target the reflection pass actually draws into.
     let msaa = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("reflection-color-msaa"),
@@ -236,6 +246,10 @@ pub fn make_reflection_depth_texture(
     width: u32,
     height: u32,
 ) -> wgpu::TextureView {
+    // Depth must match the reflection colour target's dimensions —
+    // also half-res via REFLECTION_SCALE.
+    let width = (width / REFLECTION_SCALE).max(1);
+    let height = (height / REFLECTION_SCALE).max(1);
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("reflection-depth"),
         size: wgpu::Extent3d {
