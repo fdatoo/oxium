@@ -92,13 +92,26 @@ struct VsOut {
 // interpolates between them, which reads as flat at any reasonable
 // camera distance.
 fn wave_height(world_xz: vec2<f32>, t: f32) -> f32 {
-    let big   = wnoise(world_xz * 0.05 + vec2<f32>( 0.30,  0.20) * t);
-    let med   = wnoise(world_xz * 0.13 + vec2<f32>(-0.18,  0.25) * t);
-    let small = wnoise(world_xz * 0.27 + vec2<f32>( 0.15, -0.22) * t);
-    // Each layer is centred around 0 (subtract 0.5) and weighted so
-    // the slow swell dominates and the fine chop is a small detail
-    // term on top.
-    return (big - 0.5) * 1.00 + (med - 0.5) * 0.55 + (small - 0.5) * 0.25;
+    // Three rotated plane-wave components. Using `sin(dot(p, dir))`
+    // produces axis-aligned crests only when `dir` is axis-aligned;
+    // we pick three non-orthogonal diagonal directions so the crest
+    // ridges run at three different angles and never line up into
+    // long parallel bands like the previous sin(x)·cos(z) version
+    // did.
+    //
+    // Frequencies tuned for visible per-block variation: 0.30
+    // gives a wavelength of ~21 blocks (long swell), 0.65 gives
+    // ~9.5 blocks (medium chop), 1.40 gives ~4.5 blocks (small
+    // surface detail). The per-block sampling step is well under
+    // Nyquist for all three so the waves don't alias into
+    // jagged stair-steps.
+    let dir1 = vec2<f32>( 0.71,  0.30);
+    let dir2 = vec2<f32>(-0.40,  0.85);
+    let dir3 = vec2<f32>( 0.55, -0.55);
+    let big   = sin(dot(world_xz, dir1) * 0.30 + t * 1.10);
+    let med   = sin(dot(world_xz, dir2) * 0.65 + t * 1.50);
+    let small = sin(dot(world_xz, dir3) * 1.40 + t * 2.20);
+    return big * 0.55 + med * 0.30 + small * 0.15;
 }
 
 // Numerical gradient of `wave_height` over `world_xz`. The two
@@ -194,28 +207,24 @@ fn vs_main(in: VsIn) -> VsOut {
     // greedy-merged side quads would shear apart visibly. -Y bottom
     // faces also stay flat (you only see them while underwater
     // looking up, where the flat plane is fine).
-    // Note: NO vertex displacement.
-    //
-    // We used to push the +Y face up/down by `wave_height * 0.28`
-    // here. The wave function evaluates to the same value at any
-    // given (world x, world z), so adjacent chunks agreed on the
-    // *boundary vertex* Y exactly. But the surface inside each
-    // chunk is rasterised as TWO triangles meeting on a diagonal,
-    // and each triangle's plane equation interpolates Y inside the
-    // chunk from its three corners. The slope perpendicular to a
-    // shared chunk-boundary edge is determined by the chunk's
-    // *interior* corner, which differs between neighbours — so the
-    // surface has a *slope* discontinuity at every chunk seam,
-    // visible as a 1-2 pixel dark hairline under MSAA (the
-    // rasteriser leaves micro-coverage gaps at the crease because
-    // adjacent triangles in different draw calls don't share an
-    // edge equation).
-    //
-    // Real shader packs avoid this by faking waves entirely in the
-    // fragment shader's normal field (no vertex motion). We already
-    // compute `wave_normal` per-pixel below; that drives fresnel +
-    // sun reflection so the surface still reads as rippled. The
-    // geometry itself stays perfectly planar across chunks.
+    // Wave displacement on the +Y top face. Safe to re-enable now
+    // that the mesher emits water tops as 1-block-per-quad (see
+    // `emit_water_tops_per_block` in `mesher/greedy.rs`) — at
+    // 1-block resolution the slope discontinuities between adjacent
+    // quads are tiny and read as part of the wave detail rather
+    // than as chunk-boundary hairlines. The earlier 32-block
+    // greedy water quads produced visible MSAA seams when
+    // displaced; small quads don't.
+    // Vertex wave displacement on +Y top faces. Now safe because
+    // the mesher emits water tops as 1-block-per-quad
+    // (`emit_water_tops_per_block`) — the chunk-boundary slope
+    // discontinuities that broke the previous 32-block-greedy
+    // version are gone at this resolution, and what was a "seam
+    // hairline" becomes part of the wave detail.
+    if (face == 2u) {
+        let h = wave_height(world_pos.xz, camera.time);
+        world_pos.y = world_pos.y + h * 0.22;
+    }
 
     var out: VsOut;
     out.clip_pos = camera.view_proj * vec4<f32>(world_pos, 1.0);
@@ -248,6 +257,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // double-shade after the opaque pass already drew them.
     if (in.v_color.a >= 0.95) {
         discard;
+    }
+
+    // DEBUG: visualise actual vertex displacement by colour-coding
+    // by world Y. If vertices are displaced, we should see Y vary
+    // across the surface.
+    if (camera.underwater_factor > 0.4 && camera.underwater_factor < 0.6) {
+        let dy = in.v_world.y - 62.0;
+        let t = (dy + 2.0) * 0.25; // map [-2, 2] -> [0, 1]
+        return vec4<f32>(t, 1.0 - t, 0.5, 1.0);
     }
 
     let view_dir = normalize(camera.eye.xyz - in.v_world);
