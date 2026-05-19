@@ -228,13 +228,7 @@ impl ApplicationHandler for App {
         // Skip cursor grab when running in screenshot mode so the helper
         // doesn't steal cursor focus on the host system.
         if self.cli.screenshot_path.is_none() {
-            if let Err(e) = window
-                .set_cursor_grab(CursorGrabMode::Locked)
-                .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined))
-            {
-                log::warn!("cursor grab failed: {e:?}");
-            }
-            window.set_cursor_visible(false);
+            grab_cursor(&window);
         }
 
         self.state = Some(state);
@@ -292,6 +286,15 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 state.step();
                 self.frames_drawn = self.frames_drawn.saturating_add(1);
+
+                if state.ui.cursor_state_changed {
+                    state.ui.cursor_state_changed = false;
+                    if state.ui.is_playing() {
+                        grab_cursor(&state.window);
+                    } else {
+                        release_cursor(&state.window);
+                    }
+                }
 
                 if let Some(path) = self.cli.screenshot_path.clone()
                     && self.frames_drawn > self.cli.warmup_frames
@@ -426,6 +429,21 @@ fn capture_offscreen(
         height,
         path,
     )
+}
+
+fn grab_cursor(window: &winit::window::Window) {
+    if let Err(e) = window
+        .set_cursor_grab(CursorGrabMode::Locked)
+        .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined))
+    {
+        log::warn!("cursor grab failed: {e:?}");
+    }
+    window.set_cursor_visible(false);
+}
+
+fn release_cursor(window: &winit::window::Window) {
+    let _ = window.set_cursor_grab(CursorGrabMode::None);
+    window.set_cursor_visible(true);
 }
 
 fn main() {
