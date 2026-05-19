@@ -5,7 +5,7 @@
 
 use crate::ui::effect::UiEffect;
 
-pub trait Command: Send + Sync {
+pub trait Command {
     fn name(&self) -> &'static str;
     fn help(&self) -> &'static str;
     fn run(&self, args: &[&str]) -> Result<Vec<UiEffect>, String>;
