@@ -25,6 +25,7 @@ pub fn build(
     surface_format: wgpu::TextureFormat,
     camera_bgl: &wgpu::BindGroupLayout,
     chunk_bgl: &wgpu::BindGroupLayout,
+    atlas_bgl: &wgpu::BindGroupLayout,
 ) -> OpaquePipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("opaque-shader"),
@@ -33,17 +34,19 @@ pub fn build(
 
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("opaque-layout"),
-        // group(0) = camera, group(1) = chunk uniform.
-        bind_group_layouts: &[camera_bgl, chunk_bgl],
+        // group(0) = camera, group(1) = chunk uniform, group(2) = atlas
+        // (texture + sampler shared by every chunk draw).
+        bind_group_layouts: &[camera_bgl, chunk_bgl, atlas_bgl],
         push_constant_ranges: &[],
     });
 
-    // Vertex layout packs the 16-byte `Vertex` struct into three GPU-side
+    // Vertex layout packs the 16-byte `Vertex` struct into four GPU-side
     // 4-byte tuples so the shader can pull them as `vec4<u32>` slots:
     //
-    //   offset 0  → pos.xyz + ao           (Uint8x4)
-    //   offset 4  → color RGBA              (Unorm8x4, normalised to [0,1])
-    //   offset 8  → normal_face + light + 2-byte pad (Uint8x4)
+    //   offset 0  → pos.xyz + ao                          (Uint8x4)
+    //   offset 4  → color RGBA tint                       (Unorm8x4 → [0,1])
+    //   offset 8  → normal_face + light + 2-byte pad      (Uint8x4)
+    //   offset 12 → tile_index + u_tile + v_tile + pad    (Uint8x4)
     //
     // Shader location numbers below match the wgsl `@location` attributes.
     let vertex_layout = wgpu::VertexBufferLayout {
@@ -63,6 +66,11 @@ pub fn build(
             wgpu::VertexAttribute {
                 offset: 8,
                 shader_location: 3,
+                format: wgpu::VertexFormat::Uint8x4,
+            },
+            wgpu::VertexAttribute {
+                offset: 12,
+                shader_location: 4,
                 format: wgpu::VertexFormat::Uint8x4,
             },
         ],

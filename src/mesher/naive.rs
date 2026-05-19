@@ -11,7 +11,7 @@
 //! 1. It is the obvious-but-correct reference; greedy tests compare against it.
 //! 2. It's useful as a fallback during debugging.
 
-use crate::mesher::{ChunkMesh, Face, Vertex};
+use crate::mesher::{ChunkMesh, Face, Vertex, UNTEXTURED_TILE};
 use crate::voxel::block::{Block, BlockRegistry};
 use crate::voxel::chunk::DenseChunk;
 use crate::voxel::coords::{LocalPos, CHUNK_DIM_U};
@@ -94,9 +94,17 @@ fn emit_quad(
         (color[2] * 255.0) as u8,
         (color[3] * 255.0) as u8,
     ];
+    let tile_index = info
+        .tile_for_face(face)
+        .map(|t| t.index())
+        .unwrap_or(UNTEXTURED_TILE);
+    // For a 1×1 naive quad the corner UVs are simply the unit square in
+    // tile space; the four corners line up with `face_corners`' winding.
+    let corner_tile_uv: [(u8, u8); 4] = [(0, 0), (0, 1), (1, 1), (1, 0)];
 
     let base = mesh.vertices.len() as u32;
-    for c in corners {
+    for (i, c) in corners.into_iter().enumerate() {
+        let (u_tile, v_tile) = corner_tile_uv[i];
         mesh.vertices.push(Vertex {
             pos: c,
             // No real AO yet — uniform "fully unoccluded" (3); M4 bakes proper AO.
@@ -106,6 +114,10 @@ fn emit_quad(
             // No real lighting yet — fully lit on both channels; M5 fills this in.
             light: 0xFF,
             _pad: [0; 2],
+            tile_index,
+            u_tile,
+            v_tile,
+            _pad2: 0,
         });
     }
     // Two triangles forming the quad, in counter-clockwise winding so the

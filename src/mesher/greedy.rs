@@ -21,7 +21,7 @@
 //! just send less data to the GPU per frame.
 
 use crate::mesher::ao::corner_ao_at;
-use crate::mesher::{ChunkMesh, Face, Vertex};
+use crate::mesher::{ChunkMesh, Face, Vertex, UNTEXTURED_TILE};
 use crate::voxel::block::{Block, BlockRegistry};
 use crate::voxel::chunk::DenseChunk;
 use crate::voxel::coords::{LocalPos, CHUNK_DIM_U};
@@ -291,26 +291,37 @@ fn emit_greedy_quad(
         (color[2] * 255.0) as u8,
         (color[3] * 255.0) as u8,
     ];
+    // Which atlas tile does this (block, face) pair sample from?
+    // `None` ⇒ `UNTEXTURED_TILE` sentinel ⇒ shader skips the sample
+    // and shades the vertex colour directly (used for `Torch`, etc.).
+    let tile_index = info
+        .tile_for_face(face)
+        .map(|t| t.index())
+        .unwrap_or(UNTEXTURED_TILE);
 
     // Positive faces sit on the high side of the slice (e.g. PosY of block
     // at y=k lives at y=k+1); negative faces sit at the low side.
     let normal_pos = matches!(face, Face::PosX | Face::PosY | Face::PosZ);
     let s = if normal_pos { slice + 1 } else { slice };
 
-    // Four corners in (u, v) order, untransformed.
+    // Four corners in (u, v) order, untransformed. Each corner doubles
+    // as its own UV in tile units: a 1×1 quad spans `(0,0)..(1,1)` in
+    // tile space, an `w×h` greedy quad spans `(0,0)..(w,h)`. The
+    // fragment shader's `fract` then repeats the tile per block cell.
     let corner_uv: [(u8, u8); 4] = [
-        (ui, vi),
-        (ui + w, vi),
-        (ui + w, vi + h),
-        (ui, vi + h),
+        (0, 0),
+        (w, 0),
+        (w, h),
+        (0, h),
     ];
-    // Map each (u, v) back to a 3D voxel-local position.
+    // Map each cell-relative (u, v) back to a 3D voxel-local position
+    // by adding the quad's `(ui, vi)` origin.
     let mut positions = [[0u8; 3]; 4];
     for (i, (u, v)) in corner_uv.iter().enumerate() {
         let mut p = [0u8; 3];
         p[n_axis as usize] = s;
-        p[u_axis as usize] = *u;
-        p[v_axis as usize] = *v;
+        p[u_axis as usize] = ui + *u;
+        p[v_axis as usize] = vi + *v;
         positions[i] = p;
     }
 
@@ -330,6 +341,7 @@ fn emit_greedy_quad(
     let ao = cell.ao;
     let light = cell.light;
     for i in 0..4 {
+        let (u_tile, v_tile) = corner_uv[order[i]];
         mesh.vertices.push(Vertex {
             pos: positions[order[i]],
             ao: ao[order[i]],
@@ -337,6 +349,10 @@ fn emit_greedy_quad(
             normal_face: face as u8,
             light,
             _pad: [0; 2],
+            tile_index,
+            u_tile,
+            v_tile,
+            _pad2: 0,
         });
     }
 

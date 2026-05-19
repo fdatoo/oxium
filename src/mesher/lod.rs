@@ -225,7 +225,13 @@ pub fn mesh_lod(
                 Some(c) => c,
                 None => info.color,
             };
-            // Top quad (PosY) — surface block colour.
+            let top_tile = info
+                .tile_for_face(Face::PosY)
+                .map(|t| t.index())
+                .unwrap_or(crate::mesher::UNTEXTURED_TILE);
+            // Top quad (PosY) — surface block colour. UV spans
+            // `(0,0)..(f,f)` in tile units so each LOD-merged block
+            // patch gets one tile repetition per source block.
             emit_quad(
                 &mut mesh,
                 Face::PosY,
@@ -235,6 +241,8 @@ pub fn mesh_lod(
                     [x0 + f, y_top, z0 + f],
                     [x0 + f, y_top, z0],
                 ],
+                [(0, 0), (0, f), (f, f), (f, 0)],
+                top_tile,
                 pack_color(top_color),
                 light,
             );
@@ -242,6 +250,11 @@ pub fn mesh_lod(
             // Side skirts: one per cardinal direction where the
             // neighbour column is shorter (or doesn't exist).
             let bulk_color = pack_color(reg.info(bulk).color);
+            let bulk_tile = reg
+                .info(bulk)
+                .tile_for_face(Face::PosX)
+                .map(|t| t.index())
+                .unwrap_or(crate::mesher::UNTEXTURED_TILE);
             for &(dx, dz, face) in &[
                 (1i32, 0i32, Face::PosX),
                 (-1, 0, Face::NegX),
@@ -255,7 +268,11 @@ pub fn mesh_lod(
                     continue;
                 }
                 let y_bot = neighbour_top.min(u8::MAX as u32) as u8;
-                // CCW from outside in the face's normal direction.
+                // Vertical span of this skirt in block (= tile) units.
+                let dy = y_top.saturating_sub(y_bot);
+                // CCW from outside in the face's normal direction. The
+                // matching UV order is (0,0)/(0,dy)/(f,dy)/(f,0) — one
+                // tile per source block both horizontally and vertically.
                 let corners = match face {
                     Face::PosX => [
                         [x0 + f, y_bot, z0],
@@ -283,7 +300,8 @@ pub fn mesh_lod(
                     ],
                     _ => unreachable!(),
                 };
-                emit_quad(&mut mesh, face, corners, bulk_color, light);
+                let uvs: [(u8, u8); 4] = [(0, 0), (0, dy), (f, dy), (f, 0)];
+                emit_quad(&mut mesh, face, corners, uvs, bulk_tile, bulk_color, light);
             }
         }
     }
@@ -302,17 +320,21 @@ fn pack_color(c: [f32; 4]) -> [u8; 4] {
 
 /// Push a single 4-vertex / 6-index quad into `mesh`. Corners are in
 /// CCW order from outside the face's normal direction; we use the same
-/// `0..1..2 / 0..2..3` triangle split as the greedy mesher.
+/// `0..1..2 / 0..2..3` triangle split as the greedy mesher. `corner_uv`
+/// maps each corner to a per-vertex tile-unit UV (parallel to `corners`).
 fn emit_quad(
     mesh: &mut crate::mesher::ChunkMesh,
     face: crate::mesher::Face,
     corners: [[u8; 3]; 4],
+    corner_uv: [(u8, u8); 4],
+    tile_index: u8,
     color: [u8; 4],
     light: u8,
 ) {
     use crate::mesher::Vertex;
     let base = mesh.vertices.len() as u32;
-    for c in corners {
+    for (i, c) in corners.into_iter().enumerate() {
+        let (u_tile, v_tile) = corner_uv[i];
         mesh.vertices.push(Vertex {
             pos: c,
             ao: 3,
@@ -320,6 +342,10 @@ fn emit_quad(
             normal_face: face as u8,
             light,
             _pad: [0; 2],
+            tile_index,
+            u_tile,
+            v_tile,
+            _pad2: 0,
         });
     }
     mesh.indices

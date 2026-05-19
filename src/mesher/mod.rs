@@ -59,18 +59,28 @@ impl Face {
 ///
 /// Why so packed? At our render distance we'll produce millions of vertices.
 /// Each saved byte multiplies. The fields are deliberately laid out so the
-/// vertex shader can read them as three `vec4<u32>`s (see `opaque.wgsl`):
+/// vertex shader can read them as four `vec4<u32>`s (see `opaque.wgsl`):
 ///
-/// | Offset | Bytes | Field             | Notes                              |
-/// |--------|-------|-------------------|------------------------------------|
-/// |   0    |   3   | `pos`             | local chunk coords `0..=32`        |
-/// |   3    |   1   | `ao`              | 0..=3, ambient-occlusion darkness  |
-/// |   4    |   4   | `color`           | RGBA, normalised `[0,1]` in shader |
-/// |   8    |   1   | `normal_face`     | [`Face`] discriminant              |
-/// |   9    |   1   | `light`           | low 4 = sky, high 4 = block        |
-/// |  10    |   2   | `_pad`            | alignment to 4-byte tuples         |
+/// | Offset | Bytes | Field         | Notes                                  |
+/// |--------|-------|---------------|----------------------------------------|
+/// |   0    |   3   | `pos`         | local chunk coords `0..=32`            |
+/// |   3    |   1   | `ao`          | 0..=3, ambient-occlusion darkness      |
+/// |   4    |   4   | `color`       | RGBA tint, normalised `[0,1]` in shader|
+/// |   8    |   1   | `normal_face` | [`Face`] discriminant                  |
+/// |   9    |   1   | `light`       | low 4 = sky, high 4 = block            |
+/// |  10    |   2   | `_pad`        | alignment to 4-byte tuples             |
+/// |  12    |   1   | `tile_index`  | atlas tile (0..=15); 0xFF = untextured |
+/// |  13    |   1   | `u_tile`      | corner U in *tile units* (0..=32)      |
+/// |  14    |   1   | `v_tile`      | corner V in *tile units* (0..=32)      |
+/// |  15    |   1   | `_pad2`       | alignment to 4-byte tuples             |
 ///
 /// Total: 16 bytes — matches the GPU's preferred `vec4<u32>` access pattern.
+///
+/// "Tile units" means: 1.0 = one whole tile width. Across a greedy
+/// `w × h` quad the corner UVs span `(0,0)..(w,h)`, the rasteriser
+/// interpolates linearly, and the fragment shader calls `fract` to wrap
+/// each integer cell back to the tile's `[0, 1)` range. That gives
+/// per-block tile repetition for free without splitting greedy quads.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct Vertex {
@@ -80,7 +90,16 @@ pub struct Vertex {
     pub normal_face: u8,
     pub light: u8,
     pub _pad: [u8; 2],
+    pub tile_index: u8,
+    pub u_tile: u8,
+    pub v_tile: u8,
+    pub _pad2: u8,
 }
+
+/// Sentinel `tile_index` value: "this vertex has no texture, use the
+/// vertex colour straight". Read by the shader; written by the mesher
+/// for blocks like `Air` and `Torch` that don't have an atlas binding.
+pub const UNTEXTURED_TILE: u8 = 0xFF;
 
 /// CPU-side mesh data destined for the GPU. Owned by the worker thread that
 /// built it; ownership transfers to the main thread when uploaded via

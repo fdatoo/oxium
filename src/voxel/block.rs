@@ -13,7 +13,39 @@
 //! definitions; adding modding/data files in the future would mean changing
 //! `new` into a "load from TOML" function.
 
+use crate::mesher::Face;
 use serde::{Deserialize, Serialize};
+
+/// One named entry in the rendering atlas. The discriminant doubles as
+/// the **tile index** the mesher writes into each vertex — it MUST stay
+/// in lockstep with the file order in `render::atlas::tile_files` so
+/// atlas slot N really does hold the texture at index N.
+///
+/// `Tile` lives in the library-side `voxel::block` module (not in
+/// `render`) so [`BlockInfo`] can reference it without the library
+/// depending on `wgpu`. The render layer keeps the actual atlas image.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tile {
+    Stone = 0,
+    Dirt = 1,
+    GrassTop = 2,
+    GrassSide = 3,
+    Sand = 4,
+    OakLog = 5,
+    OakLogTop = 6,
+    OakLeaves = 7,
+    WaterStill = 8,
+}
+
+impl Tile {
+    /// The byte-sized index the vertex format carries. Mirrors
+    /// `self as u8` but expressed as a method so callers don't sprinkle
+    /// `as` casts around.
+    pub fn index(self) -> u8 {
+        self as u8
+    }
+}
 
 /// Every distinct kind of block in the world. v0 ships with this small set;
 /// new variants are appended only (the discriminants are part of the on-disk
@@ -71,10 +103,36 @@ pub struct BlockInfo {
     pub emission: u8,
     /// Side-face RGBA colour. Stored as f32 to keep arithmetic clean;
     /// converted to bytes when emitting vertex data.
+    ///
+    /// With textures enabled, this is also the **tint** the fragment
+    /// shader multiplies the sampled texel by — so grayscale tiles like
+    /// `grass_block_top` come out green when `color` is green, and
+    /// `stone.png` stays neutral when `color` is white.
     pub color: [f32; 4],
-    /// Optional separate top-face colour. Set for grass (green top, brown
-    /// sides). `None` means the top is drawn with `color`.
+    /// Optional separate top-face colour / tint. Set for grass (green
+    /// top, brown sides). `None` means the top is drawn with `color`.
     pub top_color: Option<[f32; 4]>,
+    /// Atlas tile to sample on the ±X / ±Z (side) faces. `None` means
+    /// this block has no texture binding — the shader falls back to a
+    /// solid `color` fill, used for `Air` and `Torch` today.
+    pub tile_side: Option<Tile>,
+    /// Atlas tile for the +Y (top) face. `None` ⇒ use `tile_side`.
+    pub tile_top: Option<Tile>,
+    /// Atlas tile for the −Y (bottom) face. `None` ⇒ use `tile_side`.
+    pub tile_bottom: Option<Tile>,
+}
+
+impl BlockInfo {
+    /// Resolve which atlas tile should be sampled on the given face.
+    /// Returns `None` for untextured blocks (the mesher emits 0 in that
+    /// case and the shader uses the vertex colour directly).
+    pub fn tile_for_face(&self, face: Face) -> Option<Tile> {
+        match face {
+            Face::PosY => self.tile_top.or(self.tile_side),
+            Face::NegY => self.tile_bottom.or(self.tile_side),
+            _ => self.tile_side,
+        }
+    }
 }
 
 /// Fixed-size lookup from [`Block`] to [`BlockInfo`].
@@ -88,12 +146,17 @@ impl BlockRegistry {
     /// variant immediately shows up visually.
     pub fn new() -> Self {
         use Block::*;
+        // Magenta "missing info" sentinel for any slot the explicit
+        // list below forgets to fill.
         let mut infos = [BlockInfo {
             solid: true,
             opaque: true,
             emission: 0,
             color: [1.0, 0.0, 1.0, 1.0],
             top_color: None,
+            tile_side: None,
+            tile_top: None,
+            tile_bottom: None,
         }; BLOCK_COUNT];
 
         infos[Air as usize] = BlockInfo {
@@ -102,34 +165,56 @@ impl BlockRegistry {
             emission: 0,
             color: [0.0; 4],
             top_color: None,
+            tile_side: None,
+            tile_top: None,
+            tile_bottom: None,
         };
         infos[Stone as usize] = BlockInfo {
             solid: true,
             opaque: true,
             emission: 0,
-            color: [0.50, 0.50, 0.52, 1.0],
+            // Stone texture is already coloured — neutral white tint
+            // leaves it unmodified.
+            color: [1.0, 1.0, 1.0, 1.0],
             top_color: None,
+            tile_side: Some(Tile::Stone),
+            tile_top: None,
+            tile_bottom: None,
         };
         infos[Dirt as usize] = BlockInfo {
             solid: true,
             opaque: true,
             emission: 0,
-            color: [0.55, 0.40, 0.25, 1.0],
+            color: [1.0, 1.0, 1.0, 1.0],
             top_color: None,
+            tile_side: Some(Tile::Dirt),
+            tile_top: None,
+            tile_bottom: None,
         };
         infos[Grass as usize] = BlockInfo {
             solid: true,
             opaque: true,
             emission: 0,
-            color: [0.55, 0.40, 0.25, 1.0],
-            top_color: Some([0.40, 0.70, 0.30, 1.0]),
+            // Sides and bottom use neutral white tint over the
+            // pre-coloured dirt / grass_side textures…
+            color: [1.0, 1.0, 1.0, 1.0],
+            // …but `grass_block_top.png` ships **grayscale** so the
+            // engine can tint it per-biome. The green here multiplies
+            // the texel and lands close to vanilla Minecraft grass.
+            top_color: Some([0.49, 0.78, 0.32, 1.0]),
+            tile_side: Some(Tile::GrassSide),
+            tile_top: Some(Tile::GrassTop),
+            tile_bottom: Some(Tile::Dirt),
         };
         infos[Sand as usize] = BlockInfo {
             solid: true,
             opaque: true,
             emission: 0,
-            color: [0.85, 0.78, 0.55, 1.0],
+            color: [1.0, 1.0, 1.0, 1.0],
             top_color: None,
+            tile_side: Some(Tile::Sand),
+            tile_top: None,
+            tile_bottom: None,
         };
         infos[Water as usize] = BlockInfo {
             // Water is non-solid (player wades through) and non-opaque (light
@@ -137,23 +222,36 @@ impl BlockRegistry {
             solid: false,
             opaque: false,
             emission: 0,
-            color: [0.20, 0.45, 0.80, 0.55],
+            // Blue tint over the grayscale ripple texture; alpha < 1
+            // keeps the shader's water-shimmer code path active.
+            color: [0.38, 0.62, 0.95, 0.78],
             top_color: None,
+            tile_side: Some(Tile::WaterStill),
+            tile_top: None,
+            tile_bottom: None,
         };
         infos[Wood as usize] = BlockInfo {
             solid: true,
             opaque: true,
             emission: 0,
-            color: [0.40, 0.28, 0.18, 1.0],
+            color: [1.0, 1.0, 1.0, 1.0],
             top_color: None,
+            // Bark on the sides, concentric rings on top + bottom.
+            tile_side: Some(Tile::OakLog),
+            tile_top: Some(Tile::OakLogTop),
+            tile_bottom: Some(Tile::OakLogTop),
         };
         infos[Leaves as usize] = BlockInfo {
             // Leaves block movement but not light — light filters through.
             solid: true,
             opaque: false,
             emission: 0,
-            color: [0.20, 0.55, 0.25, 1.0],
+            // Grayscale leaves texture tinted to a leafy green.
+            color: [0.40, 0.72, 0.30, 1.0],
             top_color: None,
+            tile_side: Some(Tile::OakLeaves),
+            tile_top: None,
+            tile_bottom: None,
         };
         infos[Torch as usize] = BlockInfo {
             // Bright emitter, non-solid (you walk through them, M-style).
@@ -162,6 +260,9 @@ impl BlockRegistry {
             emission: 13,
             color: [1.0, 0.80, 0.30, 1.0],
             top_color: None,
+            tile_side: None,
+            tile_top: None,
+            tile_bottom: None,
         };
 
         Self { infos }

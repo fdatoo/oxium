@@ -10,6 +10,7 @@
 //! Higher level objects (`RenderPipeline`, `BindGroup`, `Buffer`, `Texture`)
 //! are owned per subsystem (sky, opaque voxels, water, cursor, HUD).
 
+pub mod atlas;
 pub mod camera;
 pub mod gpu;
 pub mod mesh;
@@ -21,6 +22,7 @@ use std::sync::Arc;
 use winit::window::Window;
 
 use crate::mesher::ChunkMesh;
+use crate::render::atlas::{build_atlas, upload_atlas, AtlasGpu};
 use crate::render::camera::{
     make_camera_bind_group_layout, make_camera_buffer, make_chunk_bind_group_layout, view_proj,
     CameraUniform, ChunkUniform,
@@ -60,6 +62,11 @@ pub struct Renderer {
     cursor_bg: wgpu::BindGroup,
     cursor_visible: bool,
 
+    /// Block texture atlas, bound as group 2 by the opaque pipeline.
+    /// Built once at startup from `assets/textures/*.png`; the GPU
+    /// resources stay alive for the renderer's lifetime.
+    atlas: AtlasGpu,
+
     /// Up to three GPU meshes per loaded chunk — one per LOD level
     /// (`[L0, L1, L2]`). The render loop picks which slot to draw based
     /// on the chunk's distance to the camera, falling back to the
@@ -93,11 +100,25 @@ impl Renderer {
             }],
         });
         let chunk_bgl = make_chunk_bind_group_layout(&gpu.device);
+
+        // Atlas: load block textures from `assets/textures/`, pack them
+        // into a single sRGB RGBA8 image, upload to a wgpu texture, and
+        // make a bind group. Missing files fall back to magenta tiles
+        // (see `build_atlas`), so a startup with no `assets/textures/`
+        // directory still renders — just with hot-pink blocks.
+        let textures_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join("textures");
+        let atlas_image = build_atlas(&textures_dir)
+            .expect("build_atlas only errors on internal bugs, not missing files");
+        let atlas = upload_atlas(&gpu.device, &gpu.queue, &atlas_image);
+
         let opaque_pipe = build_opaque(
             &gpu.device,
             gpu.surface_cfg.format,
             &camera_bgl,
             &chunk_bgl,
+            &atlas.bind_group_layout,
         );
         let sky_pipe = build_sky(&gpu.device, gpu.surface_cfg.format, &camera_bgl);
 
@@ -135,6 +156,7 @@ impl Renderer {
             cursor_buf,
             cursor_bg,
             cursor_visible: false,
+            atlas,
             chunk_meshes: HashMap::new(),
         }
     }
@@ -351,6 +373,10 @@ impl Renderer {
         // L1/L2, or vice versa).
         pass.set_pipeline(&self.opaque_pipe.pipeline);
         pass.set_bind_group(0, &self.camera_bg, &[]);
+        // Atlas (group 2) is shared by every chunk draw — bind once
+        // outside the per-chunk loop. Per-chunk uniform (group 1) still
+        // varies per draw and is set inside the loop below.
+        pass.set_bind_group(2, &self.atlas.bind_group, &[]);
         for (coord, slots) in &self.chunk_meshes {
             let center = coord.origin().0;
             let center_f = Vec3::new(
