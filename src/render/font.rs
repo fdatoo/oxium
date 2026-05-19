@@ -96,7 +96,10 @@ const GLYPHS: &[(char, Glyph)] = &[
 
 /// Return the bit pattern for `c`, or the `space` blank if `c` isn't
 /// in the table. The linear scan is fine: `GLYPHS` is short and this
-/// runs only at startup (the atlas is baked once).
+/// runs only at startup (the atlas is baked once). Test-only — the
+/// production atlas builder walks `GLYPHS` directly without this
+/// indirection.
+#[cfg(test)]
 fn glyph_for(c: char) -> Glyph {
     for (k, g) in GLYPHS {
         if *k == c {

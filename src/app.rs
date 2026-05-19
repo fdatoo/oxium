@@ -147,16 +147,14 @@ impl AppState {
     /// Build all subsystems. The player spawns at `(16, 96, 16)` — above
     /// the average terrain height (≈ 64) so the world streams in
     /// beneath the player rather than around them.
-    pub fn new(window: Arc<Window>) -> Self {
-        Self::new_with_spawn(window, glam::Vec3::new(16.0, 96.0, 16.0), false, None)
-    }
-
-    /// Like [`new`] but accepts an explicit spawn point. Used by the
-    /// CLI `--spawn` / `--find-water` flags. `uncapped = true`
-    /// switches the swapchain to `PresentMode::Immediate` so HUD FPS
-    /// shows actual throughput instead of being capped to the
-    /// display refresh rate. `profile_path = Some(p)` opens
-    /// `crate::profiler::Profiler` and starts writing per-frame CSV.
+    /// Build all subsystems. The player spawns at the supplied
+    /// world-space coord (the CLI `--spawn` / `--find-water` flags
+    /// pick this; the default mid-air location is set in `main`).
+    /// `uncapped = true` switches the swapchain to
+    /// `PresentMode::Immediate` so HUD FPS shows actual throughput
+    /// instead of being capped to the display refresh rate.
+    /// `profile_path = Some(p)` opens `crate::profiler::Profiler`
+    /// and starts writing per-frame CSV.
     pub fn new_with_spawn(
         window: Arc<Window>,
         spawn: glam::Vec3,

@@ -154,14 +154,10 @@ struct ChunkGpu {
 }
 
 impl Renderer {
-    /// Initialize the renderer on the given window.
-    pub fn new(window: Arc<Window>) -> Self {
-        Self::new_with_present_mode(window, wgpu::PresentMode::Fifo)
-    }
-
-    /// Like [`new`] but lets the caller pick the swapchain present
-    /// mode — `Immediate` is the diagnostic option (no v-sync,
-    /// HUD FPS reflects real throughput).
+    /// Initialize the renderer with the chosen swapchain present
+    /// mode. Callers pass `Fifo` for v-sync (normal play) or
+    /// `Immediate` for "uncapped" perf measurement so HUD FPS
+    /// reflects real throughput.
     pub fn new_with_present_mode(window: Arc<Window>, present_mode: wgpu::PresentMode) -> Self {
         let gpu = Gpu::new_with_present_mode(window, present_mode);
         let depth_view =

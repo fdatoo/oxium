@@ -43,14 +43,10 @@ impl Gpu {
     /// `request_adapter`/`request_device` calls on the main thread. wgpu's
     /// "async" here is mostly an artefact of WebGPU compatibility — on
     /// native it completes immediately, so the block is cheap.
-    pub fn new(window: Arc<Window>) -> Self {
-        Self::new_with_present_mode(window, wgpu::PresentMode::Fifo)
-    }
-
-    /// Variant that lets the caller pick the swapchain present mode —
-    /// `Fifo` for v-sync (default), `Immediate` for "uncapped" perf
-    /// measurement so the HUD's FPS readout reflects actual throughput
-    /// rather than the display's refresh rate.
+    /// Pick the swapchain present mode here — `Fifo` for v-sync
+    /// (default in normal play), `Immediate` for "uncapped" perf
+    /// measurement so the HUD's FPS readout reflects actual
+    /// throughput rather than the display's refresh rate.
     pub fn new_with_present_mode(window: Arc<Window>, present_mode: wgpu::PresentMode) -> Self {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
 
