@@ -29,9 +29,9 @@ pub const GLYPH_H: u32 = 7;
 pub const CELL_W: u32 = 8;
 /// Vertical stride; only one row of glyphs is laid out today.
 pub const CELL_H: u32 = 8;
-/// Number of glyph slots in the atlas (256 / 8). Plenty of room for
-/// growth beyond the ~20 chars we currently encode.
-pub const SLOT_COUNT: u32 = 32;
+/// Number of glyph slots in the atlas. Holds digits + the full
+/// uppercase alphabet + common punctuation with room to spare.
+pub const SLOT_COUNT: u32 = 64;
 /// Atlas pixel width.
 pub const ATLAS_W: u32 = SLOT_COUNT * CELL_W;
 /// Atlas pixel height.
@@ -45,10 +45,11 @@ type Glyph = [u8; 7];
 /// Per-character glyph table. The HUD looks up each printable char via
 /// [`glyph_for`]; characters not in this list render as blanks.
 ///
-/// The set is hand-picked to cover everything the live HUD prints:
-/// digits, the few uppercase letters in "FPS" / "XYZ", and the
-/// punctuation `:`, `.`, `-`, `,`. Add a new char by extending this
-/// list — no other code changes required.
+/// The set covers digits, the full uppercase alphabet, and common
+/// punctuation — enough for any HUD string we'd want to compose
+/// without having to think about which letters happen to exist.
+/// Add a new char by extending this list (the slot index is just its
+/// position in the array, so order doesn't matter to callers).
 const GLYPHS: &[(char, Glyph)] = &[
     ('0', [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110]),
     ('1', [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110]),
@@ -60,9 +61,29 @@ const GLYPHS: &[(char, Glyph)] = &[
     ('7', [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000]),
     ('8', [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110]),
     ('9', [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b10001, 0b01110]),
+    ('A', [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001]),
+    ('B', [0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110]),
+    ('C', [0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110]),
+    ('D', [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110]),
+    ('E', [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111]),
     ('F', [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000]),
+    ('G', [0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110]),
+    ('H', [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001]),
+    ('I', [0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110]),
+    ('J', [0b00111, 0b00010, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100]),
+    ('K', [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001]),
+    ('L', [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111]),
+    ('M', [0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001]),
+    ('N', [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001]),
+    ('O', [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110]),
     ('P', [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000]),
+    ('Q', [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101]),
+    ('R', [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001]),
     ('S', [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110]),
+    ('T', [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100]),
+    ('U', [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110]),
+    ('V', [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100]),
+    ('W', [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001]),
     ('X', [0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001]),
     ('Y', [0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100]),
     ('Z', [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111]),
