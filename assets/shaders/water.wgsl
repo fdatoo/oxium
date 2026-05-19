@@ -46,12 +46,14 @@ struct ChunkUniform {
 };
 @group(1) @binding(0) var<uniform> chunk: ChunkUniform;
 
-// Atlas bind group is part of the shared pipeline layout so the same
-// vertex buffers work in both passes; the water shader doesn't sample
-// it, but declaring it keeps the layout identical to the opaque
-// pipeline.
 @group(2) @binding(0) var atlas_tex:     texture_2d<f32>;
 @group(2) @binding(1) var atlas_sampler: sampler;
+
+// Atlas geometry — keep in sync with `render::atlas`. The water
+// shader samples tile 8 (`water_still.png`) at scrolling UVs to put
+// an animated ripple pattern on the surface.
+const ATLAS_TILE_COUNT_PER_AXIS: f32 = 4.0;
+const TILE_UV_SIZE:              f32 = 1.0 / ATLAS_TILE_COUNT_PER_AXIS;
 
 struct VsIn {
     @location(0) pos_ao:     vec4<u32>,
@@ -70,13 +72,48 @@ struct VsOut {
 };
 
 // Multi-octave wave height. Driven by world-space xz and `camera.time`
-// so adjacent chunks ripple coherently as the camera moves. Two
-// octaves at incommensurate frequencies and phases — keeps the
-// surface from looking like a single repeating wavelength.
+// so adjacent chunks ripple coherently as the camera moves. Three
+// octaves at incommensurate frequencies — combines a slow rolling
+// swell with a faster choppy detail layer on top, gives the surface
+// real motion instead of one repeating wavelength.
 fn wave_height(world_xz: vec2<f32>, t: f32) -> f32 {
-    let a = sin(world_xz.x * 0.45 + t * 1.30) * cos(world_xz.y * 0.37 + t * 1.10);
-    let b = sin(world_xz.x * 0.18 + world_xz.y * 0.21 + t * 0.55);
-    return a * 0.5 + b * 0.5;
+    let big   = sin(world_xz.x * 0.20 + t * 0.60) * cos(world_xz.y * 0.17 + t * 0.50);
+    let med   = sin(world_xz.x * 0.45 + t * 1.30) * cos(world_xz.y * 0.37 + t * 1.10);
+    let small = sin(world_xz.x * 0.95 + world_xz.y * 1.05 + t * 2.40);
+    return big * 0.50 + med * 0.35 + small * 0.15;
+}
+
+// Cheap 2D hash for procedural noise — same shape the sky shader uses.
+fn whash2(p: vec2<f32>) -> f32 {
+    let h = sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453;
+    return fract(h);
+}
+
+// Value noise on a unit grid with smoothstep interpolation between
+// cell corners. Used for the surface ripple pattern and the
+// underwater caustic shimmer.
+fn wnoise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = whash2(i);
+    let b = whash2(i + vec2<f32>(1.0, 0.0));
+    let c = whash2(i + vec2<f32>(0.0, 1.0));
+    let d = whash2(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// Two layers of scrolling value noise. Each layer drifts in a
+// different direction so they slide past each other and the
+// difference reads as flickering surface ripple — the same trick
+// real-time water shaders use for "caustic-like" patterns without
+// raymarching.
+fn ripple_pattern(world_xz: vec2<f32>, t: f32) -> f32 {
+    let a = wnoise(world_xz * 0.32 + vec2<f32>( 0.20,  0.13) * t);
+    let b = wnoise(world_xz * 0.21 + vec2<f32>(-0.16,  0.21) * t);
+    // Center around 0 and scale to roughly [-0.4, 0.4] so the result
+    // can be added directly to the surface brightness term.
+    return (a - 0.5) * 0.45 + (b - 0.5) * 0.40;
 }
 
 // Schlick's Fresnel approximation. `cos_theta` is `dot(view, normal)`.
@@ -96,9 +133,20 @@ fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
-fn underwater_tint(rgb: vec3<f32>, factor: f32) -> vec3<f32> {
+fn underwater_tint(rgb: vec3<f32>, world: vec3<f32>, t: f32, factor: f32) -> vec3<f32> {
+    if (factor <= 0.0) {
+        return rgb;
+    }
     let water_blue = vec3<f32>(0.10, 0.30, 0.45);
-    return mix(rgb, water_blue, factor * 0.65);
+    var tinted = mix(rgb, water_blue, factor * 0.65);
+    // Reuse the water shader's value-noise primitive for caustics —
+    // keeps the underwater pattern coherent with the surface ripple
+    // pattern visible from above.
+    let a = wnoise(world.xz * 0.35 + vec2<f32>( 0.18,  0.11) * t);
+    let b = wnoise(world.xz * 0.27 + vec2<f32>(-0.13,  0.19) * t);
+    let caustic = pow(a * b, 2.0) * 0.6;
+    let caustic_color = vec3<f32>(0.65, 0.95, 1.0);
+    return tinted + caustic_color * caustic * factor;
 }
 
 @vertex
@@ -112,10 +160,12 @@ fn vs_main(in: VsIn) -> VsOut {
     // faces also stay flat (you only see them while underwater
     // looking up, where the flat plane is fine).
     if (face == 2u) {
-        // Amplitude 0.10 keeps the wave subtle — water still reads as
-        // "the top of a block", not a roiling sea.
+        // Amplitude 0.28 makes the swell visibly roll without
+        // breaking the illusion of water sitting at the block grid —
+        // anything taller and the wave crests pop above neighbouring
+        // sand banks, which reads as broken geometry.
         let h = wave_height(world_pos.xz, camera.time);
-        world_pos.y = world_pos.y + h * 0.10;
+        world_pos.y = world_pos.y + h * 0.28;
     }
 
     var out: VsOut;
@@ -179,10 +229,36 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let deep    = base * 0.55 + vec3<f32>(0.01, 0.06, 0.12);
     base = mix(base, deep, depth_t);
 
+    // Animated surface texture. Sample `water_still.png` (atlas tile
+    // 8) at TWO scrolling UVs and combine — the difference reads as
+    // glints sliding across the surface, even on still parts of the
+    // wave field where the vertex displacement alone wouldn't catch
+    // the eye.
+    let tile_origin = vec2<f32>(0.0, 2.0) * TILE_UV_SIZE; // tile 8 → (col 0, row 2)
+    let uv_a = fract(in.v_world.xz * 0.08 + vec2<f32>( 0.04,  0.03) * camera.time);
+    let uv_b = fract(in.v_world.xz * 0.13 + vec2<f32>(-0.05,  0.02) * camera.time);
+    let tex_a = textureSampleLevel(atlas_tex, atlas_sampler, tile_origin + uv_a * TILE_UV_SIZE, 0.0).rgb;
+    let tex_b = textureSampleLevel(atlas_tex, atlas_sampler, tile_origin + uv_b * TILE_UV_SIZE, 0.0).rgb;
+    let surface_tex = (tex_a + tex_b) * 0.5;
+
+    // Surface ripple: animated value-noise pattern modulates the
+    // base brightness. Brighter ridges + slightly darker troughs
+    // make the surface read as moving even when the vertex wave is
+    // gentle.
+    let ripple = ripple_pattern(in.v_world.xz, camera.time);
+    base = base * (1.0 + ripple * 0.45);
+    // Lean the colour toward the sampled water texture so the
+    // pixel-art ripple pattern from `water_still.png` is visible on
+    // the surface.
+    base = mix(base, surface_tex * water_body * 1.8, 0.35);
+
     // Sun specular. Blinn-Phong, tight exponent → small crisp glint.
+    // The ripple noise perturbs the half-vector slightly so the
+    // glint *moves* across the surface as the waves roll instead of
+    // sitting in a fixed spot.
     let to_light = -camera.sun_dir.xyz;
     let half_vec = normalize(view_dir + to_light);
-    let spec_n   = max(dot(in.v_normal, half_vec), 0.0);
+    let spec_n   = max(dot(in.v_normal, half_vec) + ripple * 0.08, 0.0);
     let specular = pow(spec_n, 120.0) * camera.sun_intensity;
 
     // Sky reflection colour: tinted toward water blue so even when
@@ -206,7 +282,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     rgb = mix(rgb, fog_col, fog_t);
 
     rgb = aces_tonemap(rgb);
-    rgb = underwater_tint(rgb, camera.underwater_factor);
+    rgb = underwater_tint(rgb, in.v_world, camera.time, camera.underwater_factor);
 
     // Alpha 0.65..0.88 — never fully transparent (you can always tell
     // there's water), never fully opaque (you can always see *some*

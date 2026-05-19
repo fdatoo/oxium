@@ -140,14 +140,47 @@ fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
-// Apply the underwater colour grade. Pulls every channel toward a deep
-// teal tint by `factor` so above-water terrain seen through the
-// camera's water column reads as muted and blue. Composed *after*
-// tonemapping so the tint stays its own pure colour rather than
-// being curve-compressed away.
-fn underwater_tint(rgb: vec3<f32>, factor: f32) -> vec3<f32> {
+// Cheap 2D hash matching the sky/water shaders so the underwater
+// caustic pattern stays coherent across pipelines.
+fn uw_hash(p: vec2<f32>) -> f32 {
+    let h = sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453;
+    return fract(h);
+}
+fn uw_noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = uw_hash(i);
+    let b = uw_hash(i + vec2<f32>(1.0, 0.0));
+    let c = uw_hash(i + vec2<f32>(0.0, 1.0));
+    let d = uw_hash(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+// Apply the underwater colour grade. Two terms:
+//   1. Pull every channel toward a deep teal tint by `factor`.
+//   2. Overlay an animated caustic-like noise pattern keyed off the
+//      fragment's world position + time. The caustics simulate light
+//      filtering through ripples above and breaking into shifting
+//      bright bands across the underwater scene.
+// Composed *after* tonemapping so neither term gets curve-compressed.
+fn underwater_tint(rgb: vec3<f32>, world: vec3<f32>, t: f32, factor: f32) -> vec3<f32> {
+    if (factor <= 0.0) {
+        return rgb;
+    }
     let water_blue = vec3<f32>(0.10, 0.30, 0.45);
-    return mix(rgb, water_blue, factor * 0.65);
+    var tinted = mix(rgb, water_blue, factor * 0.65);
+    // Two scrolling noise layers; their product produces tight
+    // caustic-like ridges where both layers are bright at the same
+    // place.
+    let a = uw_noise(world.xz * 0.35 + vec2<f32>( 0.18,  0.11) * t);
+    let b = uw_noise(world.xz * 0.27 + vec2<f32>(-0.13,  0.19) * t);
+    let caustic = pow(a * b, 2.0) * 0.6;
+    // Tint the caustic pale-aqua so it reads as light from above
+    // rather than just a brightness modulation.
+    let caustic_color = vec3<f32>(0.65, 0.95, 1.0);
+    tinted = tinted + caustic_color * caustic * factor;
+    return tinted;
 }
 
 @fragment
@@ -216,7 +249,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // a pure pulled colour instead of being compressed by the
     // filmic curve into something muddier.
     out_rgb = aces_tonemap(out_rgb);
-    out_rgb = underwater_tint(out_rgb, camera.underwater_factor);
+    out_rgb = underwater_tint(out_rgb, in.v_world, camera.time, camera.underwater_factor);
 
     return vec4<f32>(out_rgb, 1.0);
 }

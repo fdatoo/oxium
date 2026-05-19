@@ -114,9 +114,21 @@ fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
-fn underwater_tint(rgb: vec3<f32>, factor: f32) -> vec3<f32> {
+fn underwater_tint(rgb: vec3<f32>, screen_xy: vec2<f32>, t: f32, factor: f32) -> vec3<f32> {
+    if (factor <= 0.0) {
+        return rgb;
+    }
     let water_blue = vec3<f32>(0.10, 0.30, 0.45);
-    return mix(rgb, water_blue, factor * 0.65);
+    var tinted = mix(rgb, water_blue, factor * 0.65);
+    // No world-space hook on the sky pass (the sky is a full-screen
+    // triangle), so caustics piggyback on screen coordinates. Looks
+    // close to the world-space underwater grade because the
+    // half-second scroll rate dominates the visual cue anyway.
+    let a = value_noise(screen_xy * 6.0 + vec2<f32>( 0.18,  0.11) * t);
+    let b = value_noise(screen_xy * 4.5 + vec2<f32>(-0.13,  0.19) * t);
+    let caustic = pow(a * b, 2.0) * 0.6;
+    let caustic_color = vec3<f32>(0.65, 0.95, 1.0);
+    return tinted + caustic_color * caustic * factor;
 }
 
 @fragment
@@ -231,6 +243,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // to flat white) then apply the underwater grade so the sky tints
     // the same way as the rest of the scene when the camera dunks.
     rgb = aces_tonemap(rgb);
-    rgb = underwater_tint(rgb, camera.underwater_factor);
+    rgb = underwater_tint(rgb, in.ndc, camera.time, camera.underwater_factor);
     return vec4<f32>(rgb, 1.0);
 }
