@@ -88,7 +88,8 @@ pub use crate::worldgen::tuning::SEA_LEVEL;
 use crate::worldgen::tuning::{
     BIOME_JITTER_AMPL, BIOME_JITTER_PERIOD, CAVE_FLOOR_Y, CAVE_SURFACE_BUFFER,
     COLD_SNOW_MIN_ABOVE_SEA, COLD_THRESHOLD, FOREST_HUMIDITY, SAND_TRANSITION_BAND,
-    SNOW_LINE, TREE_CELL_SIZE, TREE_MARGIN, TREE_RATE_FOREST, TREE_RATE_PLAINS,
+    SNOW_LINE, SURFACE_BAND, TREE_CELL_SIZE, TREE_MARGIN, TREE_RATE_FOREST,
+    TREE_RATE_PLAINS,
 };
 
 /// Pre-built noise fields for one world seed.
@@ -100,6 +101,11 @@ pub struct Generator {
     /// PR 2: plate-driven heightmap (continental shelf + ridges +
     /// domain-warped FBM relief). Owns the FBM/warp noise fields.
     heightmap: heightmap::HeightmapNoise,
+    /// 3D density evaluator (PR A): height-bias term combined with a
+    /// 3D relief FBM. Drives the per-voxel solid/air decision in
+    /// `fill_chunk` so moderate slopes don't read as clean
+    /// chevron stripes.
+    density: heightmap::DensityNoise,
     /// Geographic "is this region desert?" mask. Same large period as the
     /// mountainness map but uncorrelated (different seed) so deserts and
     /// mountains drift independently.
@@ -143,6 +149,7 @@ impl Generator {
         // noise fields. The old `height_noise`, `mountain_noise`, and
         // `mountainness_map` are gone — plate geometry replaces them.
         let heightmap = heightmap::HeightmapNoise::new(seed);
+        let density = heightmap::DensityNoise::new(seed);
         // Biome maps: large period so each biome covers many chunks.
         let desert_map = Fbm::<Simplex>::new(seed.wrapping_add(4) as u32)
             .set_octaves(2)
@@ -171,6 +178,7 @@ impl Generator {
             .set_persistence(0.5);
         Self {
             heightmap,
+            density,
             desert_map,
             temperature_map,
             humidity_map,
@@ -259,7 +267,6 @@ impl Generator {
         let h_pre = self.heightmap.h_pre(self.seed, wx as f32, wz as f32);
         // Slope-driven cliff classification on the *unmodified* h_pre.
         let is_cliff = self.heightmap.is_cliff(self.seed, wx as f32, wz as f32);
-        let is_coastal = self.heightmap.is_coastal(self.seed, wx as f32, wz as f32);
 
         // Valley carve over the chunk's pre-fetched 3 × 3 region
         // neighbourhood. Slightly larger ring than strictly correct
@@ -294,7 +301,6 @@ impl Generator {
         ColumnData {
             height,
             is_cliff,
-            is_coastal,
             desertness,
             biome,
             lake_rim,
@@ -332,18 +338,57 @@ impl Generator {
                 let height = col.height;
                 let lake_rim = col.lake_rim;
 
-                for y in 0..CHUNK_DIM_U {
+                // PR A: density-based top-down scan. The "surface" is
+                // wherever density transitions from negative (air) to
+                // positive (solid) — found block-by-block, not at a
+                // fixed `height`. State across the y-loop:
+                //   * `depth_below_surface` = None when the current
+                //     voxel is air; Some(d) when we're `d` blocks
+                //     into solid after the most recent air→solid
+                //     transition (so depth=0 is the topmost solid
+                //     block of an exposed surface).
+                let h_target = height as f32;
+                let mut depth_below_surface: Option<i32> = None;
+                for y in (0..CHUNK_DIM_U).rev() {
                     let wy = origin.y + y as i32;
                     let local = LocalPos(UVec3::new(x, y, z));
 
-                    let block = if wy > height {
-                        // Above the solid surface — flood with water
-                        // up to either the lake rim (highest priority)
-                        // or sea level, whichever is appropriate.
+                    // Density-driven solid/air: full eval inside the
+                    // surface band; cheap fallback outside.
+                    let solid_from_density = if wy < height - SURFACE_BAND {
+                        true
+                    } else if wy > height + SURFACE_BAND {
+                        false
+                    } else {
+                        self.density.evaluate(h_target, wx, wy, wz) > 0.0
+                    };
+
+                    // Cave overrides (kept boolean for PR A; soft SDF
+                    // arrives in PR B). The surface buffer uses the
+                    // heightmap target as the reference depth — the
+                    // 3D noise can shift the actual surface by a few
+                    // blocks but caves should still respect the
+                    // intended buffer.
+                    let approx_depth = height - wy;
+                    let in_entrance = !cave_systems.is_empty()
+                        && caves::entrance_air(wx, wy, wz, &cave_systems);
+                    let in_chamber_or_tunnel = approx_depth > CAVE_SURFACE_BUFFER
+                        && !cave_systems.is_empty()
+                        && caves::cave_air(wx, wy, wz, &cave_systems);
+                    let in_wormhole = approx_depth > CAVE_SURFACE_BUFFER
+                        && self.wormhole_noise.carve(wx, wy, wz);
+                    let cave_air = wy > CAVE_FLOOR_Y
+                        && (in_entrance || in_chamber_or_tunnel || in_wormhole);
+
+                    let solid = solid_from_density && !cave_air;
+
+                    let block = if !solid {
+                        // Air — flood with water at/below the
+                        // effective water level (lake rim wins over
+                        // sea level when present).
+                        depth_below_surface = None;
                         if let Some(rim) = lake_rim {
-                            if wy <= rim {
-                                Block::Water
-                            } else if wy <= SEA_LEVEL {
+                            if wy <= rim || wy <= SEA_LEVEL {
                                 Block::Water
                             } else {
                                 Block::Air
@@ -354,93 +399,41 @@ impl Generator {
                             Block::Air
                         }
                     } else {
-                        let depth = height - wy;
-                        // Cave-carve gates:
-                        // * Floor: don't carve below CAVE_FLOOR_Y so
-                        //   the bottom of the vertical load radius has
-                        //   *something* in it (otherwise the player
-                        //   could see straight down into the sky from
-                        //   deep underground).
-                        // * Surface buffer: chambers and tunnels never
-                        //   carve within CAVE_SURFACE_BUFFER blocks of
-                        //   the surface — except where an explicit
-                        //   entrance feature (sinkhole / cliff mouth
-                        //   / skylight) punches through.
-                        // * Deep wormholes: a sparse 3D-noise band
-                        //   layered only below WORMHOLE_BAND_Y.
-                        let in_entrance =
-                            !cave_systems.is_empty()
-                                && caves::entrance_air(wx, wy, wz, &cave_systems);
-                        let in_chamber_or_tunnel = depth > CAVE_SURFACE_BUFFER
-                            && !cave_systems.is_empty()
-                            && caves::cave_air(wx, wy, wz, &cave_systems);
-                        let in_wormhole =
-                            depth > CAVE_SURFACE_BUFFER
-                                && self.wormhole_noise.carve(wx, wy, wz);
-                        let cave =
-                            wy > CAVE_FLOOR_Y && (in_entrance || in_chamber_or_tunnel || in_wormhole);
-                        if cave {
-                            if wy <= SEA_LEVEL {
-                                Block::Water
-                            } else {
-                                Block::Air
-                            }
-                        } else if depth == 0 {
-                            // Surface block selection. Priority:
-                            //   1. Cliff → bare Stone (replaces v1
-                            //      `MOUNTAIN_ROCK_LINE`).
-                            //   2. Beach (`height ∈ [SL-1, SL+2]`) →
-                            //      Sand. PR 5 widens to 4 blocks.
-                            //   3. Snow line → Snow.
-                            //   4. Cold biome → Snow.
-                            //   5. Desert / Tropical-beach-adjacent →
-                            //      Sand; otherwise → Grass.
-                            //   6. PR 5: stochastic sand/grass
-                            //      transition band on the grass side
-                            //      of the desert boundary.
+                        // Solid — depth is "blocks below the air→solid
+                        // transition we just crossed".
+                        let depth = depth_below_surface.map(|d| d + 1).unwrap_or(0);
+                        depth_below_surface = Some(depth);
+                        if depth == 0 {
+                            // Surface block. Use the actual hit wy
+                            // (which can differ from h_target by up to
+                            // ±SURFACE_BAND blocks due to noise) for
+                            // the snow-line / beach / cold-biome
+                            // checks.
                             if col.is_cliff {
                                 Block::Stone
-                            } else if height >= SEA_LEVEL - 1
-                                && height <= SEA_LEVEL + 2
+                            } else if wy >= SEA_LEVEL - 1
+                                && wy <= SEA_LEVEL + 2
                                 && !col.biome.snow_capped()
                             {
-                                // Beach band (4 blocks tall).
                                 Block::Sand
-                            } else if height >= SNOW_LINE {
+                            } else if wy >= SNOW_LINE {
                                 Block::Snow
                             } else if col.biome.snow_capped()
-                                && height >= SEA_LEVEL + COLD_SNOW_MIN_ABOVE_SEA
+                                && wy >= SEA_LEVEL + COLD_SNOW_MIN_ABOVE_SEA
                             {
-                                // Cold-biome snow only applies once
-                                // we're well above sea level —
-                                // coastal cold regions keep their
-                                // grass/dirt surface so we don't get
-                                // an awkward snow-strip-touching-
-                                // water shoreline.
                                 Block::Snow
                             } else if col.biome == Biome::Desert {
                                 Block::Sand
                             } else {
-                                // PR 5 stochastic sand transition:
-                                // inside `SAND_TRANSITION_BAND` (in
-                                // noise-value units) on the grass
-                                // side of the desert boundary, roll
-                                // for sand vs grass. Probability
-                                // ramps from 0 at the band's outer
-                                // edge to ~50% at the boundary.
                                 let dist_to_boundary = 0.30 - col.desertness;
                                 if dist_to_boundary > 0.0
-                                    && dist_to_boundary
-                                        < SAND_TRANSITION_BAND
+                                    && dist_to_boundary < SAND_TRANSITION_BAND
                                 {
                                     let p = 0.5
                                         * (1.0
                                             - dist_to_boundary
                                                 / SAND_TRANSITION_BAND);
-                                    let roll = hash::mix_unit(
-                                        self.seed,
-                                        &[wx, wz, 71],
-                                    );
+                                    let roll = hash::mix_unit(self.seed, &[wx, wz, 71]);
                                     if roll < p {
                                         Block::Sand
                                     } else {
@@ -451,25 +444,14 @@ impl Generator {
                                 }
                             }
                         } else {
-                            // Subsurface block selection:
-                            //
-                            //   * Cliff column → 0 dirt cap (sheer
-                            //     stone all the way down).
-                            //   * Coastal column → dirt cap extends
-                            //     down toward sea level (capped at
-                            //     24) so the water-facing side
-                            //     reads as earth bank.
-                            //   * Inland column → standard 3-block
-                            //     dirt cap, then stone — the
-                            //     natural mountain-side look.
-                            let dirt_cap = if col.is_cliff {
-                                0
-                            } else if col.is_coastal {
-                                (height - SEA_LEVEL + 2).max(3).min(24)
-                            } else {
-                                3
-                            };
-                            if depth <= dirt_cap {
+                            // Subsurface. The 3D density makes the
+                            // surface fuzzy, so the v1 simple "3 dirt
+                            // then stone" rule no longer produces
+                            // ugly stone walls at coastlines. Cliffs
+                            // still skip the dirt cap.
+                            if col.is_cliff {
+                                Block::Stone
+                            } else if depth <= 3 {
                                 Block::Dirt
                             } else {
                                 Block::Stone
@@ -478,6 +460,9 @@ impl Generator {
                     };
                     out.set(local, block);
                 }
+                // Bind `lake_rim` so the compiler sees it used in
+                // both branches above.
+                let _ = lake_rim;
             }
         }
         // After the terrain pass, lay trees on top. Cross-chunk trees
@@ -564,7 +549,19 @@ impl Generator {
             return None;
         }
 
-        let height = col.height;
+        // Find the actual topmost solid block for this column. With
+        // 3D density the surface can sit up to ±SURFACE_BAND from
+        // `col.height`; use a top-down density walk so the tree's
+        // trunk lands on the real surface, not the heightmap target.
+        let height = self
+            .density
+            .topmost_solid(
+                col.height as f32,
+                wx,
+                wz,
+                col.height + SURFACE_BAND + 2,
+            )
+            .unwrap_or(col.height);
         let trunk_h = match kind {
             TreeKind::Oak => {
                 4 + (tree_hash(self.seed, cell_x, cell_z, 3) % 3) as i32
@@ -654,18 +651,9 @@ struct ColumnData {
     /// Surface height in world Y, post-carve, clamped.
     height: i32,
     /// True if the column's `h_pre` slope exceeds `CLIFF_SLOPE_THRESH`
-    /// AND its elevation is at/above `CLIFF_MIN_HEIGHT`. The
-    /// elevation gate means low / coastal terrain never cliff-
-    /// exposes, regardless of slope.
+    /// AND its elevation is at/above `CLIFF_MIN_HEIGHT`. Cliff
+    /// columns expose stone faces directly, skipping the dirt cap.
     is_cliff: bool,
-    /// True if any sample within the wider coastal stencil
-    /// (8 directions, distances 8 and 20 blocks) is below sea
-    /// level. Drives the subsurface block selector: coastal
-    /// columns extend their dirt cap down toward sea level so
-    /// their water-facing sides read as earth banks. Inland
-    /// columns get the standard 3-block dirt cap → stone face,
-    /// which is the natural mountain-side look.
-    is_coastal: bool,
     /// Jitter-perturbed `desertness` noise value. Used by the
     /// sand/grass transition band: inside the band on the grass side
     /// of the desert boundary, the surface block is rolled
@@ -984,12 +972,11 @@ mod tests {
     /// future runs catch unintentional behavioural drift.
     #[test]
     fn golden_seed42_chunk_0_2_0() {
-        // Hash re-baselined: dirt cap is now coastal-gated (width-
-        // 20 stencil). Inland mountains get the standard 3-block
-        // dirt cap → stone (no more giant dirt-strip mountain
-        // sides); only columns near actual coastlines extend their
-        // dirt cap down to sea level.
-        const GOLDEN_42_002: u64 = 0x5A35_1A50_9B25_A5CC;
+        // Hash re-baselined for PR A: 3D density evaluator inside
+        // SURFACE_BAND. The surface is now fuzz-jittered by 3D
+        // relief noise instead of being column-quantised, so the
+        // chevron-staircase artifact on moderate slopes is gone.
+        const GOLDEN_42_002: u64 = 0x886E_0C40_5650_12C7;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);
@@ -1084,23 +1071,23 @@ mod tests {
         }
     }
 
-    /// Cold biomes should plant Snow as their surface block — *above*
-    /// the coastal elevation buffer. The polish pass made the cold
-    /// biome cap require `height >= SEA_LEVEL + COLD_SNOW_MIN_ABOVE_SEA`
-    /// so coastal cold regions don't put a snow strip directly
-    /// against the water; pick a tundra column inland enough to be
-    /// above that floor.
+    /// Cold biomes should plant Snow as their surface block above
+    /// the coastal elevation buffer. With 3D density the surface
+    /// height isn't exactly `col.height` anymore — it can shift by
+    /// up to `SURFACE_BAND` blocks — so the test now scans the
+    /// chunk top-down to find the actual topmost solid block and
+    /// checks its kind.
     #[test]
     fn cold_biome_caps_with_snow() {
         let g = Generator::new(42);
-        let min_h = SEA_LEVEL + COLD_SNOW_MIN_ABOVE_SEA;
+        let min_h = SEA_LEVEL + COLD_SNOW_MIN_ABOVE_SEA + SURFACE_BAND + 4;
         let mut found: Option<(i32, i32)> = None;
         'outer: for wz in (-1024..1024).step_by(8) {
             for wx in (-1024..1024).step_by(8) {
                 let col = g.column_data(wx, wz);
                 if col.biome == Biome::Tundra
                     && col.height >= min_h
-                    && col.height < SNOW_LINE
+                    && col.height < SNOW_LINE - SURFACE_BAND - 4
                     && !col.is_cliff
                 {
                     found = Some((wx, wz));
@@ -1110,29 +1097,33 @@ mod tests {
         }
         let (wx, wz) = found.expect("expected at least one tundra column");
         let col = g.column_data(wx, wz);
-        // Build the chunk that contains the surface block and read
-        // out the cell at the column's `height`.
-        let cy = col.height.div_euclid(CHUNK_DIM_U as i32);
         let cx = wx.div_euclid(CHUNK_DIM_U as i32);
         let cz = wz.div_euclid(CHUNK_DIM_U as i32);
-        let mut chunk = DenseChunk::empty();
-        g.fill_chunk(ChunkCoord(IVec3::new(cx, cy, cz)), &mut chunk);
+        // The actual surface might be in one of two chunks if it
+        // happens to span a vertical chunk boundary; check both.
         let lx = wx.rem_euclid(CHUNK_DIM_U as i32) as u32;
         let lz = wz.rem_euclid(CHUNK_DIM_U as i32) as u32;
-        let ly = col.height.rem_euclid(CHUNK_DIM_U as i32) as u32;
-        let surface = chunk.blocks[crate::voxel::coords::LocalPos(
-            glam::UVec3::new(lx, ly, lz),
-        )
-        .to_index()];
-        // Beach / mountain rock overrides take priority over the
-        // biome cap (the rules in `fill_chunk`); the picked column
-        // shouldn't trip either of those, but accept either Snow or
-        // those overrides defensively so the test reports a clearer
-        // failure if it does.
+        let mut found_surface = None;
+        for cy in [col.height.div_euclid(CHUNK_DIM_U as i32),
+                   col.height.div_euclid(CHUNK_DIM_U as i32) + 1] {
+            let mut chunk = DenseChunk::empty();
+            g.fill_chunk(ChunkCoord(IVec3::new(cx, cy, cz)), &mut chunk);
+            // Top-down scan in this chunk to find the topmost solid.
+            for ly in (0..CHUNK_DIM_U).rev() {
+                let block = chunk.blocks[crate::voxel::coords::LocalPos(
+                    glam::UVec3::new(lx, ly, lz),
+                ).to_index()];
+                if !matches!(block, Block::Air | Block::Water) {
+                    found_surface = Some(block);
+                    break;
+                }
+            }
+            if found_surface.is_some() { break; }
+        }
+        let surface = found_surface.expect("topmost solid not found in tundra column");
         assert!(
             matches!(surface, Block::Snow | Block::Sand | Block::Stone),
-            "tundra surface block at ({wx}, {wz}) y={} was {:?}, expected Snow",
-            col.height,
+            "tundra surface at ({wx}, {wz}) was {:?}, expected Snow",
             surface
         );
     }

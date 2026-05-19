@@ -83,6 +83,30 @@ pub const CLIFF_MIN_HEIGHT: i32 = SEA_LEVEL + 28;
 /// vertical chunk-load radius.
 pub const MAX_TERRAIN_Y: i32 = 140;
 
+// ── 3D density (PR A: surface-band 3D; PR B: unbounded) ─────────────
+
+/// Scale for the height-bias contribution to density: `bias = (h_target
+/// - wy) / DENSITY_FALLOFF`. Small values pin the surface tightly to
+/// the heightmap (almost no 3D fuzz); large values let the noise push
+/// the surface around by many blocks (dramatic overhangs and
+/// floating spurs). `4.0` is the de-stairs sweet spot — enough fuzz
+/// to break the chevron pattern, not so much that terrain feels
+/// chaotic.
+pub const DENSITY_FALLOFF: f32 = 4.0;
+/// Amplitude of the 3D relief noise contribution to density. Compared
+/// against the unit-scale bias; `1.0` lets the noise push the
+/// surface by ~`DENSITY_FALLOFF` blocks at maximum.
+pub const RELIEF_AMP: f32 = 1.0;
+/// Spatial period of the 3D relief noise's base octave. Smaller →
+/// bumpier surface; larger → smoother.
+pub const RELIEF_PERIOD: f32 = 32.0;
+/// Half-width of the band around `h_target` where 3D density is
+/// evaluated per voxel. Outside this band, voxels are assumed solid
+/// (deep underground) or air (well above the surface). PR A ships
+/// `8`; PR B raises this to a much larger value so the noise can
+/// dig actual overhangs into the terrain.
+pub const SURFACE_BAND: i32 = 8;
+
 // ── Rivers (fine) ─────────────────────────────────────────────────────
 
 /// Coarse-cell edge length used by the fine flow-accumulation grid.

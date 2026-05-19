@@ -175,9 +175,158 @@ impl HeightmapNoise {
     }
 }
 
+/// 3D density evaluator: combines a height-bias term (positive below
+/// `h_target`, negative above) with a 3D relief FBM. A voxel is solid
+/// iff `density > 0`. Inside a narrow `SURFACE_BAND` around `h_target`
+/// the relief noise jitters the surface position, so the resulting
+/// terrain doesn't read as a clean integer-rounded staircase.
+///
+/// Composed independently of `HeightmapNoise` so chunk fill can
+/// evaluate the bias from the existing 2D height target while the
+/// 3D noise field lives here.
+pub struct DensityNoise {
+    relief: Fbm<Simplex>,
+}
+
+impl DensityNoise {
+    pub fn new(seed: u64) -> Self {
+        // 3 octaves of 3D simplex at `RELIEF_PERIOD` base period;
+        // persistence 0.5 keeps the fine octave subtle but present.
+        let relief = Fbm::<Simplex>::new(seed.wrapping_add(701) as u32)
+            .set_octaves(3)
+            .set_frequency(1.0 / RELIEF_PERIOD as f64)
+            .set_persistence(0.5);
+        Self { relief }
+    }
+
+    /// Evaluate density at world-space voxel center `(wx, wy, wz)`
+    /// given the column's heightmap target `h_target`. Solid iff
+    /// return value > 0.
+    pub fn evaluate(&self, h_target: f32, wx: i32, wy: i32, wz: i32) -> f32 {
+        let bias = (h_target - wy as f32) / DENSITY_FALLOFF;
+        let noise =
+            self.relief.get([wx as f64, wy as f64, wz as f64]) as f32 * RELIEF_AMP;
+        bias + noise
+    }
+
+    /// Walk `(wx, wz)` top-down through the density function and
+    /// return the first voxel `wy` where `density > 0` (the topmost
+    /// solid block). Searches from `top` downward to a hard floor
+    /// at `h_target - SURFACE_BAND - 1` (below that, everything is
+    /// definitely solid, so the first solid is at most that far
+    /// below the target). Returns `None` if nothing solid found
+    /// within the search range (shouldn't happen for normal
+    /// terrain).
+    pub fn topmost_solid(&self, h_target: f32, wx: i32, wz: i32, search_top: i32) -> Option<i32> {
+        // Don't bother searching above `h_target + SURFACE_BAND`:
+        // that region is unconditionally air.
+        let top = search_top.min(h_target as i32 + SURFACE_BAND);
+        let bottom = (h_target as i32 - SURFACE_BAND).max(CAVE_FLOOR_Y);
+        for wy in (bottom..=top).rev() {
+            if self.evaluate(h_target, wx, wy, wz) > 0.0 {
+                return Some(wy);
+            }
+        }
+        // Below the band, terrain is unconditionally solid → topmost
+        // solid is the bottom of the search range.
+        Some(bottom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn density_is_pure_in_seed_and_coord() {
+        let d = DensityNoise::new(42);
+        let a = d.evaluate(70.0, 100, 65, 200);
+        let b = d.evaluate(70.0, 100, 65, 200);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn density_below_target_mostly_solid() {
+        let d = DensityNoise::new(42);
+        let mut solid = 0;
+        let mut total = 0;
+        // Sample voxels 4 blocks below h_target = 70: should be
+        // mostly (≥80%) solid (positive density).
+        for wx in (-200..200).step_by(7) {
+            for wz in (-200..200).step_by(7) {
+                total += 1;
+                if d.evaluate(70.0, wx, 66, wz) > 0.0 {
+                    solid += 1;
+                }
+            }
+        }
+        let frac = solid as f32 / total as f32;
+        assert!(
+            frac > 0.80,
+            "4 blocks below h_target should be ≥80% solid; got {frac:.2}"
+        );
+    }
+
+    #[test]
+    fn density_above_target_mostly_air() {
+        let d = DensityNoise::new(42);
+        let mut air = 0;
+        let mut total = 0;
+        // Sample voxels 4 blocks above h_target = 70: should be
+        // mostly air.
+        for wx in (-200..200).step_by(7) {
+            for wz in (-200..200).step_by(7) {
+                total += 1;
+                if d.evaluate(70.0, wx, 74, wz) <= 0.0 {
+                    air += 1;
+                }
+            }
+        }
+        let frac = air as f32 / total as f32;
+        assert!(
+            frac > 0.80,
+            "4 blocks above h_target should be ≥80% air; got {frac:.2}"
+        );
+    }
+
+    #[test]
+    fn density_at_target_is_balanced() {
+        let d = DensityNoise::new(42);
+        let mut solid = 0;
+        let mut total = 0;
+        for wx in (-200..200).step_by(7) {
+            for wz in (-200..200).step_by(7) {
+                total += 1;
+                if d.evaluate(70.0, wx, 70, wz) > 0.0 {
+                    solid += 1;
+                }
+            }
+        }
+        let frac = solid as f32 / total as f32;
+        // Exactly at the target height, ~50% of voxels should be
+        // solid (bias is zero; noise determines).
+        assert!(
+            (0.30..0.70).contains(&frac),
+            "at h_target the solid fraction should be near 50%; got {frac:.2}"
+        );
+    }
+
+    #[test]
+    fn topmost_solid_within_band() {
+        let d = DensityNoise::new(42);
+        // For a few sample columns, the topmost solid should be
+        // within ±SURFACE_BAND of h_target.
+        for (wx, wz) in [(0, 0), (50, 100), (-200, 150), (300, -200)] {
+            let h = 70.0;
+            let top = d.topmost_solid(h, wx, wz, 200).unwrap();
+            assert!(
+                (h as i32 - SURFACE_BAND..=h as i32 + SURFACE_BAND).contains(&top),
+                "topmost solid at ({wx},{wz}) was y={top}, expected in [{}..{}]",
+                h as i32 - SURFACE_BAND,
+                h as i32 + SURFACE_BAND
+            );
+        }
+    }
 
     #[test]
     fn h_pre_is_deterministic() {
