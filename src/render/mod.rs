@@ -744,48 +744,73 @@ impl Renderer {
 
         let frustum = extract_frustum_planes(vp);
 
-        // Build the mirrored camera for the planar reflection pass.
-        // Mirror across the y=SEA_LEVEL plane: eye y → 2H - eye y,
-        // and the look direction's vertical component flips, which
-        // corresponds to inverting pitch.
+        // Build the planar-reflection camera uniform via the
+        // *reflection matrix* technique. Earlier versions of this
+        // code physically moved the camera to a virtual underwater
+        // position and built a separate view matrix from there —
+        // that rendered the world from a fundamentally different
+        // viewpoint and the resulting image did NOT line up in
+        // screen space with the main view's projection of
+        // water-surface points, so sampling the reflection texture
+        // at `clip_pos.xy` produced content that was offset and
+        // disagreed with the main view as the camera moved.
         //
-        // The mirror eye MUST use the same source eye position as
-        // the main view — they're geometrically coupled. The water
-        // shader samples the reflection at `clip_pos.xy` (computed
-        // from the main view-proj); for that lookup to land on the
-        // geometric reflection of the right world point, the
-        // mirrored camera must be the true mirror of the actual
-        // main camera. An earlier attempt to smooth the mirror eye
-        // alone broke this correspondence and caused the reflection
-        // to slide independently from the main view.
+        // The standard technique (LearnOpenGL planar-reflection
+        // tutorial, Vulkan-Tutorial reflection example, Unreal
+        // engine docs) is to keep the main camera's view + proj as-is
+        // and *pre-multiply by a reflection matrix* that mirrors
+        // world coordinates across the water plane. Water-plane
+        // points (y = SEA_LEVEL) are invariant under that mirror so
+        // they project to the *same* screen position as without it;
+        // above-water content gets mirrored to below-water positions
+        // and the main camera renders them at the screen positions
+        // they'd actually appear at as reflections. Screen-space
+        // sampling at `clip_pos.xy` then locks the reflection to
+        // world content.
+        //
+        // The 4×4 reflection matrix across `y = H`:
+        //   [ 1  0  0   0]
+        //   [ 0 -1  0  2H]
+        //   [ 0  0  1   0]
+        //   [ 0  0  0   1]
         let sea_level = crate::worldgen::SEA_LEVEL as f32;
-        let refl_eye = Vec3::new(eye.x, 2.0 * sea_level - eye.y, eye.z);
-        let refl_pitch = -pitch;
-        let refl_vp = view_proj(refl_eye, yaw, refl_pitch, 70f32.to_radians(), aspect);
+        let refl_mat = glam::Mat4::from_cols(
+            glam::Vec4::new(1.0, 0.0, 0.0, 0.0),
+            glam::Vec4::new(0.0, -1.0, 0.0, 0.0),
+            glam::Vec4::new(0.0, 0.0, 1.0, 0.0),
+            glam::Vec4::new(0.0, 2.0 * sea_level, 0.0, 1.0),
+        );
+        let refl_vp = vp * refl_mat;
         let refl_inv_vp = refl_vp.inverse();
-        // Sun direction also reflects across the water plane — only
-        // the Y component flips. That puts the sun's image at the
-        // "underwater" position from the mirrored camera's POV,
-        // which is the correct reflected sun position in the
-        // resulting reflection texture.
-        let refl_sun = [sun_dir[0], -sun_dir[1], sun_dir[2]];
         self.gpu.queue.write_buffer(
             &self.reflection_camera_buf,
             0,
             bytemuck::cast_slice(&[CameraUniform {
                 view_proj: refl_vp.to_cols_array_2d(),
-                sun_dir: [refl_sun[0], refl_sun[1], refl_sun[2], 0.0],
+                // Sun direction stays in main-world frame: the inv_vp
+                // we wrote above already encodes the reflection
+                // (inv(vp * R) = R * inv(vp)), so sky-shader ray
+                // reconstruction is reflected automatically and the
+                // sun's image lands at the geometrically correct
+                // reflected position via the usual dot product.
+                sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.0],
                 sun_intensity,
                 time,
                 underwater_factor: 0.0, // reflections don't get the underwater grade
-                // Clip everything below sea level — only above-water
-                // geometry contributes to the reflected image.
+                // Drop below-water world content — the fragment's
+                // `v_world` is the *unmirrored* world position, so a
+                // mountain at y=100 has v_world.y = 100 (above the
+                // SEA_LEVEL clip) and renders; an originally-below-
+                // water cave block at y=30 has v_world.y = 30 (below
+                // the clip) and discards.
                 clip_y_min: sea_level,
-                eye: [refl_eye.x, refl_eye.y, refl_eye.z, 0.0],
+                // Eye stays as the *main* eye — fog distance is
+                // measured from the actual viewer to the actual
+                // (unmirrored) world point.
+                eye: [eye.x, eye.y, eye.z, 0.0],
                 inv_view_proj: refl_inv_vp.to_cols_array_2d(),
             }]),
         );
-        let _ = refl_pitch; // pitch already baked into refl_vp above
         let refl_frustum = extract_frustum_planes(refl_vp);
 
         let frame = self.gpu.surface.get_current_texture()?;
@@ -796,8 +821,12 @@ impl Renderer {
             .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        // Reflection pass (sky + opaque only, mirrored camera).
-        self.encode_reflection_pass(&mut enc, refl_eye, &refl_frustum);
+        // Reflection pass (sky + opaque only, mirrored world via
+        // reflection matrix). Culling uses the *main* eye + the
+        // reflection-frustum (extracted from `view_proj * R`), so
+        // chunks are tested for whether their unmirrored geometry
+        // would be visible in the reflection's projection.
+        self.encode_reflection_pass(&mut enc, eye, &refl_frustum);
         // Main world pass (sky + opaque + water + cursor).
         self.encode_opaque_pass(&mut enc, &self.msaa_color_view, &view, eye, &frustum);
         // HUD: uploaded once per frame into fresh vertex/index
