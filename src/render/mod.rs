@@ -664,19 +664,20 @@ impl Renderer {
         // varies per draw and is set inside the loop below.
         pass.set_bind_group(2, &self.atlas.bind_group, &[]);
         // Distance culling: skip chunks whose centre is beyond the
-        // fog far-plane. The opaque shader fades them to fog at
-        // `FOG_END = 360` blocks anyway, so drawing them costs the
-        // GPU full per-vertex work for fragments that all blend to
-        // fog colour. Profiling showed `chunks_rendered` climbing
-        // past 5000 with the load radius left at 12 × 12 horizontally
-        // and 8 vertically — that translates to ~13ms of CPU
-        // draw-call overhead per frame. Distance-culling alone cuts
-        // typical scenes by ~50 %.
+        // load-radius diagonal. The load radius is 12 chunks (384
+        // blocks) horizontally and 8 chunks (256 blocks) vertically,
+        // so a corner chunk at the full radius is `√(384² + 256² +
+        // 384²) ≈ 600` blocks from the player centre. Anything past
+        // that is unloaded anyway, but the cull threshold has to be
+        // big enough to *include* every loaded chunk — otherwise
+        // the diagonal corners of the load radius (which are
+        // farther than the cardinal-direction chunks at the same
+        // `dx`/`dz`) get cut, painting a consistent one-quadrant
+        // void from any oblique camera.
         //
-        // The cutoff is "centre of chunk's bounding box + half its
-        // diagonal" so a chunk straddling the fog boundary still
-        // gets drawn for the in-range corner. `32 * √3 / 2 ≈ 27.7`.
-        const CULL_DISTANCE: f32 = 360.0 + 28.0;
+        // Add 28 (half-diagonal of a chunk) so a chunk straddling
+        // the boundary still draws for its in-range corner.
+        const CULL_DISTANCE: f32 = 600.0 + 28.0;
         let cull_sq = CULL_DISTANCE * CULL_DISTANCE;
         let mut draws: u32 = 0;
         for (coord, slots) in &self.chunk_meshes {
