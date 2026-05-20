@@ -313,3 +313,23 @@ fn main() {
     let mut app = VizApp::new(cli);
     event_loop.run_app(&mut app).expect("run loop");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn check_flag_parses() {
+        let cli = Cli::parse_from(["worldgen_viz", "--check"]);
+        assert!(cli.check);
+        assert_eq!(cli.seed, 42);
+    }
+
+    #[test]
+    fn seed_flag_parses() {
+        let cli = Cli::parse_from(["worldgen_viz", "--seed", "1337"]);
+        assert_eq!(cli.seed, 1337);
+        assert!(!cli.check);
+    }
+}
