@@ -140,13 +140,15 @@ pub const SINKHOLE_DEPTH_MAX: i32 = 8;
 /// Maximum horizontal distance (blocks) from a chamber to a steep-
 /// gradient column for a cliff mouth to be possible.
 pub const CLIFF_ENTRANCE_DIST: i32 = 30;
-/// Top-of-terrain buffer (blocks). Non-entrance carving is forbidden
-/// inside this depth so the grass cap stays *mostly* intact.
-/// Lowered to 1 to let the noise carvers (cheese, spaghetti) punch
-/// occasional ambient holes through the surface — random cave
-/// openings everywhere, separate from the deliberate graph
-/// entrances.
-pub const CAVE_SURFACE_BUFFER: i32 = 1;
+/// Top-of-terrain buffer (blocks). The carvers fire only at depth
+/// > BUFFER below the heightmap. Setting this to -1 means even
+/// the topmost solid block of a column (depth 0) can be carved,
+/// letting tubes punch through the surface and form visible cave
+/// openings. The natural rarity of surface tubes (the gradient
+/// requires `elev` near its extreme up there) keeps the heightmap
+/// from being eaten alive — only the rare tubes that happen to
+/// reach the surface form openings.
+pub const CAVE_SURFACE_BUFFER: i32 = -1;
 /// Floor (world Y) below which caves stop carving. Keeps the loaded
 /// chunk-stack bottom solid.
 pub const CAVE_FLOOR_Y: i32 = -120;
