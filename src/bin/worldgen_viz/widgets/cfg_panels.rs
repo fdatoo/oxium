@@ -155,6 +155,76 @@ pub fn climate_panel(ui: &mut Ui, cfg: &mut oxium::worldgen::config::ClimateConf
             "Strength of the ridge noise. Higher → more peaks and valleys.",
         );
     });
+    ui.collapsing("Plate roughness bias", |ui| {
+        ui.label(egui::RichText::new(
+            "Per-plate mountain/flatness bias range. The Voronoi plate gets a random \
+             value in this range that nudges its terrain_shape input.",
+        ).small().weak());
+        let (mut lo, mut hi) = cfg.plate_roughness_bias_range;
+        dirty |= slider(
+            ui, &mut lo, -1.0..=0.0, "min",
+            "Lower bound of per-plate roughness bias. Plates rolled to this end produce flatter terrain.",
+        );
+        dirty |= slider(
+            ui, &mut hi, 0.0..=1.0, "max",
+            "Upper bound of per-plate roughness bias. Plates rolled to this end produce mountainous terrain.",
+        );
+        cfg.plate_roughness_bias_range = (lo, hi);
+    });
+    ui.collapsing("Offset spline (nested)", |ui| {
+        dirty |= nested_spline_panel(ui, &mut cfg.offset_spline,
+            "Offset spline. Nested over (continentalness, terrain_shape, ridges_pv); \
+             output adds to the depth term so positive values push surface up, negative down.");
+    });
+    ui.collapsing("Factor spline (nested)", |ui| {
+        dirty |= nested_spline_panel(ui, &mut cfg.factor_spline,
+            "Factor spline. Nested over (continentalness, terrain_shape, ridges_pv); \
+             output multiplies the depth term. Higher → sharper surface transition.");
+    });
+    ui.collapsing("Jaggedness spline (nested)", |ui| {
+        dirty |= nested_spline_panel(ui, &mut cfg.jaggedness_spline,
+            "Jaggedness spline. Nested over (continentalness, terrain_shape, ridges_pv); \
+             output is added to depth via the ridges term — controls peak amplitude.");
+    });
+    dirty
+}
+
+/// Minimal editor for `NestedSpline`. Full nested editing (three-axis
+/// graph) needs its own widget; for now we expose a value slider when
+/// the spline is `Constant`, and a "Reset to Constant(N)" button for
+/// the `Multipoint` case. Lets the user disable or anchor any branch
+/// without leaving the viz.
+fn nested_spline_panel(
+    ui: &mut Ui,
+    spline: &mut oxium::worldgen::config::NestedSpline,
+    tooltip: &str,
+) -> bool {
+    use oxium::worldgen::config::NestedSpline;
+    let mut dirty = false;
+    ui.label(egui::RichText::new(tooltip).small().weak());
+    match spline {
+        NestedSpline::Constant(v) => {
+            dirty |= ui
+                .add(egui::Slider::new(v, -2.0..=2.0).text("constant value"))
+                .on_hover_text("Sets this branch to a single value across all (c, s, r) inputs.")
+                .changed();
+        }
+        NestedSpline::Multipoint(knots) => {
+            ui.label(format!("Multipoint with {} outer knots (c-axis)", knots.len()));
+            ui.label(egui::RichText::new(
+                "(Full nested editing not yet supported in-viz — edit the RON file directly \
+                 or reset to Constant.)",
+            ).small().weak());
+            if ui
+                .button("Reset to Constant(0.0)")
+                .on_hover_text("Replace the whole nested spline with a single constant.")
+                .clicked()
+            {
+                *spline = NestedSpline::Constant(0.0);
+                dirty = true;
+            }
+        }
+    }
     dirty
 }
 

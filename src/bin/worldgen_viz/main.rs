@@ -246,8 +246,11 @@ impl ApplicationHandler for VizApp {
                         .translate(fwd, strafe, vert, self.keys.shift, dt);
                 }
 
-                // Stream + invalidate.
+                // Stream + invalidate. `tick()` promotes any queued
+                // (debounced) config edit to an actual revision bump
+                // if the user has paused for `DEBOUNCE` ms.
                 let t0 = Instant::now();
+                self.state.session.invalidator.tick();
                 if self.state.session.invalidator.take_pending() {
                     self.state.session.world.wipe();
                     self.state.session.probe.refresh(&self.state.session.generator);

@@ -93,7 +93,11 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
                 graph_panel(ui, &cfg.density);
                 if local_dirty {
                     app.session.config.swap(cfg);
-                    app.session.invalidator.bump();
+                    // queue() instead of bump() — debounces slider /
+                    // spline drags so each tick of a drag doesn't
+                    // trigger a wipe-and-refill. The actual bump fires
+                    // ~200 ms after the user pauses, via Invalidator::tick().
+                    app.session.invalidator.queue();
                     out.dirty = true;
                 }
             });
@@ -162,7 +166,13 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
             ui.separator();
             ui.label(format!("in-flight: {}", app.session.world.in_flight_len()));
             ui.separator();
-            if let Some(ms) = app.last_regen_ms {
+            if let Some(remaining) = app.session.invalidator.pending_remaining() {
+                ui.colored_label(
+                    egui::Color32::from_rgb(230, 180, 80),
+                    format!("edit pending ({} ms)", remaining.as_millis()),
+                );
+                ui.separator();
+            } else if let Some(ms) = app.last_regen_ms {
                 ui.label(format!("last regen: {:.0} ms", ms));
                 ui.separator();
             }
