@@ -211,16 +211,16 @@ impl ApplicationHandler for VizApp {
                 if self.state.session.invalidator.take_pending() {
                     self.state.session.world.wipe();
                     self.state.session.probe.refresh(&self.state.session.generator);
-                    // Re-request every chunk currently on the GPU so its
-                    // mesh refreshes against the new config. Stale
-                    // geometry stays visible until each replacement
-                    // lands — much smoother than a blank-and-rebuild
-                    // flash, and covers chunks beyond the streaming
-                    // radius that the user can still see (e.g. orbit
-                    // cam zoomed out).
-                    let visible = scene.chunk_coords();
-                    self.state.session.world.request_chunks(&visible);
                 }
+                // Every frame: re-request every chunk currently on the
+                // GPU. Once they're cached the call is a no-op; right
+                // after a wipe, this is the only path that actually
+                // refills chunks outside the streaming radius (e.g.
+                // orbit cam zoomed out, or chunks meshed at earlier
+                // camera positions). max_in_flight bounds how many
+                // spawn per frame — the rest queue for next frame.
+                let visible = scene.chunk_coords();
+                self.state.session.world.request_chunks(&visible);
                 let cam_pos = self.state.session.camera().position();
                 self.state.session.world.request_around(cam_pos);
                 let landed = self.state.session.world.drain_results();
