@@ -99,11 +99,12 @@ pub const MACRO_RIVER_THRESH: u32 = 500;
 // ── Caves ────────────────────────────────────────────────────────────
 
 /// Inclusive range of cave systems rolled per fine region.
-/// (0, 1) — most regions get no graph caves at all, occasional
-/// regions get one small system. Graph caves are a discrete
-/// feature (one notable chamber every few hundred blocks), not
-/// the dominant cave shape (that's spaghetti).
-pub const CAVE_SYSTEMS_PER_REGION: (u32, u32) = (0, 1);
+/// (1, 3) — every region gets at least one system, with up to
+/// three in busy regions. The noise carvers (spaghetti) provide
+/// the dominant cave shape; graph systems exist primarily as
+/// discoverable surface entrances (sinkholes / cliff mouths /
+/// skylights) plus the named-feature chambers attached to them.
+pub const CAVE_SYSTEMS_PER_REGION: (u32, u32) = (1, 3);
 /// Vertical band (inclusive both ends) for Shallow systems.
 pub const CAVE_BAND_SHALLOW: (i32, i32) = (10, 50);
 /// Vertical band for Middle systems.
