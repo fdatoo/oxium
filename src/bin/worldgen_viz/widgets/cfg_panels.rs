@@ -369,10 +369,208 @@ pub fn biomes_panel(ui: &mut Ui, cfg: &mut oxium::worldgen::config::BiomesConfig
     dirty
 }
 
-pub fn surface_panel(ui: &mut Ui, _cfg: &mut WorldgenConfig) -> bool {
+pub fn surface_panel(ui: &mut Ui, cfg: &mut WorldgenConfig) -> bool {
+    use oxium::voxel::block::Block;
+    use oxium::worldgen::surface::{ConditionSource, RuleSource};
+
     ui.heading("Surface");
-    ui.label("(Surface decoration — coming in PR 3)");
-    false
+    ui.label("Stamp-and-decorate rules applied after density carving. Block leaves and numeric thresholds are editable inline; structural conditions show as labels.");
+
+    let mut id_counter: u32 = 0;
+    let mut changed = false;
+    egui::ScrollArea::vertical()
+        .id_source("surface_rule_tree")
+        .show(ui, |ui| {
+            changed |= render_rule(ui, &mut cfg.surface, 0, &mut id_counter);
+        });
+    return changed;
+
+    /// Render one node of the rule tree. Returns true if any
+    /// editable leaf changed this frame.
+    fn render_rule(
+        ui: &mut Ui,
+        rule: &mut RuleSource,
+        depth: usize,
+        id_counter: &mut u32,
+    ) -> bool {
+        let mut changed = false;
+        match rule {
+            RuleSource::Block(b) => {
+                ui.horizontal(|ui| {
+                    indent_label(ui, depth, "→");
+                    *id_counter += 1;
+                    let prev = *b;
+                    egui::ComboBox::from_id_source(format!("surf_blk_{id_counter}"))
+                        .selected_text(format!("{b:?}"))
+                        .width(110.0)
+                        .show_ui(ui, |ui| {
+                            for opt in [
+                                Block::Air,
+                                Block::Stone,
+                                Block::Dirt,
+                                Block::Grass,
+                                Block::Sand,
+                                Block::Snow,
+                                Block::Water,
+                                Block::Lava,
+                                Block::Wood,
+                                Block::Leaves,
+                            ] {
+                                ui.selectable_value(b, opt, format!("{opt:?}"));
+                            }
+                        });
+                    if *b != prev {
+                        changed = true;
+                    }
+                });
+            }
+            RuleSource::Sequence(rules) => {
+                indent_label(ui, depth, "Sequence:");
+                for r in rules {
+                    changed |= render_rule(ui, r, depth + 1, id_counter);
+                }
+            }
+            RuleSource::If { condition, then } => {
+                ui.horizontal(|ui| {
+                    indent_label(ui, depth, "if");
+                    changed |= render_condition(ui, condition, id_counter);
+                    ui.monospace(":");
+                });
+                changed |= render_rule(ui, then, depth + 1, id_counter);
+            }
+        }
+        changed
+    }
+
+    fn render_condition(
+        ui: &mut Ui,
+        cond: &mut ConditionSource,
+        id_counter: &mut u32,
+    ) -> bool {
+        // Numeric variants get inline DragValue widgets so common
+        // tuning (snow line, beach band, surface band thickness) is
+        // a single drag away. Compound and pure-categorical
+        // conditions render as monospace labels — their structure is
+        // out of scope for inline editing.
+        let mut changed = false;
+        match cond {
+            ConditionSource::YAbove(y) => {
+                ui.monospace("Y ≥");
+                *id_counter += 1;
+                changed |= ui
+                    .add(egui::DragValue::new(y).speed(1.0).range(-128..=320))
+                    .changed();
+            }
+            ConditionSource::YBelow(y) => {
+                ui.monospace("Y ≤");
+                *id_counter += 1;
+                changed |= ui
+                    .add(egui::DragValue::new(y).speed(1.0).range(-128..=320))
+                    .changed();
+            }
+            ConditionSource::UnderFloor(n) => {
+                ui.monospace("depth ≤");
+                *id_counter += 1;
+                changed |= ui
+                    .add(egui::DragValue::new(n).speed(1.0).range(0..=32))
+                    .changed();
+            }
+            ConditionSource::WithinSurfaceBand(w) => {
+                ui.monospace("|y − h_target| ≤");
+                *id_counter += 1;
+                changed |= ui
+                    .add(egui::DragValue::new(w).speed(1.0).range(0..=64))
+                    .changed();
+            }
+            ConditionSource::AbovePreliminarySurface(o) => {
+                ui.monospace("y ≥ h_target +");
+                *id_counter += 1;
+                changed |= ui
+                    .add(egui::DragValue::new(o).speed(1.0).range(-32..=32))
+                    .changed();
+            }
+            ConditionSource::BeachBand {
+                below_sea,
+                above_sea,
+            } => {
+                ui.monospace("beach band [−");
+                changed |= ui
+                    .add(egui::DragValue::new(below_sea).speed(1.0).range(0..=16))
+                    .changed();
+                ui.monospace(", +");
+                changed |= ui
+                    .add(egui::DragValue::new(above_sea).speed(1.0).range(0..=16))
+                    .changed();
+                ui.monospace("]");
+            }
+            ConditionSource::SandTransitionRoll {
+                temp_min,
+                probability,
+            } => {
+                ui.monospace("sand roll (temp ≥");
+                changed |= ui
+                    .add(egui::DragValue::new(temp_min).speed(0.01).range(-1.0..=1.0))
+                    .changed();
+                ui.monospace(", p =");
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(probability)
+                            .speed(0.01)
+                            .range(0.0..=1.0),
+                    )
+                    .changed();
+                ui.monospace(")");
+            }
+            ConditionSource::Always(v) => {
+                ui.monospace("always");
+                changed |= ui.checkbox(v, "").changed();
+            }
+            ConditionSource::IsCliff => {
+                ui.monospace("is cliff");
+            }
+            ConditionSource::IsCold => {
+                ui.monospace("is cold biome");
+            }
+            ConditionSource::OnFloor => {
+                ui.monospace("on floor");
+            }
+            ConditionSource::Biome(biomes) => {
+                ui.monospace(format!("biome ∈ {biomes:?}"));
+            }
+            ConditionSource::Not(inner) => {
+                ui.monospace("not (");
+                changed |= render_condition(ui, inner, id_counter);
+                ui.monospace(")");
+            }
+            ConditionSource::All(parts) => {
+                ui.monospace("all [");
+                for (i, c) in parts.iter_mut().enumerate() {
+                    if i > 0 {
+                        ui.monospace(",");
+                    }
+                    changed |= render_condition(ui, c, id_counter);
+                }
+                ui.monospace("]");
+            }
+            ConditionSource::Any(parts) => {
+                ui.monospace("any [");
+                for (i, c) in parts.iter_mut().enumerate() {
+                    if i > 0 {
+                        ui.monospace(",");
+                    }
+                    changed |= render_condition(ui, c, id_counter);
+                }
+                ui.monospace("]");
+            }
+        }
+        changed
+    }
+
+    fn indent_label(ui: &mut Ui, depth: usize, leader: &str) {
+        // Two spaces per depth level; egui's monospace gives stable
+        // alignment column-to-column even with mixed glyph widths.
+        ui.monospace(format!("{}{leader}", "  ".repeat(depth)));
+    }
 }
 
 /// Inline density graph: plots the density curve across the Y range.
