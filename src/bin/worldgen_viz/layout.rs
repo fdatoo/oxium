@@ -89,11 +89,32 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
             if cutaway_on {
                 let mut y = app.cutaway_max_y;
                 if ui
-                    .add(egui::Slider::new(&mut y, -64.0..=192.0).text("max y"))
+                    .add(
+                        egui::Slider::new(
+                            &mut y,
+                            crate::app::CUTAWAY_MIN_Y..=crate::app::CUTAWAY_MAX_Y,
+                        )
+                        .text("max y"),
+                    )
                     .on_hover_text("World Y above which fragments are discarded.")
                     .changed()
                 {
                     app.cutaway_max_y = y;
+                    // Manual drag overrides the loop's current position
+                    // for this frame; the loop will continue advancing
+                    // from wherever the user dropped it.
+                }
+                ui.checkbox(&mut app.cutaway_loop, "Loop")
+                    .on_hover_text(
+                        "Sweep the cutaway upward over time so you can watch the terrain stack grow back in.",
+                    );
+                if app.cutaway_loop {
+                    ui.add(
+                        egui::Slider::new(&mut app.cutaway_loop_speed, 2.0..=200.0)
+                            .text("Y/s")
+                            .logarithmic(true),
+                    )
+                    .on_hover_text("Cutaway sweep speed in world-Y units per second.");
                 }
             }
 

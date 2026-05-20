@@ -46,7 +46,18 @@ pub struct AppState {
     /// large default disables the cutaway. Lower to shave off the
     /// surface and expose caves underneath.
     pub cutaway_max_y: f32,
+    /// When true, the main loop advances `cutaway_max_y` upward each
+    /// frame and wraps it back to the slider minimum — gives a
+    /// "grow upward" reveal of the terrain stack.
+    pub cutaway_loop: bool,
+    /// Sweep speed for the cutaway loop, in world-Y units per second.
+    pub cutaway_loop_speed: f32,
 }
+
+/// Slider/sweep range for the cutaway. Both the toolbar slider and
+/// the loop animation read from this so they stay in sync.
+pub const CUTAWAY_MIN_Y: f32 = -64.0;
+pub const CUTAWAY_MAX_Y: f32 = 192.0;
 
 impl AppState {
     pub fn new(seed: u64, config: WorldgenConfig, region: Region) -> Self {
@@ -63,6 +74,8 @@ impl AppState {
             right_tab: RightTab::default(),
             presets: PresetUi::new(),
             cutaway_max_y: 1e9,
+            cutaway_loop: false,
+            cutaway_loop_speed: 30.0,
         }
     }
 
