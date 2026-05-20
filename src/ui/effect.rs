@@ -18,6 +18,9 @@ pub enum UiEffect {
     SetTime(f32),
     /// Toggle `Movement.mode` Walk⇄Fly.
     ToggleFly,
+    /// Toggle `Movement.noclip`. Only takes effect in Fly mode;
+    /// posts a "noclip ON/OFF" line to the chat.
+    ToggleNoclip,
     /// Append a `LineKind::System` line to the chat log.
     PostMessage(String),
     /// Empty the chat log.

@@ -627,6 +627,28 @@ impl AppState {
                     }
                 }
             }
+            UiEffect::ToggleNoclip => {
+                use crate::ecs::components::{Movement, MovementMode};
+                let mut new_state: Option<(bool, bool)> = None;
+                if let Ok(mut q) = self.ecs.world.query_one::<&mut Movement>(self.ecs.player) {
+                    if let Some(mv) = q.get() {
+                        mv.noclip = !mv.noclip;
+                        new_state = Some((mv.noclip, matches!(mv.mode, MovementMode::Fly)));
+                    }
+                }
+                if let Some((on, in_fly)) = new_state {
+                    let msg = if on {
+                        if in_fly {
+                            "noclip ON".to_string()
+                        } else {
+                            "noclip ON (engages once you /fly)".to_string()
+                        }
+                    } else {
+                        "noclip OFF".to_string()
+                    };
+                    self.ui.log.push_system(msg);
+                }
+            }
             UiEffect::PostMessage(msg) => {
                 self.ui.log.push_system(msg);
             }

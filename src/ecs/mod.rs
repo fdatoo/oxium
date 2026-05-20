@@ -48,6 +48,7 @@ impl GameEcs {
                 mode: MovementMode::Walk,
                 speed: 5.0,
                 jump_v: 8.4,
+                noclip: false,
             },
             Camera {
                 yaw: 0.0,

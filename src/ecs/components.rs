@@ -44,6 +44,11 @@ pub struct Movement {
     /// Upward velocity imparted by a jump press. `2 g h ≈ v²` → ~8.4 m/s
     /// for a 1.25-block jump under our 28 m/s² gravity.
     pub jump_v: f32,
+    /// Skip collision sweeps entirely. Only respected in `Fly` mode —
+    /// `Walk` always collides. Toggled via the `/noclip` command for
+    /// debugging cave shape / underground geometry without the player
+    /// getting caught on walls.
+    pub noclip: bool,
 }
 
 /// View-camera state. Attached to the player; M5+ may attach it to other

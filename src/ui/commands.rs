@@ -22,6 +22,7 @@ impl Registry {
                 Box::new(CmdTp),
                 Box::new(CmdTime),
                 Box::new(CmdFly),
+                Box::new(CmdNoclip),
                 Box::new(CmdSave),
                 Box::new(CmdHelp),
                 Box::new(CmdClear),
@@ -85,6 +86,17 @@ impl Command for CmdFly {
     fn help(&self) -> &'static str { "/fly — toggle fly mode" }
     fn run(&self, _args: &[&str]) -> Result<Vec<UiEffect>, String> {
         Ok(vec![UiEffect::ToggleFly])
+    }
+}
+
+struct CmdNoclip;
+impl Command for CmdNoclip {
+    fn name(&self) -> &'static str { "noclip" }
+    fn help(&self) -> &'static str {
+        "/noclip — toggle collision in fly mode (no effect while walking)"
+    }
+    fn run(&self, _args: &[&str]) -> Result<Vec<UiEffect>, String> {
+        Ok(vec![UiEffect::ToggleNoclip])
     }
 }
 

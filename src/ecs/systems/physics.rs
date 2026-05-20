@@ -44,6 +44,15 @@ pub fn physics(ecs: &mut GameEcs, world: &World, dt: f32) {
         grounded.0 = false;
     }
 
+    // Noclip: fly mode + the /noclip flag → skip the swept collision
+    // and integrate position directly. Grounded is always false in this
+    // mode (no contact tests run).
+    if matches!(mov.mode, MovementMode::Fly) && mov.noclip {
+        pos.0 += vel.0 * dt;
+        grounded.0 = false;
+        return;
+    }
+
     let res = sweep_player(world, pos.0, aabb.half, vel.0, dt);
     pos.0 = res.pos;
     vel.0 = res.vel;
