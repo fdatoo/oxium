@@ -395,32 +395,44 @@ impl ApplicationHandler for App {
                     return;
                 }
 
-                // Frame pacing: cap at 60 FPS unless `--uncapped`.
-                // Fifo present mode (vsync) already caps to the
-                // monitor's refresh rate, but high-refresh
-                // (120Hz/ProMotion) displays would otherwise sail
-                // past 60. We compute a monotonic target instant
-                // and ask winit to wait until it (request_redraw
-                // queues the next redraw; WaitUntil delays delivery).
-                if self.cli.uncapped {
-                    state.window.request_redraw();
-                } else {
-                    let now = Instant::now();
-                    let next = self
-                        .next_frame_target
-                        .map(|t| t + FRAME_BUDGET_60_FPS)
-                        .unwrap_or(now + FRAME_BUDGET_60_FPS);
-                    // If we fell behind (e.g. GPU stall), drop the
-                    // missed frames and resync to now — otherwise the
-                    // game would run a burst of catch-up frames after
-                    // any hiccup.
-                    let next = next.max(now);
-                    self.next_frame_target = Some(next);
-                    event_loop.set_control_flow(ControlFlow::WaitUntil(next));
-                    state.window.request_redraw();
-                }
+                // Frame pacing is driven from `about_to_wait` —
+                // calling request_redraw here would defeat
+                // WaitUntil (winit treats the pending redraw as a
+                // reason to wake immediately on most platforms).
             }
             _ => {}
+        }
+    }
+
+    /// Called by winit when there are no more events to process and
+    /// the loop is about to enter its wait state. This is the
+    /// canonical hook for frame pacing: we decide here whether to
+    /// request the next redraw (cap reached) or set WaitUntil to
+    /// sleep until the next 60 FPS slot.
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(state) = self.state.as_ref() else {
+            return;
+        };
+        if self.cli.uncapped {
+            // Uncapped path: poll as fast as possible.
+            event_loop.set_control_flow(ControlFlow::Poll);
+            state.window.request_redraw();
+            return;
+        }
+        let now = Instant::now();
+        let target = self.next_frame_target.unwrap_or(now);
+        if now >= target {
+            // Time to draw this frame. Advance the target for the
+            // next one; clamp to `now` if we fell behind so the
+            // engine doesn't run a burst of catch-up frames after a
+            // stall.
+            state.window.request_redraw();
+            let next = (target + FRAME_BUDGET_60_FPS).max(now);
+            self.next_frame_target = Some(next);
+            event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+        } else {
+            // Not yet — sleep until the next frame slot.
+            event_loop.set_control_flow(ControlFlow::WaitUntil(target));
         }
     }
 
