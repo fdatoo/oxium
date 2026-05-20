@@ -53,8 +53,25 @@ pub fn mesh_chunk(coord: ChunkCoord, chunk: &DenseChunk) -> VizMesh {
     mesh
 }
 
+/// Per-face brightness multiplier. Approximates ambient + sun shading
+/// without paying for real normals or a light buffer: top faces full
+/// bright, bottom faces deep shadow, sides graduated so XZ-facing
+/// cliffs read as cliffs and the user gets a sense of elevation. This
+/// is the cheapest readable-height trick; PR 3 swaps it for a real
+/// normal-aware shader once paint modes need that anyway.
+fn face_tint(face: Face) -> f32 {
+    match face {
+        Face::PosY => 1.00,            // top — full sun
+        Face::PosX | Face::NegZ => 0.82, // sun-side walls
+        Face::NegX | Face::PosZ => 0.66, // shadow-side walls
+        Face::NegY => 0.40,            // underside
+    }
+}
+
 fn emit_face(p: Vec3, color: [f32; 3], face: Face, mesh: &mut VizMesh) {
     let base = mesh.vertices.len() as u32;
+    let tint = face_tint(face);
+    let color = [color[0] * tint, color[1] * tint, color[2] * tint];
     let quad: [Vec3; 4] = match face {
         Face::PosX => [
             Vec3::new(1., 0., 0.),
