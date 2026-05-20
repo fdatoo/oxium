@@ -5,6 +5,7 @@ mod camera;
 mod layout;
 mod overlays;
 mod paint;
+mod probe;
 mod render;
 mod session;
 mod widgets;
