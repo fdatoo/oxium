@@ -113,6 +113,11 @@ pub struct Renderer {
     /// passes.
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
+    /// Offscreen Rgba16Float color target the 3D world passes (sky,
+    /// opaque, water, cursor) render into. The composite pass samples
+    /// this view and resolves to the swapchain. HUD draws after
+    /// composite, directly to the swapchain.
+    pub hdr: hdr::HdrTarget,
     /// Sampleable copy of `depth_texture`. The opaque pass's depth
     /// values get blit-copied into this between the opaque and water
     /// passes; the water shader then samples it to compute terrain
@@ -237,6 +242,8 @@ impl Renderer {
     /// reflects real throughput.
     pub fn new_with_present_mode(window: Arc<Window>, present_mode: wgpu::PresentMode) -> Self {
         let gpu = Gpu::new_with_present_mode(window, present_mode);
+        let hdr_target =
+            hdr::HdrTarget::new(&gpu.device, gpu.surface_cfg.width, gpu.surface_cfg.height);
         let (depth_texture, depth_view) =
             make_depth_texture(&gpu.device, gpu.surface_cfg.width, gpu.surface_cfg.height);
         let (depth_sample_texture, depth_sample_view) = make_depth_sample_texture(
@@ -484,6 +491,7 @@ impl Renderer {
             depth_view,
             depth_sample_texture,
             depth_sample_view,
+            hdr: hdr_target,
             water_depth_bg,
             msaa_color_view,
             reflection_camera_buf,
@@ -558,6 +566,7 @@ impl Renderer {
     /// Reconfigure the surface + depth texture for a new window size.
     pub fn resize(&mut self, w: u32, h: u32) {
         self.gpu.resize(w, h);
+        self.hdr.recreate(&self.gpu.device, w, h);
         let (depth_tex, depth_view) = make_depth_texture(&self.gpu.device, w, h);
         let (depth_sample_tex, depth_sample_view) =
             make_depth_sample_texture(&self.gpu.device, w, h);
