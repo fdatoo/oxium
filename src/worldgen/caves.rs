@@ -1153,6 +1153,39 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "diagnostic only"]
+    fn probe_surface_entrance_noise_distribution() {
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let nc = NoiseCarvers::new(42, &cfg.cave);
+        let mut samples = vec![];
+        for wx in (-200..200).step_by(7) {
+            for wz in (-200..200).step_by(7) {
+                for wy in 42..=82 {
+                    let v = nc.surface_entrance.get([
+                        wx as f64 * cfg.cave.surface_entrance_xz_scale as f64,
+                        wy as f64 * cfg.cave.surface_entrance_y_scale as f64,
+                        wz as f64 * cfg.cave.surface_entrance_xz_scale as f64,
+                    ]) as f32;
+                    samples.push(v);
+                }
+            }
+        }
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let n = samples.len();
+        eprintln!("surface_entrance distribution over {} samples:", n);
+        eprintln!("  min={:.4}  p10={:.4}  p50={:.4}  p90={:.4}  p99={:.4}  max={:.4}",
+            samples[0], samples[n / 10], samples[n / 2],
+            samples[9 * n / 10], samples[99 * n / 100], samples[n - 1]);
+        let above = samples
+            .iter()
+            .filter(|&&v| v > cfg.cave.surface_entrance_threshold)
+            .count();
+        eprintln!("  threshold={}  above={} ({:.2}%)",
+            cfg.cave.surface_entrance_threshold, above,
+            100.0 * above as f32 / n as f32);
+    }
+
+    #[test]
     fn cheese_signed_density_is_finite_and_in_expected_range() {
         // Signed-density: result is roughly in [-1, 1.5]. Verify
         // no NaN/Inf and that the band is respected across many

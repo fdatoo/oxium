@@ -432,9 +432,12 @@
         ),
         surface_entrance_xz_scale: 1.0,
         surface_entrance_y_scale: 0.4,
-        // 0.55 hits ~5-10% of noise values, giving sparse but
-        // discoverable openings ~every few hundred blocks.
-        surface_entrance_threshold: 0.55,
+        // The surface_entrance FBM tops out around 0.62 in practice
+        // (verified via `probe_surface_entrance_noise_distribution`).
+        // 0.30 hits roughly the top 10% of voxels in the Y band,
+        // giving discoverable openings every few dozen blocks of
+        // exploration. Raise → fewer entrances; lower → more.
+        surface_entrance_threshold: 0.30,
         // Intensity 8 — well above the spaghetti / cheese signed
         // densities (clamped to [-1, 1]) so a fired entrance can
         // punch through positive raw_density in the surface band.
