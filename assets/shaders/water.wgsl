@@ -299,15 +299,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         discard;
     }
 
-    // DEBUG: visualise actual vertex displacement by colour-coding
-    // by world Y. If vertices are displaced, we should see Y vary
-    // across the surface.
-    if (camera.underwater_factor > 0.4 && camera.underwater_factor < 0.6) {
-        let dy = in.v_world.y - 62.0;
-        let t = (dy + 2.0) * 0.25; // map [-2, 2] -> [0, 1]
-        return vec4<f32>(t, 1.0 - t, 0.5, 1.0);
-    }
-
     let view_dir = normalize(camera.eye.xyz - in.v_world);
 
     // Per-pixel surface normal from the wave gradient. Sampled in
