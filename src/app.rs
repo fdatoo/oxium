@@ -41,6 +41,12 @@ pub struct AppState {
     pub jobs: Jobs,
     /// World generator, shared with worker threads via `Arc`.
     pub generator: Arc<Generator>,
+    /// File watcher for `assets/worldgen/default.ron`. Must be kept
+    /// alive for the watcher thread to keep running; dropping it
+    /// shuts the watcher down. The watcher swaps a new
+    /// `WorldgenConfig` into the generator's `ConfigHolder` on every
+    /// file change.
+    pub _worldgen_watcher: Box<dyn std::any::Any + Send + Sync>,
     /// Block registry, shared with worker threads via `Arc`.
     pub registry: Arc<BlockRegistry>,
     /// Dedicated I/O thread for chunk save/load.
@@ -213,7 +219,24 @@ impl AppState {
         let ecs = GameEcs::new(spawn);
         let world = World::new(seed);
         let jobs = Jobs::new();
-        let generator = Arc::new(Generator::new(seed));
+        // Build a hot-reloadable WorldgenConfig and spawn a file
+        // watcher on assets/worldgen/default.ron. The watcher
+        // atomically swaps in a new config on every change; newly
+        // generated chunks reflect it. Existing chunks keep their
+        // original generation (full chunk-cache invalidation is a
+        // future-PR concern).
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default()
+            .expect("bundled default.ron must parse");
+        let holder = crate::worldgen::config::ConfigHolder::new(cfg);
+        let watcher_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join("worldgen")
+            .join("default.ron");
+        let watcher = crate::worldgen::config::spawn_watcher(
+            watcher_path,
+            holder.clone(),
+        ).expect("file watcher must start");
+        let generator = Arc::new(Generator::with_config(seed, holder));
         let registry = Arc::new(BlockRegistry::new());
 
         let persistence = Persistence::spawn(saves_dir.clone());
@@ -225,6 +248,7 @@ impl AppState {
             world,
             jobs,
             generator,
+            _worldgen_watcher: Box::new(watcher),
             registry,
             persistence,
             save_index: SaveIndex::new(),
