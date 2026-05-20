@@ -209,6 +209,22 @@ impl DensityNoise {
         bias + noise
     }
 
+    /// Sample the anisotropic base 3D noise. Y is scaled by
+    /// `cfg.base_3d_y_scale` before sampling — values < 1 stretch
+    /// vertical features (make them taller than wide). Used by the
+    /// new MC-style composition in [`Self::evaluate_v2`].
+    pub fn evaluate_base_3d(
+        &self,
+        _h_target: f32, // ignored; kept for symmetry with evaluate()
+        wx: i32,
+        wy: i32,
+        wz: i32,
+        cfg: &crate::worldgen::config::DensityConfig,
+    ) -> f32 {
+        let scaled_y = wy as f64 * cfg.base_3d_y_scale as f64;
+        self.relief.get([wx as f64, scaled_y, wz as f64]) as f32 * cfg.base_3d_amplitude
+    }
+
     /// Walk `(wx, wz)` top-down through the density function and
     /// return the first voxel `wy` where `density > 0` (the topmost
     /// solid block). Searches from `top` downward to a hard floor
@@ -230,6 +246,44 @@ impl DensityNoise {
         // Below the band, terrain is unconditionally solid → topmost
         // solid is the bottom of the search range.
         Some(bottom)
+    }
+}
+
+#[cfg(test)]
+mod tests_anisotropy {
+    use super::*;
+
+    /// Anisotropic noise: a Y-step should change the noise value
+    /// less than an equivalent XZ-step (vertical features are
+    /// 2× taller than wide).
+    #[test]
+    fn base_3d_noise_y_scale_is_half_xz() {
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let d = DensityNoise::new(42);
+        // Average step magnitude across multiple sample points to
+        // wash out single-point noise idiosyncrasies.
+        let mut dx_sum = 0.0_f32;
+        let mut dy_sum = 0.0_f32;
+        let mut n = 0;
+        for wx in (0..32).step_by(4) {
+            for wz in (0..32).step_by(4) {
+                let dx = (d.evaluate_base_3d(0.0, wx, 0, wz, &cfg.density)
+                    - d.evaluate_base_3d(0.0, wx + 8, 0, wz, &cfg.density))
+                .abs();
+                let dy = (d.evaluate_base_3d(0.0, wx, 0, wz, &cfg.density)
+                    - d.evaluate_base_3d(0.0, wx, 8, wz, &cfg.density))
+                .abs();
+                dx_sum += dx;
+                dy_sum += dy;
+                n += 1;
+            }
+        }
+        let dx_avg = dx_sum / n as f32;
+        let dy_avg = dy_sum / n as f32;
+        assert!(
+            dy_avg < dx_avg,
+            "y-step avg ({dy_avg}) should be smaller than x-step avg ({dx_avg})"
+        );
     }
 }
 
