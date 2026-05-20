@@ -125,7 +125,7 @@ pub fn downsample(src: &DenseChunk, factor: u32) -> LodChunk {
                         if above_y < chunk_dim {
                             let idx = LocalPos(UVec3::new(sx, above_y, sz)).to_index();
                             light_sky = src.sky_light[idx];
-                            light_blk = src.block_light[idx];
+                            light_blk = crate::voxel::chunk::rgb_brightness(src.block_rgb[idx]);
                         } else {
                             // Buried-continuing column: assume full sky
                             // light because the surface above will mask
