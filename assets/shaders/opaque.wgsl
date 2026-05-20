@@ -280,11 +280,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // ── Sky ambient — tinted, scaled by sky exposure.
     let sky_amb = camera.sky_color.rgb * sky_level * 0.35;
 
-    // ── Combine.
+    // ── Combine. AO attenuates the AMBIENT terms (sky + indirect)
+    // only — direct sources (sun + block-light) pass unattenuated so
+    // a torch in a corner doesn't darken its own corner from AO. This
+    // is the conventional "AO is ambient occlusion" reading.
     let direct  = camera.sun_color.rgb * sun_lit * camera.sun_intensity;
-    let lit     = direct + sky_amb + block_rgb;
-
     let ao_term = mix(0.45, 1.0, in.v_ao);
+    let lit     = direct + block_rgb + sky_amb * ao_term;
+
     let MIN_SHADE = vec3<f32>(0.02, 0.02, 0.02);
 
     // Per-block brightness jitter: a small ±6% modulation keyed off
@@ -303,10 +306,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     //
     // Tile indices must stay in lockstep with `voxel::block::Tile`:
     //   2 = GrassTop, 4 = Sand
-    var lit_rgb = base_rgb * (lit + MIN_SHADE) * ao_term * variation;
+    var lit_rgb = base_rgb * (lit + MIN_SHADE) * variation;
     let is_blendable = in.v_tile_index == 2u || in.v_tile_index == 4u;
     if (is_blendable) {
-        lit_rgb = lit_rgb + biome_tint_shift(in.v_world.xz) * (lit + MIN_SHADE) * ao_term;
+        lit_rgb = lit_rgb + biome_tint_shift(in.v_world.xz) * (lit + MIN_SHADE);
     }
 
     // Distance fog: linear ramp between FOG_START and FOG_END.
