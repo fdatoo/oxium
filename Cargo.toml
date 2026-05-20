@@ -51,6 +51,9 @@ lru = "0.12"
 # seed-deterministic and does not invoke rand at runtime.
 rand = "0.8"
 
+# CLI argument parsing — used by worldgen_viz binary.
+clap = { version = "4", features = ["derive"] }
+
 # Errors / logging
 anyhow = "1"
 thiserror = "1"

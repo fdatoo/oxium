@@ -1,71 +1,110 @@
-//! Worldgen tuning visualizer.
+//! Worldgen tuning visualizer — PR 1 (streaming skeleton).
 
-mod cross;
+mod app;
+mod camera;
+mod crosssection;
+mod layout;
+mod overlays;
+mod paint;
+mod preset;
+mod probe;
 mod render;
-mod scene;
-mod spline_widget;
-mod ui;
-mod worldgen_bridge;
+mod session;
+mod widgets;
+mod world;
 
+use crate::app::AppState;
+use crate::render::scene::SceneRenderer;
+use crate::render::RenderState;
+use crate::session::CamKind;
+use clap::Parser;
+use oxium::worldgen::config::WorldgenConfig;
 use std::sync::Arc;
+use std::time::Instant;
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-use crate::render::RenderState;
-
-struct App {
-    window: Option<Arc<Window>>,
-    render: Option<RenderState>,
-    scene: Option<scene::SceneRender>,
-    camera: scene::OrbitCamera,
-    config: oxium::worldgen::config::WorldgenConfig,
-    dirty: bool,
-    mouse_down: bool,
-    last_cursor: Option<(f64, f64)>,
-    cross_texture: Option<egui::TextureHandle>,
-    last_regen_ms: Option<f32>,
-    auto_regen: bool,
-    /// When the dirty flag was last set (by a slider/preset edit
-    /// or the `R` button). The regen runs only after a debounce
-    /// window of `REGEN_DEBOUNCE` has elapsed since this time, so
-    /// dragging a slider through many values doesn't cause one
-    /// 600ms regen per pixel.
-    dirty_since: Option<std::time::Instant>,
+#[derive(Parser, Debug)]
+#[command(version)]
+struct Cli {
+    /// World seed.
+    #[arg(long, default_value_t = 42)]
+    seed: u64,
+    /// Run one frame and exit (for CI smoke tests).
+    #[arg(long, default_value_t = false)]
+    check: bool,
+    /// Region XZ half-radius in chunks. Default 3 = 7×7 chunk grid ≈
+    /// 224 blocks visible horizontally. The whole region is generated
+    /// up front and re-meshed on every edit.
+    #[arg(long, default_value_t = 3)]
+    radius_xz: i32,
+    /// Region Y half-radius in chunks (world-anchored to Y=0).
+    /// Default 4 ≈ blocks -128..=160 — covers the full default
+    /// Oxium world height.
+    #[arg(long, default_value_t = 4)]
+    radius_y: i32,
+    /// Region centre chunk X. Move it to look at a different XZ.
+    #[arg(long, default_value_t = 0)]
+    center_cx: i32,
+    /// Region centre chunk Z.
+    #[arg(long, default_value_t = 0)]
+    center_cz: i32,
 }
 
-const REGEN_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
+struct VizApp {
+    window: Option<Arc<Window>>,
+    render: Option<RenderState>,
+    scene: Option<SceneRenderer>,
+    state: AppState,
+    /// True between W/A/S/D press and release.
+    keys: KeyState,
+    /// One-frame flag set by --check to terminate after first redraw.
+    quit_after_render: bool,
+}
 
-impl App {
-    fn new() -> Self {
-        let config = oxium::worldgen::config::WorldgenConfig::bundled_default()
-            .expect("bundled default.ron must parse");
+#[derive(Default)]
+struct KeyState {
+    w: bool,
+    a: bool,
+    s: bool,
+    d: bool,
+    q: bool,
+    e: bool,
+    shift: bool,
+    ctrl: bool,
+}
+
+impl VizApp {
+    fn new(cli: Cli) -> Self {
+        let config = WorldgenConfig::bundled_default().expect("bundled default.ron");
+        let region = crate::world::Region::new(
+            cli.center_cx,
+            cli.center_cz,
+            cli.radius_xz.max(0),
+            cli.radius_y.max(0),
+        );
         Self {
+            state: AppState::new(cli.seed, config, region),
             window: None,
             render: None,
             scene: None,
-            camera: scene::OrbitCamera::new(),
-            config,
-            dirty: true,
-            mouse_down: false,
-            last_cursor: None,
-            cross_texture: None,
-            last_regen_ms: None,
-            auto_regen: true,
-            dirty_since: None,
+            keys: KeyState::default(),
+            quit_after_render: cli.check,
         }
     }
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler for VizApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let attrs = Window::default_attributes()
-            .with_title("Oxium worldgen visualizer")
-            .with_inner_size(winit::dpi::LogicalSize::new(1400.0, 900.0));
+            .with_title("Oxium worldgen visualizer (PR 1)")
+            .with_inner_size(winit::dpi::LogicalSize::new(1600.0, 1000.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         let render = RenderState::new(window.clone());
-        let scene = scene::SceneRender::new(
+        let scene = SceneRenderer::new(
             &render.device,
             render.surface_config.format,
             render.surface_config.width,
@@ -76,13 +115,10 @@ impl ApplicationHandler for App {
         self.scene = Some(scene);
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
-        let (Some(window), Some(render)) = (self.window.as_ref(), self.render.as_mut()) else {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        let (Some(window), Some(render), Some(scene)) =
+            (self.window.as_ref(), self.render.as_mut(), self.scene.as_mut())
+        else {
             return;
         };
         let _ = render.egui_state.on_window_event(window, &event);
@@ -90,220 +126,252 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 render.resize(size.width, size.height);
-                if let Some(s) = self.scene.as_mut() {
-                    s.resize(&render.device, size.width, size.height);
-                }
+                scene.resize(&render.device, size.width, size.height);
             }
             WindowEvent::CursorMoved { position, .. } => {
-                if self.mouse_down {
-                    if let Some((px, py)) = self.last_cursor {
-                        let dx = (position.x - px) as f32;
-                        let dy = (position.y - py) as f32;
-                        self.camera.yaw -= dx * 0.005;
-                        self.camera.pitch = (self.camera.pitch + dy * 0.005).clamp(-1.5, 1.5);
+                if let Some((px, py)) = self.state.last_cursor {
+                    let dx = (position.x - px) as f32;
+                    let dy = (position.y - py) as f32;
+                    if self.state.mouse_down {
+                        match self.state.session.cam_kind {
+                            CamKind::Fly => self.state.session.fly.look(dx, dy),
+                            CamKind::Orbit => {
+                                self.state.session.orbit.yaw -= dx * 0.005;
+                                self.state.session.orbit.pitch =
+                                    (self.state.session.orbit.pitch + dy * 0.005).clamp(-1.5, 1.5);
+                            }
+                        }
+                    }
+                    if self.state.mmb_down {
+                        match self.state.session.cam_kind {
+                            CamKind::Fly => self.state.session.fly.pan(dx, dy),
+                            CamKind::Orbit => self.state.session.orbit.pan(dx, dy),
+                        }
                     }
                 }
-                self.last_cursor = Some((position.x, position.y));
+                self.state.last_cursor = Some((position.x, position.y));
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                if button == winit::event::MouseButton::Right {
-                    self.mouse_down = state == winit::event::ElementState::Pressed;
+                match button {
+                    MouseButton::Right => {
+                        self.state.mouse_down = state == ElementState::Pressed;
+                    }
+                    MouseButton::Middle => {
+                        self.state.mmb_down = state == ElementState::Pressed;
+                    }
+                    MouseButton::Left
+                        if state == ElementState::Released
+                            && !render.egui_ctx.wants_pointer_input() =>
+                    {
+                        // Left-click in the 3D viewport → raycast to the
+                        // first solid voxel and pin its column. The
+                        // `!wants_pointer_input()` gate keeps panel
+                        // clicks from double-firing as pickers.
+                        if let Some((mx, my)) = self.state.last_cursor {
+                            let w = render.surface_config.width as f32;
+                            let h = render.surface_config.height as f32;
+                            let aspect = w / h.max(1.0);
+                            let vp = self.state.session.camera().view_proj(aspect);
+                            let (origin, dir) = mouse_to_ray((mx, my), (w, h), vp);
+                            if let Some((wx, wz)) =
+                                self.state.session.world.raycast_column(origin, dir, 4096.0)
+                            {
+                                let gen_arc = self.state.session.generator.clone();
+                                self.state.session.probe.pin(&gen_arc, wx, wz);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                // Wheel events over an egui panel (config sliders, map,
+                // probe) should scroll that panel, not dolly/zoom the
+                // camera. `wants_pointer_input()` is true whenever the
+                // cursor is inside any interactive egui area.
+                if render.egui_ctx.wants_pointer_input() {
+                    return;
+                }
                 let amt = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => y * 4.0,
-                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.5,
+                    MouseScrollDelta::LineDelta(_, y) => y * 4.0,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.5,
                 };
-                self.camera.distance = (self.camera.distance - amt).clamp(8.0, 512.0);
+                if matches!(self.state.session.cam_kind, CamKind::Orbit) {
+                    self.state.session.orbit.distance =
+                        (self.state.session.orbit.distance - amt).clamp(50.0, 768.0);
+                } else if self.keys.ctrl {
+                    self.state.session.fly.speed =
+                        (self.state.session.fly.speed + amt).clamp(2.0, 200.0);
+                } else {
+                    let step = amt * self.state.session.fly.speed * 0.07;
+                    self.state.session.fly.dolly(step);
+                }
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                use winit::keyboard::{KeyCode, PhysicalKey};
-                if event.state == winit::event::ElementState::Pressed {
-                    if let PhysicalKey::Code(code) = event.physical_key {
-                        match code {
-                            KeyCode::KeyR => self.dirty = true,
-                            KeyCode::Space => self.auto_regen = !self.auto_regen,
-                            _ => {}
+                let pressed = event.state == ElementState::Pressed;
+                if let PhysicalKey::Code(code) = event.physical_key {
+                    match code {
+                        KeyCode::KeyW => self.keys.w = pressed,
+                        KeyCode::KeyA => self.keys.a = pressed,
+                        KeyCode::KeyS => self.keys.s = pressed,
+                        KeyCode::KeyD => self.keys.d = pressed,
+                        KeyCode::KeyQ => self.keys.q = pressed,
+                        KeyCode::KeyE => self.keys.e = pressed,
+                        KeyCode::ShiftLeft | KeyCode::ShiftRight => self.keys.shift = pressed,
+                        KeyCode::ControlLeft | KeyCode::ControlRight => {
+                            self.keys.ctrl = pressed;
                         }
+                        KeyCode::KeyO if pressed => self.state.session.toggle_camera(),
+                        KeyCode::KeyR if pressed => self.state.session.invalidator.bump(),
+                        KeyCode::KeyF if pressed => {
+                            // Focus on the pinned column: fly camera
+                            // (and orbit target) repositions to look
+                            // at the pinned column's surface.
+                            if let (Some((wx, wz)), Some(snap)) = (
+                                self.state.session.probe.pinned,
+                                self.state.session.probe.snapshot.as_ref(),
+                            ) {
+                                let target = glam::Vec3::new(
+                                    wx as f32 + 0.5,
+                                    snap.h_target as f32,
+                                    wz as f32 + 0.5,
+                                );
+                                self.state.session.fly.focus_on(target);
+                                self.state.session.orbit.focus_on(target);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
             WindowEvent::RedrawRequested => {
-                let raw_input = render.egui_state.take_egui_input(window);
-                let mut dirty_local = self.dirty;
-                let cfg = &mut self.config;
-                let cam_info = (
-                    self.camera.yaw,
-                    self.camera.pitch,
-                    self.camera.distance,
-                );
-                // Regenerate top-down texture before egui frame (so we
-                // have a TextureHandle to display).
-                if self.dirty || self.cross_texture.is_none() {
-                    let img = crate::cross::render_topdown(42, cfg);
-                    let tex = render.egui_ctx.load_texture(
-                        "cross_topdown",
-                        img,
-                        egui::TextureOptions::LINEAR,
-                    );
-                    self.cross_texture = Some(tex);
+                let dt = self.state.dt();
+
+                // Cutaway sweep: when looping is on and the cutaway is
+                // active (max_y < the 1e9 "off" sentinel), advance the
+                // plane upward by dt * speed and wrap from the upper
+                // clamp back to the lower clamp. Gives a "grow upward"
+                // reveal of the terrain stack between the user-set
+                // bounds. If the live value is outside the band (just
+                // moved a handle, or just enabled the loop), snap it
+                // to the lower clamp so the next cycle starts fresh.
+                if self.state.cutaway_loop && self.state.cutaway_max_y < 1e6 {
+                    let lo = self.state.cutaway_clamp_lo;
+                    let hi = self.state.cutaway_clamp_hi;
+                    let span = (hi - lo).max(1e-3);
+                    let advanced =
+                        self.state.cutaway_max_y + dt * self.state.cutaway_loop_speed;
+                    let y = if advanced < lo || advanced > hi {
+                        lo + (advanced - lo).rem_euclid(span)
+                    } else {
+                        advanced
+                    };
+                    self.state.cutaway_max_y = y;
                 }
-                let cross_tex = self.cross_texture.clone();
-                let last_regen_ms = self.last_regen_ms;
-                let mut auto_regen_local = self.auto_regen;
+
+                // Camera input (fly cam only).
+                if matches!(self.state.session.cam_kind, CamKind::Fly) {
+                    let fwd = (self.keys.w as i32 - self.keys.s as i32) as f32;
+                    let strafe = (self.keys.d as i32 - self.keys.a as i32) as f32;
+                    let vert = (self.keys.e as i32 - self.keys.q as i32) as f32;
+                    self.state
+                        .session
+                        .fly
+                        .translate(fwd, strafe, vert, self.keys.shift, dt);
+                }
+
+                // Region pipeline: tick the debounce, on bump regen
+                // every chunk in the region, then drain any completed
+                // fill+mesh jobs into the scene. No streaming, no
+                // visible-set refill, no in-flight cap — the whole
+                // region is in flight at once and the rayon pool
+                // chews through it.
+                let t0 = Instant::now();
+                self.state.session.invalidator.tick();
+                if self.state.session.invalidator.take_pending() {
+                    self.state.session.world.regen();
+                    self.state.session.probe.refresh(&self.state.session.generator);
+                }
+                let landed = self.state.session.world.drain_results();
+                for (coord, vertices, indices) in landed {
+                    scene.upload_chunk(&render.device, coord, &vertices, &indices);
+                }
+                if t0.elapsed().as_secs_f32() > 0.001 {
+                    self.state.last_regen_ms = Some(t0.elapsed().as_secs_f32() * 1000.0);
+                }
+
+                // egui pass.
+                let raw_input = render.egui_state.take_egui_input(window);
+                let mut reset_cam = false;
                 let mut force_regen = false;
-                // Status indicator: where are we in the regen lifecycle?
-                let dirty_now = self.dirty;
-                let debounce_remaining_ms = self
-                    .dirty_since
-                    .map(|t| {
-                        let elapsed = t.elapsed();
-                        if elapsed >= REGEN_DEBOUNCE {
-                            0u128
-                        } else {
-                            (REGEN_DEBOUNCE - elapsed).as_millis()
-                        }
-                    })
-                    .unwrap_or(0);
+                let mut region_change: Option<crate::world::Region> = None;
+                let app_ref = &mut self.state;
                 let full_output = render.egui_ctx.clone().run(raw_input, |ctx| {
-                    egui::SidePanel::left("config_panel")
-                        .resizable(true)
-                        .default_width(360.0)
-                        .show(ctx, |ui| {
-                            egui::ScrollArea::vertical().show(ui, |ui| {
-                                if crate::ui::density_panel(ui, &mut cfg.density) {
-                                    dirty_local = true;
-                                }
-                                ui.separator();
-                                if crate::ui::preset_panel(ui, cfg) {
-                                    dirty_local = true;
-                                }
-                            });
-                        });
-                    egui::SidePanel::right("cross_panel")
-                        .resizable(true)
-                        .default_width(420.0)
-                        .show(ctx, |ui| {
-                            ui.heading("Top-down (h_target)");
-                            if let Some(tex) = cross_tex.as_ref() {
-                                ui.image((tex.id(), egui::vec2(400.0, 400.0)));
-                            }
-                            ui.label("256×256 px, 4 blocks/px → 1024 blocks/side");
-                        });
-                    egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(format!(
-                                "yaw {:.2} pitch {:.2} dist {:.0}",
-                                cam_info.0, cam_info.1, cam_info.2
-                            ));
-                            ui.separator();
-                            // State indicator: "idle" | "edit pending (Xms)" | "regenerating…"
-                            let (state_text, state_color) = if dirty_now {
-                                if debounce_remaining_ms > 0 {
-                                    (
-                                        format!("edit pending ({}ms)", debounce_remaining_ms),
-                                        egui::Color32::from_rgb(220, 180, 80),
-                                    )
-                                } else {
-                                    (
-                                        "regenerating…".to_string(),
-                                        egui::Color32::from_rgb(220, 100, 80),
-                                    )
-                                }
-                            } else {
-                                (
-                                    "idle".to_string(),
-                                    egui::Color32::from_rgb(120, 200, 120),
-                                )
-                            };
-                            ui.colored_label(state_color, state_text);
-                            ui.separator();
-                            if let Some(ms) = last_regen_ms {
-                                ui.label(format!("last regen: {:.1} ms", ms));
-                            }
-                            ui.separator();
-                            ui.label(if auto_regen_local {
-                                "auto-regen: ON"
-                            } else {
-                                "auto-regen: OFF (press R to regen)"
-                            });
-                            ui.separator();
-                            if ui.button("[R] Regen").clicked() {
-                                force_regen = true;
-                            }
-                            if ui
-                                .button(if auto_regen_local { "Pause" } else { "Resume" })
-                                .clicked()
-                            {
-                                auto_regen_local = !auto_regen_local;
-                            }
-                        });
-                    });
-                    // Transparent central panel so the 3D scene shows
-                    // through. The default frame draws an opaque
-                    // background that would cover the mesh viewport.
-                    egui::CentralPanel::default()
-                        .frame(egui::Frame::none())
-                        .show(ctx, |_ui| {});
+                    let r = crate::layout::dashboard(ctx, app_ref);
+                    reset_cam = r.reset_camera;
+                    force_regen = r.force_regen;
+                    region_change = r.region_change;
                 });
-                // Track edit time for debouncing. Any new dirty bit
-                // resets the debounce timer.
-                let was_dirty = self.dirty;
-                self.dirty = dirty_local || force_regen;
-                if self.dirty && !was_dirty {
-                    self.dirty_since = Some(std::time::Instant::now());
-                } else if self.dirty {
-                    // Slider still being dragged — reset debounce so
-                    // we don't regen until the user stops moving it.
-                    if dirty_local {
-                        self.dirty_since = Some(std::time::Instant::now());
-                    }
+                if reset_cam {
+                    self.state.session.fly = crate::camera::FlyCamera::new();
+                    self.state.session.orbit = crate::camera::OrbitCamera::new();
                 }
                 if force_regen {
-                    // Manual regen bypasses the debounce window.
-                    self.dirty_since = Some(
-                        std::time::Instant::now() - REGEN_DEBOUNCE,
-                    );
+                    self.state.session.invalidator.bump();
                 }
-                self.auto_regen = auto_regen_local;
+                if let Some(new_region) = region_change {
+                    // Region change: drop GPU buffers for chunks that
+                    // fell outside the new bounds, then let World
+                    // regen everything in the new region.
+                    let dropped = self.state.session.world.set_region(new_region);
+                    for coord in dropped {
+                        scene.drop_chunk(coord);
+                    }
+                }
                 render
                     .egui_state
                     .handle_platform_output(window, full_output.platform_output.clone());
 
-                // Regen mesh if config is dirty AND auto_regen is on
-                // AND the debounce window has elapsed since the last
-                // edit. Debouncing keeps slider drags responsive —
-                // we don't kick off a 600ms regen per pixel of drag.
-                let debounce_ready = self
-                    .dirty_since
-                    .map(|t| t.elapsed() >= REGEN_DEBOUNCE)
-                    .unwrap_or(false);
-                if self.dirty && self.auto_regen && debounce_ready {
-                    let t0 = std::time::Instant::now();
-                    let (verts, idxs) =
-                        worldgen_bridge::regen_region_mesh(42, &self.config);
-                    if let Some(scene) = self.scene.as_mut() {
-                        scene.upload_mesh(&render.device, &verts, &idxs);
-                    }
-                    let elapsed_ms = t0.elapsed().as_secs_f32() * 1000.0;
-                    self.last_regen_ms = Some(elapsed_ms);
-                    eprintln!(
-                        "viz regen: {:.1} ms ({} verts, {} idxs)",
-                        elapsed_ms,
-                        verts.len(),
-                        idxs.len()
-                    );
-                    self.dirty = false;
-                    self.dirty_since = None;
-                }
-
-                let scene_ref = self.scene.as_ref().expect("scene");
+                // Camera uniform + frame composition. update_camera
+                // also stashes the latest view_proj on the scene for
+                // CPU-side frustum culling; we mirror the chunk counts
+                // into AppState so the status bar can show them
+                // without holding a SceneRenderer reference.
                 let aspect = render.surface_config.width as f32
                     / render.surface_config.height.max(1) as f32;
-                scene_ref.update_camera(&render.queue, &self.camera, aspect);
-                if let Err(e) = render_frame(render, scene_ref, full_output) {
-                    eprintln!("render: {:?}", e);
+                let selected_chunk =
+                    self.state.session.probe.pinned.map(|(wx, wz)| {
+                        use oxium::voxel::coords::{ChunkCoord, CHUNK_DIM_U};
+                        let dim = CHUNK_DIM_U as i32;
+                        // Y of the chunk holding the pinned column's surface.
+                        let cy = self
+                            .state
+                            .session
+                            .probe
+                            .snapshot
+                            .as_ref()
+                            .map(|s| s.h_target)
+                            .unwrap_or(70)
+                            .div_euclid(dim);
+                        ChunkCoord(glam::IVec3::new(wx.div_euclid(dim), cy, wz.div_euclid(dim)))
+                    });
+                let time_s = self.state.start_time.elapsed().as_secs_f32();
+                scene.update_camera(
+                    &render.queue,
+                    self.state.session.camera(),
+                    aspect,
+                    selected_chunk,
+                    time_s,
+                    self.state.cutaway_max_y,
+                );
+                self.state.scene_chunks_total = scene.chunk_count();
+                self.state.scene_chunks_visible = scene.visible_chunk_count();
+                if let Err(e) = render_frame(render, scene, full_output) {
+                    eprintln!("render: {e:?}");
+                }
+
+                if self.quit_after_render {
+                    event_loop.exit();
                 }
                 window.request_redraw();
             }
@@ -312,54 +380,68 @@ impl ApplicationHandler for App {
     }
 }
 
+/// Inverse-project a mouse click into a world-space ray. NDC space is
+/// (-1, -1) at bottom-left, (+1, +1) at top-right; mouse pixels are
+/// (0, 0) at top-left with Y growing downward — hence the Y flip.
+fn mouse_to_ray(
+    mouse: (f64, f64),
+    screen: (f32, f32),
+    view_proj: glam::Mat4,
+) -> (glam::Vec3, glam::Vec3) {
+    let nx = (mouse.0 as f32 / screen.0).clamp(0.0, 1.0) * 2.0 - 1.0;
+    let ny = 1.0 - (mouse.1 as f32 / screen.1).clamp(0.0, 1.0) * 2.0;
+    let inv = view_proj.inverse();
+    let near = inv.project_point3(glam::Vec3::new(nx, ny, 0.0));
+    let far = inv.project_point3(glam::Vec3::new(nx, ny, 1.0));
+    (near, (far - near).normalize_or_zero())
+}
+
 fn render_frame(
     render: &mut RenderState,
-    scene: &scene::SceneRender,
+    scene: &SceneRenderer,
     full_output: egui::FullOutput,
 ) -> Result<(), wgpu::SurfaceError> {
     let frame = render.surface.get_current_texture()?;
-    let view = frame
-        .texture
-        .create_view(&wgpu::TextureViewDescriptor::default());
-    let mut encoder = render
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("viz frame"),
-        });
+    let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder = render.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("viz frame"),
+    });
 
-    // 3D scene pass
     {
-        let mut pass = encoder
-            .begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("scene pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.05,
-                            g: 0.05,
-                            b: 0.08,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &scene.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("scene pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    // Mid-blue background — bright enough that
+                    // stone-grey block faces stay readable against it,
+                    // dark enough that yellow highlights (probe pulse,
+                    // map crosshair) still pop. The old near-black
+                    // navy made gray voxels disappear into the void.
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.30,
+                        g: 0.36,
+                        b: 0.46,
+                        a: 1.0,
                     }),
-                    stencil_ops: None,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: scene.depth_view(),
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
                 }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
         scene.render(&mut pass);
     }
 
-    // egui pass (overlay)
     let paint_jobs = render
         .egui_ctx
         .tessellate(full_output.shapes, full_output.pixels_per_point);
@@ -368,17 +450,9 @@ fn render_frame(
         pixels_per_point: full_output.pixels_per_point,
     };
     for (id, image_delta) in &full_output.textures_delta.set {
-        render
-            .egui_renderer
-            .update_texture(&render.device, &render.queue, *id, image_delta);
+        render.egui_renderer.update_texture(&render.device, &render.queue, *id, image_delta);
     }
-    render.egui_renderer.update_buffers(
-        &render.device,
-        &render.queue,
-        &mut encoder,
-        &paint_jobs,
-        &screen,
-    );
+    render.egui_renderer.update_buffers(&render.device, &render.queue, &mut encoder, &paint_jobs, &screen);
     {
         let mut pass = encoder
             .begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -409,7 +483,28 @@ fn render_frame(
 
 fn main() {
     env_logger::init();
+    let cli = Cli::parse();
     let event_loop = EventLoop::new().expect("event loop");
-    let mut app = App::new();
+    let mut app = VizApp::new(cli);
     event_loop.run_app(&mut app).expect("run loop");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn check_flag_parses() {
+        let cli = Cli::parse_from(["worldgen_viz", "--check"]);
+        assert!(cli.check);
+        assert_eq!(cli.seed, 42);
+    }
+
+    #[test]
+    fn seed_flag_parses() {
+        let cli = Cli::parse_from(["worldgen_viz", "--seed", "1337"]);
+        assert_eq!(cli.seed, 1337);
+        assert!(!cli.check);
+    }
 }
