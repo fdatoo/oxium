@@ -61,7 +61,10 @@ impl SceneRenderer {
             label: Some("camera bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                // The camera UBO now feeds both stages: vertex uses
+                // view_proj, fragment uses selected_chunk + time for
+                // the pinned-chunk pulse tint.
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
