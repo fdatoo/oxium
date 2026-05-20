@@ -25,6 +25,20 @@ impl OrbitCamera {
             distance: 160.0,
         }
     }
+
+    /// Pan the orbit target perpendicular to view. Scales with distance
+    /// so the gesture feels the same whether zoomed in or out.
+    pub fn pan(&mut self, dx: f32, dy: f32) {
+        let right = Vec3::new(self.yaw.sin(), 0.0, -self.yaw.cos());
+        let factor = self.distance * 0.0015;
+        self.target -= right * dx * factor;
+        self.target += Vec3::Y * dy * factor;
+    }
+
+    /// Re-center the orbit on `target`, keeping the current yaw / pitch / distance.
+    pub fn focus_on(&mut self, target: Vec3) {
+        self.target = target;
+    }
 }
 
 impl Camera for OrbitCamera {
@@ -95,6 +109,39 @@ impl FlyCamera {
     pub fn look(&mut self, dx: f32, dy: f32) {
         self.yaw -= dx * 0.005;
         self.pitch = (self.pitch - dy * 0.005).clamp(-1.5, 1.5);
+    }
+
+    /// Translate the camera parallel to the view plane: along the
+    /// camera's right vector for `dx` (horizontal), along world-up for
+    /// `dy` (vertical). World-up rather than camera-up so panning
+    /// doesn't drift the elevation as pitch changes — matches the
+    /// behaviour every DCC editor's middle-mouse pan uses. Sign
+    /// convention: drag right → world scrolls right (camera moves left).
+    pub fn pan(&mut self, dx: f32, dy: f32) {
+        let factor = 0.2;
+        self.position -= self.right() * dx * factor;
+        self.position += Vec3::Y * dy * factor;
+    }
+
+    /// Dolly along the forward direction. Positive `amount` moves forward.
+    pub fn dolly(&mut self, amount: f32) {
+        self.position += self.forward() * amount;
+    }
+
+    /// Reposition the camera near `target` and orient toward it.
+    /// Camera ends up ~30 blocks back along the current XZ heading,
+    /// 20 above the target — close enough to inspect, not so close
+    /// that the column fills the screen.
+    pub fn focus_on(&mut self, target: Vec3) {
+        // Keep the current yaw heading; just place the camera so the
+        // target sits along its forward at ~36 blocks distance.
+        let dist = 36.0;
+        let height_above = 20.0;
+        let xz_dir = Vec3::new(self.yaw.cos(), 0.0, self.yaw.sin()).normalize();
+        self.position = target - xz_dir * dist + Vec3::Y * height_above;
+        let to_target = (target - self.position).normalize();
+        self.pitch = to_target.y.asin().clamp(-1.5, 1.5);
+        self.yaw = to_target.z.atan2(to_target.x);
     }
 }
 

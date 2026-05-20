@@ -67,6 +67,7 @@ struct KeyState {
     q: bool,
     e: bool,
     shift: bool,
+    ctrl: bool,
 }
 
 impl VizApp {
@@ -119,10 +120,10 @@ impl ApplicationHandler for VizApp {
                 scene.resize(&render.device, size.width, size.height);
             }
             WindowEvent::CursorMoved { position, .. } => {
-                if self.state.mouse_down {
-                    if let Some((px, py)) = self.state.last_cursor {
-                        let dx = (position.x - px) as f32;
-                        let dy = (position.y - py) as f32;
+                if let Some((px, py)) = self.state.last_cursor {
+                    let dx = (position.x - px) as f32;
+                    let dy = (position.y - py) as f32;
+                    if self.state.mouse_down {
                         match self.state.session.cam_kind {
                             CamKind::Fly => self.state.session.fly.look(dx, dy),
                             CamKind::Orbit => {
@@ -132,34 +133,46 @@ impl ApplicationHandler for VizApp {
                             }
                         }
                     }
+                    if self.state.mmb_down {
+                        match self.state.session.cam_kind {
+                            CamKind::Fly => self.state.session.fly.pan(dx, dy),
+                            CamKind::Orbit => self.state.session.orbit.pan(dx, dy),
+                        }
+                    }
                 }
                 self.state.last_cursor = Some((position.x, position.y));
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                if button == MouseButton::Right {
-                    self.state.mouse_down = state == ElementState::Pressed;
-                } else if button == MouseButton::Left
-                    && state == ElementState::Released
-                    && !render.egui_ctx.wants_pointer_input()
-                {
-                    // Left-click in the 3D viewport → raycast to the
-                    // first solid voxel and pin its column. We gate on
-                    // `!wants_pointer_input()` so clicks inside any
-                    // egui panel (config sliders, map, probe) don't
-                    // double-fire as pickers.
-                    if let Some((mx, my)) = self.state.last_cursor {
-                        let w = render.surface_config.width as f32;
-                        let h = render.surface_config.height as f32;
-                        let aspect = w / h.max(1.0);
-                        let vp = self.state.session.camera().view_proj(aspect);
-                        let (origin, dir) = mouse_to_ray((mx, my), (w, h), vp);
-                        if let Some((wx, wz)) =
-                            self.state.session.world.raycast_column(origin, dir, 4096.0)
-                        {
-                            let gen_arc = self.state.session.generator.clone();
-                            self.state.session.probe.pin(&gen_arc, wx, wz);
+                match button {
+                    MouseButton::Right => {
+                        self.state.mouse_down = state == ElementState::Pressed;
+                    }
+                    MouseButton::Middle => {
+                        self.state.mmb_down = state == ElementState::Pressed;
+                    }
+                    MouseButton::Left
+                        if state == ElementState::Released
+                            && !render.egui_ctx.wants_pointer_input() =>
+                    {
+                        // Left-click in the 3D viewport → raycast to the
+                        // first solid voxel and pin its column. The
+                        // `!wants_pointer_input()` gate keeps panel
+                        // clicks from double-firing as pickers.
+                        if let Some((mx, my)) = self.state.last_cursor {
+                            let w = render.surface_config.width as f32;
+                            let h = render.surface_config.height as f32;
+                            let aspect = w / h.max(1.0);
+                            let vp = self.state.session.camera().view_proj(aspect);
+                            let (origin, dir) = mouse_to_ray((mx, my), (w, h), vp);
+                            if let Some((wx, wz)) =
+                                self.state.session.world.raycast_column(origin, dir, 4096.0)
+                            {
+                                let gen_arc = self.state.session.generator.clone();
+                                self.state.session.probe.pin(&gen_arc, wx, wz);
+                            }
                         }
                     }
+                    _ => {}
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -168,11 +181,18 @@ impl ApplicationHandler for VizApp {
                     MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.5,
                 };
                 if matches!(self.state.session.cam_kind, CamKind::Orbit) {
+                    // Orbit cam: wheel zooms in/out.
                     self.state.session.orbit.distance =
                         (self.state.session.orbit.distance - amt).clamp(50.0, 768.0);
-                } else {
+                } else if self.keys.ctrl {
+                    // Ctrl+Wheel in fly mode: adjust speed (Unity/UE convention).
                     self.state.session.fly.speed =
                         (self.state.session.fly.speed + amt).clamp(2.0, 200.0);
+                } else {
+                    // Plain Wheel in fly mode: dolly along forward.
+                    // 2 blocks per scroll tick at speed=30.
+                    let step = amt * self.state.session.fly.speed * 0.07;
+                    self.state.session.fly.dolly(step);
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -186,8 +206,28 @@ impl ApplicationHandler for VizApp {
                         KeyCode::KeyQ => self.keys.q = pressed,
                         KeyCode::KeyE => self.keys.e = pressed,
                         KeyCode::ShiftLeft | KeyCode::ShiftRight => self.keys.shift = pressed,
+                        KeyCode::ControlLeft | KeyCode::ControlRight => {
+                            self.keys.ctrl = pressed;
+                        }
                         KeyCode::KeyO if pressed => self.state.session.toggle_camera(),
                         KeyCode::KeyR if pressed => self.state.session.invalidator.bump(),
+                        KeyCode::KeyF if pressed => {
+                            // Focus on the pinned column: fly camera
+                            // (and orbit target) repositions to look
+                            // at the pinned column's surface.
+                            if let (Some((wx, wz)), Some(snap)) = (
+                                self.state.session.probe.pinned,
+                                self.state.session.probe.snapshot.as_ref(),
+                            ) {
+                                let target = glam::Vec3::new(
+                                    wx as f32 + 0.5,
+                                    snap.h_target as f32,
+                                    wz as f32 + 0.5,
+                                );
+                                self.state.session.fly.focus_on(target);
+                                self.state.session.orbit.focus_on(target);
+                            }
+                        }
                         _ => {}
                     }
                 }

@@ -148,6 +148,11 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
             let pos = app.session.camera().position();
             ui.label(format!("pos ({:.0}, {:.0}, {:.0})", pos.x, pos.y, pos.z));
             ui.separator();
+            let is_fly = matches!(app.session.cam_kind, CamKind::Fly);
+            if is_fly {
+                ui.label(format!("fly speed {:.0}", app.session.fly.speed));
+                ui.separator();
+            }
             ui.label(format!("seed {}", app.session.seed));
             ui.separator();
             ui.label(format!(
@@ -159,7 +164,31 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
             ui.separator();
             if let Some(ms) = app.last_regen_ms {
                 ui.label(format!("last regen: {:.0} ms", ms));
+                ui.separator();
             }
+            // Controls hint, right-aligned. Hover for the full keymap.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let short = if is_fly {
+                    "WASD/QE · RMB look · MMB pan · Wheel dolly · F focus"
+                } else {
+                    "RMB orbit · MMB pan · Wheel zoom · F focus"
+                };
+                ui.label(egui::RichText::new(short).small().weak())
+                    .on_hover_text(
+                        "Camera & picking:\n\
+                         · WASD : forward/back/strafe (fly cam)\n\
+                         · QE : down/up (fly cam)\n\
+                         · Shift : boost while moving\n\
+                         · RMB drag : look (fly) / orbit (orbit)\n\
+                         · MMB drag : pan parallel to view\n\
+                         · Wheel : dolly forward (fly) / zoom (orbit)\n\
+                         · Ctrl + Wheel : adjust fly speed\n\
+                         · F : focus camera on pinned column\n\
+                         · O : toggle fly / orbit\n\
+                         · R : force regen\n\
+                         · Left-click 3D : pin column",
+                    );
+            });
         });
     });
 

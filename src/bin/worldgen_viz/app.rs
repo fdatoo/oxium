@@ -7,7 +7,10 @@ use std::time::Instant;
 
 pub struct AppState {
     pub session: Session,
+    /// Right-mouse button held — drives look (fly cam) / orbit (orbit cam).
     pub mouse_down: bool,
+    /// Middle-mouse button held — drives pan (both cams).
+    pub mmb_down: bool,
     pub last_cursor: Option<(f64, f64)>,
     pub last_frame: Instant,
     pub last_regen_ms: Option<f32>,
@@ -18,6 +21,7 @@ impl AppState {
         Self {
             session: Session::new(seed, config, radius),
             mouse_down: false,
+            mmb_down: false,
             last_cursor: None,
             last_frame: Instant::now(),
             last_regen_ms: None,
