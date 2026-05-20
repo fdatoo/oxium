@@ -110,6 +110,48 @@ impl ConfigHolder {
     }
 }
 
+use notify_debouncer_mini::{new_debouncer, DebounceEventResult, Debouncer};
+use std::path::PathBuf;
+use std::time::Duration;
+
+/// Spawn a file watcher on `path`. On any change, re-parse the RON
+/// file and (if valid) atomically swap the new config into
+/// `holder`. Parse errors are logged at `error` level; the previous
+/// config stays in effect.
+///
+/// Returns the debouncer — caller must keep it alive for the
+/// watcher to keep running. Dropping it shuts the watcher down.
+pub fn spawn_watcher(
+    path: PathBuf,
+    holder: ConfigHolder,
+) -> anyhow::Result<Debouncer<notify_debouncer_mini::notify::RecommendedWatcher>> {
+    let watch_path = path.clone();
+    let mut debouncer = new_debouncer(
+        Duration::from_millis(300),
+        move |res: DebounceEventResult| match res {
+            Ok(_events) => match WorldgenConfig::from_ron_file(&watch_path) {
+                Ok(cfg) => {
+                    log::info!("worldgen config reloaded from {:?}", watch_path);
+                    holder.swap(cfg);
+                }
+                Err(e) => {
+                    log::error!(
+                        "worldgen config reload failed ({:?}): {} — keeping previous",
+                        watch_path,
+                        e
+                    );
+                }
+            },
+            Err(e) => log::error!("watcher error: {:?}", e),
+        },
+    )?;
+    debouncer.watcher().watch(
+        &path,
+        notify_debouncer_mini::notify::RecursiveMode::NonRecursive,
+    )?;
+    Ok(debouncer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +197,41 @@ mod tests {
         holder.swap(new_cfg);
         // The previously-held snapshot must NOT see the new value.
         assert!((snapshot.density.factor - 4.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn watcher_picks_up_file_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_config.ron");
+
+        // Write initial config with factor=4.0.
+        let initial = WorldgenConfig::bundled_default().unwrap();
+        let initial_text = ron::ser::to_string_pretty(
+            &initial,
+            ron::ser::PrettyConfig::default(),
+        ).unwrap();
+        std::fs::write(&path, &initial_text).unwrap();
+
+        let cfg = WorldgenConfig::from_ron_file(&path).unwrap();
+        let holder = ConfigHolder::new(cfg);
+        let _debouncer = spawn_watcher(path.clone(), holder.clone()).unwrap();
+
+        // Modify the file: change factor to 7.0.
+        let modified = initial_text.replace("factor: 4.0", "factor: 7.0");
+        // Sleep briefly so the file mtime ticks past initial write.
+        std::thread::sleep(Duration::from_millis(100));
+        std::fs::write(&path, modified).unwrap();
+
+        // Poll up to 2 seconds for the swap to occur.
+        for _ in 0..20 {
+            std::thread::sleep(Duration::from_millis(100));
+            if (holder.load().density.factor - 7.0).abs() < 1e-3 {
+                return;
+            }
+        }
+        panic!(
+            "watcher did not pick up file change; factor still {}",
+            holder.load().density.factor
+        );
     }
 }
