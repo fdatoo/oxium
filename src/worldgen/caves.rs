@@ -730,6 +730,8 @@ pub struct NoiseCarvers {
     pub pillar: Fbm<Simplex>,
     pub pillar_rareness: Fbm<Simplex>,
     pub pillar_thickness: Fbm<Simplex>,
+    // Surface entrance noise.
+    pub surface_entrance: Fbm<Simplex>,
 }
 
 impl NoiseCarvers {
@@ -746,8 +748,57 @@ impl NoiseCarvers {
             pillar: build_channel(&cfg.pillar, seed, 1006),
             pillar_rareness: build_channel(&cfg.pillar_rareness, seed, 1007),
             pillar_thickness: build_channel(&cfg.pillar_thickness, seed, 1008),
+            surface_entrance: build_channel(&cfg.surface_entrance, seed, 1010),
         }
     }
+}
+
+/// Signed-density surface entrance contribution. Returns a strongly
+/// negative value where the noise crosses threshold inside the
+/// Y-band, ramping smoothly to zero outside; composed via
+/// `min(other_caves, surface_entrance)` like the rest.
+///
+/// Unlike cheese and spaghetti, this carver is NOT gated by the
+/// underground density threshold — that's the whole point: it
+/// fires in the surface band specifically, punching small holes
+/// through the heightmap.
+pub fn surface_entrance_contribution(
+    wx: i32,
+    wy: i32,
+    wz: i32,
+    carvers: &NoiseCarvers,
+    cfg: &CaveConfig,
+) -> f32 {
+    let fade = surface_entrance_y_fade(wy, cfg);
+    if fade <= 0.0 {
+        return 1.0; // sentinel positive (no cave)
+    }
+    let v = carvers.surface_entrance.get([
+        wx as f64 * cfg.surface_entrance_xz_scale as f64,
+        wy as f64 * cfg.surface_entrance_y_scale as f64,
+        wz as f64 * cfg.surface_entrance_xz_scale as f64,
+    ]) as f32;
+    // Smooth ramp above threshold so the entrance edges aren't a
+    // hard cliff.
+    let above = v - cfg.surface_entrance_threshold;
+    if above <= 0.0 {
+        return 1.0;
+    }
+    let t = (above / 0.05).clamp(0.0, 1.0);
+    let depth = t * t * (3.0 - 2.0 * t); // smoothstep
+    // Return a strongly negative signed value; magnitude scaled by
+    // both the smoothstep and the Y-band fade so edges are soft.
+    -cfg.surface_entrance_intensity * depth * fade
+}
+
+fn surface_entrance_y_fade(wy: i32, cfg: &CaveConfig) -> f32 {
+    if wy < cfg.surface_entrance_y_min || wy > cfg.surface_entrance_y_max {
+        return 0.0;
+    }
+    let from_bottom = (wy - cfg.surface_entrance_y_min) as f32;
+    let from_top = (cfg.surface_entrance_y_max - wy) as f32;
+    let fade_w = cfg.surface_entrance_fade_blocks.max(1) as f32;
+    (from_bottom.min(from_top) / fade_w).clamp(0.0, 1.0)
 }
 
 /// Signed-density cheese contribution.

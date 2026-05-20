@@ -419,6 +419,31 @@
         // band stays mostly intact. Above it, all noise carvers
         // run.
         underground_density_threshold: 1.5625,
+
+        // ── Surface entrance noise.
+        //
+        // Single noise channel that fires in the surface band
+        // (≈ sea level ± 20) when noise exceeds threshold.
+        // Produces small natural cave openings independent of
+        // the graph cave system's chamber-attached entrances.
+        surface_entrance: (
+            first_octave: -5,    // ~32-block wavelength
+            amplitudes: [1.0, 0.5],
+        ),
+        surface_entrance_xz_scale: 1.0,
+        surface_entrance_y_scale: 0.4,
+        // 0.55 hits ~5-10% of noise values, giving sparse but
+        // discoverable openings ~every few hundred blocks.
+        surface_entrance_threshold: 0.55,
+        // Intensity 8 — well above the spaghetti / cheese signed
+        // densities (clamped to [-1, 1]) so a fired entrance can
+        // punch through positive raw_density in the surface band.
+        surface_entrance_intensity: 8.0,
+        // Active in sea_level (62) ± 20 → [42, 82]. The Y range
+        // covers ocean floors up to the high inland terrain band.
+        surface_entrance_y_min: 42,
+        surface_entrance_y_max: 82,
+        surface_entrance_fade_blocks: 4,
     ),
 
     // ── Aquifer system (PR 7) ────────────────────────────────────────

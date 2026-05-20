@@ -588,6 +588,17 @@ impl Generator {
                         composed = composed.min(spag + roughness);
                     }
 
+                    // Surface entrance noise — NOT gated by the
+                    // underground density threshold. This is the
+                    // whole point: punch holes through the
+                    // heightmap to create natural cave openings.
+                    if wy > CAVE_FLOOR_Y {
+                        let ent = caves::surface_entrance_contribution(
+                            wx, wy, wz, &self.noise_carvers, &cfg.cave,
+                        );
+                        composed = composed.min(ent);
+                    }
+
                     // Pillars: positive density component refilling
                     // any carved voxel where pillars are present.
                     if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {

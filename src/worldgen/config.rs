@@ -112,6 +112,33 @@ pub struct CaveConfig {
     /// surface openings. Above it (deeper underground), all
     /// carvers operate.
     pub underground_density_threshold: f32,
+
+    // ── Surface entrance noise ──────────────────────────────────────
+    //
+    // A dedicated noise-driven carver that runs in the surface
+    // band only, punching small holes through the heightmap. Acts
+    // as the "natural cave entrance" carver alongside the graph
+    // cave system's chamber-attached entrances (which fire only
+    // under specific geometric conditions). This one is purely
+    // noise-gated and produces many small openings everywhere.
+    pub surface_entrance: ChannelParams,
+    /// XZ scale on the surface entrance noise sample.
+    pub surface_entrance_xz_scale: f32,
+    /// Y scale on the surface entrance noise sample. Smaller = the
+    /// entrance "shaft" stays straight; larger = wobbly bores.
+    pub surface_entrance_y_scale: f32,
+    /// Noise threshold above which the entrance fires. Larger →
+    /// fewer entrances; smaller → more.
+    pub surface_entrance_threshold: f32,
+    /// Carve intensity. Translated to a negative signed-density
+    /// contribution in `surface_entrance_contribution`.
+    pub surface_entrance_intensity: f32,
+    /// Active Y window. Outside this range the entrance noise is
+    /// silent. Should bracket the player's expected surface band.
+    pub surface_entrance_y_min: i32,
+    pub surface_entrance_y_max: i32,
+    /// Soft-edge fade width at each Y boundary.
+    pub surface_entrance_fade_blocks: i32,
 }
 
 /// PR 4 biome lookup config. The 6 existing biomes (Tundra,
