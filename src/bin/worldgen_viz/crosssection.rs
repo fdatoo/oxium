@@ -228,31 +228,25 @@ impl CrossSection {
             }
         }
 
-        // "Center on pinned" button — explicit re-snap for users who
-        // manually drifted away with the sliders and want to reset.
-        if let Some((wx, h, wz)) = pin {
-            ui.horizontal(|ui| {
-                if ui
-                    .small_button(format!("⌖ Centre on pinned ({wx}, {h}, {wz})"))
-                    .on_hover_text("Snap the slice's centre + slice axis back to the pinned column.")
-                    .clicked()
-                {
-                    self.focus_on(wx, h, wz);
-                    dirty = true;
-                }
-            });
-        }
+        // Only two sliders left now that the pin drives the centre:
+        // the slice depth (perpendicular to the cut plane) and the
+        // zoom. Centre comes from the pin; if the user wants to look
+        // somewhere else they re-pin in the 3D view or on the map.
+        let (axis_lo, axis_hi) = match self.orientation {
+            // Horizontal slice walks Y; cover the world's actual range.
+            Orientation::Xz => (-64, 192),
+            // Vertical slices walk Z or X — large blocks-of-world range.
+            Orientation::Xy | Orientation::Yz => (-512, 512),
+        };
         dirty |= ui
-            .add(egui::Slider::new(&mut self.slice_axis, -128..=256).text(self.orientation.slice_axis_label()))
-            .on_hover_text("World coordinate of the cut plane along the orientation's fixed axis.")
-            .changed();
-        dirty |= ui
-            .add(egui::Slider::new(&mut self.center_a, -512.0..=512.0).text("center a"))
-            .on_hover_text("World coord at the centre of the slice along the image's horizontal axis.")
-            .changed();
-        dirty |= ui
-            .add(egui::Slider::new(&mut self.center_b, -64.0..=256.0).text("center b"))
-            .on_hover_text("World coord at the centre of the slice along the image's vertical axis.")
+            .add(
+                egui::Slider::new(&mut self.slice_axis, axis_lo..=axis_hi)
+                    .text(self.orientation.slice_axis_label()),
+            )
+            .on_hover_text(
+                "Depth: world coordinate of the cut plane perpendicular to the slice. \
+                 Move this to walk the cross-section through the world.",
+            )
             .changed();
         dirty |= ui
             .add(egui::Slider::new(&mut self.blocks_per_pixel, 0.25..=4.0).text("blocks/px"))
@@ -264,11 +258,17 @@ impl CrossSection {
             let size = egui::vec2(PLOT_PX as f32 * 2.0, PLOT_PX as f32 * 2.0);
             ui.image((tex.id(), size));
         }
+        let centre_status = match pin {
+            Some(_) => format!(
+                "centred on pinned column · ({:.0}, {:.0})",
+                self.center_a, self.center_b,
+            ),
+            None => "no pin — click a column in the 3D view or map to centre".to_string(),
+        };
         ui.label(
             egui::RichText::new(format!(
-                "slice {} ({:.0}, {:.0}) · {:.2} blocks/px · {}×{} px",
-                self.orientation.slice_axis_label(),
-                self.center_a, self.center_b, self.blocks_per_pixel, PLOT_PX, PLOT_PX,
+                "{centre_status} · {:.2} blocks/px · {}×{} px",
+                self.blocks_per_pixel, PLOT_PX, PLOT_PX,
             ))
             .small()
             .weak(),
