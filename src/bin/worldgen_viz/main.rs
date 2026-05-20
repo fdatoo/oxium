@@ -1,6 +1,7 @@
 //! Worldgen tuning visualizer.
 
 mod render;
+mod ui;
 
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
@@ -13,13 +14,19 @@ use crate::render::RenderState;
 struct App {
     window: Option<Arc<Window>>,
     render: Option<RenderState>,
+    config: oxium::worldgen::config::WorldgenConfig,
+    dirty: bool,
 }
 
 impl App {
     fn new() -> Self {
+        let config = oxium::worldgen::config::WorldgenConfig::bundled_default()
+            .expect("bundled default.ron must parse");
         Self {
             window: None,
             render: None,
+            config,
+            dirty: true,
         }
     }
 }
@@ -52,12 +59,36 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 let raw_input = render.egui_state.take_egui_input(window);
+                let mut dirty_local = self.dirty;
+                let cfg = &mut self.config;
                 let full_output = render.egui_ctx.clone().run(raw_input, |ctx| {
+                    egui::SidePanel::left("config_panel")
+                        .resizable(true)
+                        .default_width(360.0)
+                        .show(ctx, |ui| {
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                if crate::ui::density_panel(ui, &mut cfg.density) {
+                                    dirty_local = true;
+                                }
+                                ui.separator();
+                                if crate::ui::preset_panel(ui, cfg) {
+                                    dirty_local = true;
+                                }
+                            });
+                        });
                     egui::CentralPanel::default().show(ctx, |ui| {
-                        ui.heading("Oxium worldgen visualizer");
-                        ui.label("Hello, world. Sliders + mesh viewport coming in later tasks.");
+                        ui.heading("Mesh viewport");
+                        ui.label(if dirty_local {
+                            format!(
+                                "dirty (regen pending; factor = {:.2})",
+                                cfg.density.factor
+                            )
+                        } else {
+                            format!("clean (factor = {:.2})", cfg.density.factor)
+                        });
                     });
                 });
+                self.dirty = dirty_local;
                 render
                     .egui_state
                     .handle_platform_output(window, full_output.platform_output.clone());
