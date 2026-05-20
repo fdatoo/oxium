@@ -10,18 +10,16 @@ pub struct AppState {
     pub last_cursor: Option<(f64, f64)>,
     pub last_frame: Instant,
     pub last_regen_ms: Option<f32>,
-    pub check_mode: bool,
 }
 
 impl AppState {
-    pub fn new(seed: u64, config: WorldgenConfig, check_mode: bool) -> Self {
+    pub fn new(seed: u64, config: WorldgenConfig) -> Self {
         Self {
             session: Session::new(seed, config),
             mouse_down: false,
             last_cursor: None,
             last_frame: Instant::now(),
             last_regen_ms: None,
-            check_mode,
         }
     }
 

@@ -35,7 +35,6 @@ struct Cli {
 }
 
 struct VizApp {
-    cli: Cli,
     window: Option<Arc<Window>>,
     render: Option<RenderState>,
     scene: Option<SceneRenderer>,
@@ -60,15 +59,13 @@ struct KeyState {
 impl VizApp {
     fn new(cli: Cli) -> Self {
         let config = WorldgenConfig::bundled_default().expect("bundled default.ron");
-        let check = cli.check;
         Self {
-            state: AppState::new(cli.seed, config, check),
-            cli,
+            state: AppState::new(cli.seed, config),
             window: None,
             render: None,
             scene: None,
             keys: KeyState::default(),
-            quit_after_render: check,
+            quit_after_render: cli.check,
         }
     }
 }
