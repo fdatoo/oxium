@@ -209,7 +209,13 @@ const FRAME_BUDGET_60_FPS: Duration = Duration::from_nanos(16_666_667);
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let attrs = WindowAttributes::default().with_title("oxium");
+        // Hide the window in screenshot mode so the renderer runs truly
+        // headless — no surface flash on macOS, no focus-stealing while
+        // capturing a baseline. The window still exists (wgpu's Surface
+        // needs a winit window on every platform), it's just never shown.
+        let attrs = WindowAttributes::default()
+            .with_title("oxium")
+            .with_visible(self.cli.screenshot_path.is_none());
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
         // Pick spawn: explicit --spawn wins, else --find-water locates
         // a known wet column, else the default mid-air spawn.
