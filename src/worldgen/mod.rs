@@ -67,6 +67,7 @@ use noise::{Fbm, MultiFractal, NoiseFn, Simplex};
 //   * `plates`  — Voronoi plate decomposition.
 //   * `hash`    — deterministic mixer used by plates / trees / caves.
 //   * `region`  — LRU caches + region data structs.
+pub mod aquifer;
 pub mod caves;
 pub mod climate;
 pub mod config;
@@ -135,6 +136,10 @@ pub struct Generator {
     /// PR 6: surface rules DSL. Rebuilt from `cfg.surface` on every
     /// chunk fill (cheap — just an `Arc::clone` of the tree).
     surface_system: std::sync::Arc<surface::SurfaceSystem>,
+    /// PR 7: MC-style aquifer. 16×12×16 jittered cell grid with
+    /// per-cell `y_top` + fluid kind (Water/Lava). Floods caves
+    /// and replaces the primitive ocean/lake-rim filler.
+    aquifer: aquifer::AquiferSystem,
     seed: u64,
     /// LRU cache of pre-built fine regions. Consulted per chunk fill
     /// to evaluate valley carve and lake water; built on first touch.
@@ -228,6 +233,11 @@ impl Generator {
         let surface_system = std::sync::Arc::new(surface::SurfaceSystem::new(
             bundled.surface.clone(),
         ));
+        // PR 7: aquifer system built from the bundled aquifer
+        // config. Hot-reloading the aquifer config (cell sizes,
+        // probabilities) requires a Generator restart; only the
+        // pressure tunables in `AquiferConfig` re-read live.
+        let aquifer = aquifer::AquiferSystem::new(seed, bundled.aquifer.clone());
         Self {
             heightmap,
             density,
@@ -237,6 +247,7 @@ impl Generator {
             weirdness_noise,
             biome_list,
             surface_system,
+            aquifer,
             seed,
             fine_cache: region::fresh_fine_cache(),
             macro_cache: region::fresh_macro_cache(),
@@ -527,16 +538,31 @@ impl Generator {
                     };
                     let solid = (density_for_compare - cave_contribution) > 0.0;
 
-                    let block = if !solid {
-                        // Air — flood with water only where water
-                        // actually belongs: under a lake (below its
-                        // rim) or under the ocean (column height at
-                        // or below sea level). Caves under a land
-                        // column stay dry, since there's no hydraulic
-                        // connection to the ocean. This is a
-                        // primitive aquifer rule — temporary until
-                        // the real MC-style aquifer lands.
+                    // PR 7: aquifer can override both branches. When
+                    // `solid` is true but the aquifer pressure
+                    // beats the rock, the rock gets replaced by
+                    // fluid; when `solid` is false but we're inside
+                    // a fluid cell, the cave gets flooded. The
+                    // density passed in is the cave-subtracted one
+                    // (matches `solid` decision).
+                    let aquifer_density = density_for_compare - cave_contribution;
+                    let aq_substance = self.aquifer.substance(wx, wy, wz, aquifer_density);
+
+                    let block = if let aquifer::Substance::Block(b) = aq_substance {
+                        // Aquifer placed a fluid (Water or Lava).
+                        // Treat as air for the depth tracker so the
+                        // surface rule fires correctly on the next
+                        // air → solid transition below.
                         depth_below_surface = None;
+                        b
+                    } else if !solid {
+                        depth_below_surface = None;
+                        // Aquifer was silent — fall back to the
+                        // explicit ocean / lake-rim flooding. This
+                        // remains the source of surface water above
+                        // the aquifer's per-cell `y_top` (the
+                        // aquifer system never produces fluid above
+                        // sea level).
                         let in_lake = lake_rim.map_or(false, |rim| wy <= rim);
                         let in_ocean = height <= SEA_LEVEL && wy <= SEA_LEVEL;
                         if in_lake || in_ocean {
@@ -1148,15 +1174,19 @@ mod tests {
         );
     }
 
-    /// Caves carved under a land column (column height well above
-    /// sea level, no lake above) must be dry — not flooded with
-    /// water from sea level. Sea-level water only belongs in ocean
-    /// columns; lake water only belongs under lakes.
+    /// Above-sea cave fills under a land column should never come
+    /// from the ocean's surface flood — sea-level water only belongs
+    /// in ocean columns; lake water only belongs under lakes. The
+    /// PR 7 aquifer can still place water in deep caves, so the
+    /// post-PR-7 invariant is narrower: *above sea level*, a
+    /// land chunk with no lake above never floods with surface water.
     #[test]
-    fn deep_caves_under_land_are_dry() {
+    fn above_sea_air_under_land_is_dry() {
         let g = Generator::new(42);
         // Find a chunk where every column is land AND none has a
-        // lake above it. Then check no Water in chunk-Y=-2 below it.
+        // lake above it. Probe the chunk straddling sea-level to
+        // check the air-above-sea voxels: none of them should be
+        // Water (the ocean shouldn't be leaking into the column).
         let mut found = None;
         'outer: for cz in -8..8 {
             for cx in -8..8 {
@@ -1179,13 +1209,60 @@ mod tests {
             }
         }
         let (cx, cz) = found.expect("expected a lake-free all-land chunk");
+        // Above-sea chunk (Y=2 is rough sea+).
         let mut chunk = DenseChunk::empty();
-        g.fill_chunk(ChunkCoord(IVec3::new(cx, -2, cz)), &mut chunk);
-        let water = chunk.blocks.iter().filter(|b| matches!(b, Block::Water)).count();
-        assert_eq!(
-            water, 0,
-            "lake-free land chunk ({cx}, -2, {cz}) had {water} water blocks — \
-             caves under land should be dry, not flooded"
+        g.fill_chunk(ChunkCoord(IVec3::new(cx, 2, cz)), &mut chunk);
+        let chunk_origin_y = 2 * CHUNK_DIM_U as i32;
+        for y in 0..CHUNK_DIM_U {
+            let wy = chunk_origin_y + y as i32;
+            if wy <= SEA_LEVEL {
+                continue;
+            }
+            for z in 0..CHUNK_DIM_U {
+                for x in 0..CHUNK_DIM_U {
+                    let b = chunk.get(LocalPos(UVec3::new(x, y, z)));
+                    assert!(
+                        !matches!(b, Block::Water),
+                        "above-sea voxel ({},{},{}) in lake-free land chunk \
+                         was Water — surface flood leaked into the column",
+                        cx * CHUNK_DIM_U as i32 + x as i32,
+                        wy,
+                        cz * CHUNK_DIM_U as i32 + z as i32,
+                    );
+                }
+            }
+        }
+    }
+
+    /// PR 7 aquifer: deep caves under land should contain *some*
+    /// fluid (water/lava), reflecting the new MC-style behavior
+    /// where the water table extends underground regardless of
+    /// surface ocean position. This is the inverse of the prior
+    /// `deep_caves_under_land_are_dry` invariant.
+    #[test]
+    fn pr7_aquifer_floods_some_underground_caves() {
+        let g = Generator::new(42);
+        // Scan a wide grid of deep chunks (Y=-3 ≈ blocks -96..-65)
+        // and confirm *at least one* of them has aquifer fluid.
+        // Sparse aquifer + small cave fraction means many chunks
+        // can be dry — but across 16x16 chunks we should see at
+        // least one fluid pocket.
+        let mut total_fluid = 0;
+        for cz in -8..8 {
+            for cx in -8..8 {
+                let mut chunk = DenseChunk::empty();
+                g.fill_chunk(ChunkCoord(IVec3::new(cx, -3, cz)), &mut chunk);
+                total_fluid += chunk
+                    .blocks
+                    .iter()
+                    .filter(|b| matches!(b, Block::Water | Block::Lava))
+                    .count();
+            }
+        }
+        assert!(
+            total_fluid > 0,
+            "deep aquifer band produced no fluid across 256 chunks — \
+             aquifer disabled?"
         );
     }
 

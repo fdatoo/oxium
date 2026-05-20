@@ -37,6 +37,7 @@ pub enum Tile {
     OakLeaves = 7,
     WaterStill = 8,
     Snow = 9,
+    LavaStill = 10,
 }
 
 impl Tile {
@@ -70,10 +71,13 @@ pub enum Block {
     /// separate asset; the colour gives it a slightly cool cast
     /// against the warmer dirt sides below.
     Snow,
+    /// Liquid lava. Hot, bright, non-solid, emits block-light; placed
+    /// only by deep aquifers (see `worldgen::aquifer`).
+    Lava,
 }
 
 /// Number of distinct [`Block`] variants. Updated when adding new blocks.
-pub const BLOCK_COUNT: usize = 10;
+pub const BLOCK_COUNT: usize = 11;
 
 impl Block {
     /// Inverse of `Block as u16`: returns the variant whose discriminant
@@ -92,6 +96,7 @@ impl Block {
             7 => Leaves,
             8 => Torch,
             9 => Snow,
+            10 => Lava,
             _ => return None,
         })
     }
@@ -273,6 +278,23 @@ impl BlockRegistry {
             color: [1.0, 0.80, 0.30, 1.0],
             top_color: None,
             tile_side: None,
+            tile_top: None,
+            tile_bottom: None,
+        };
+        infos[Lava as usize] = BlockInfo {
+            // Lava is non-solid (entities sink/burn) and non-opaque
+            // (the glow leaks through). Emits maximum block-light so
+            // pools and aquifer rooms light themselves.
+            solid: false,
+            opaque: false,
+            emission: 15,
+            // Neutral white tint — the lava_still.png is already
+            // pre-coloured fiery orange. Alpha < 1 keeps it in the
+            // translucent pipeline like water (so the shader can pick
+            // up the emission/shimmer path).
+            color: [1.0, 0.95, 0.85, 0.95],
+            top_color: None,
+            tile_side: Some(Tile::LavaStill),
             tile_top: None,
             tile_bottom: None,
         };

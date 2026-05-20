@@ -295,4 +295,41 @@
         // 5. Default fallthrough: Stone.
         Block(Stone),
     ]),
+
+    // ── Aquifer system (PR 7) ────────────────────────────────────────
+    //
+    // 16×12×16 jittered cell grid. Each cell rolls a fluid kind
+    // (Water/Lava) and a `y_top` (the fluid surface in that cell).
+    // For an arbitrary voxel, the system finds the three nearest
+    // cells; if the closest one is at or below its `y_top` and the
+    // 3-nearest agree on fluid, the voxel becomes fluid (overriding
+    // density). If they disagree, a 3D barrier noise breaks the tie
+    // — giving the fluid boundary a chiseled, ribbon-like shape
+    // instead of a flat plane.
+    //
+    // Lava cells appear only below `LAVA_BAND_TOP_Y` (-32) in
+    // worldgen::aquifer. Above sea level, cells are sentinel-dry so
+    // there are no "sky aquifers".
+    aquifer: (
+        // Sea level used as a cap for water-aquifer `y_top`. Must
+        // match worldgen::SEA_LEVEL or the upper bound disagrees
+        // with the ocean's flood level.
+        sea_level: 62,
+
+        // Y-jitter applied to each cell's nominal y_top. Larger →
+        // more dramatic perched aquifers / wet-dry stripe variation
+        // between adjacent cells.
+        y_top_jitter: 6,
+
+        // 3D barrier noise (modulates fluid-surface shape).
+        // strength=0 ⇒ flat planes; ~0.5 ⇒ wavy boundaries.
+        barrier_strength: 0.5,
+        barrier_period: 24.0,
+
+        // Asymmetric falloff above/below the cell's `y_top`. Above
+        // is quadratic (cuts off fast); below is linear (taper). MC
+        // uses similar asymmetry — water sinks but doesn't pile up.
+        top_falloff: 0.06,
+        bottom_falloff: 0.012,
+    ),
 )
