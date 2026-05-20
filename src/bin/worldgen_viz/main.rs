@@ -392,10 +392,15 @@ fn render_frame(
                 view: &view,
                 resolve_target: None,
                 ops: wgpu::Operations {
+                    // Mid-blue background — bright enough that
+                    // stone-grey block faces stay readable against it,
+                    // dark enough that yellow highlights (probe pulse,
+                    // map crosshair) still pop. The old near-black
+                    // navy made gray voxels disappear into the void.
                     load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.05,
-                        g: 0.05,
-                        b: 0.08,
+                        r: 0.30,
+                        g: 0.36,
+                        b: 0.46,
                         a: 1.0,
                     }),
                     store: wgpu::StoreOp::Store,
