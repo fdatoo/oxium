@@ -2,7 +2,7 @@
 
 use crate::preset::PresetUi;
 use crate::session::Session;
-use crate::world::stream::StreamRadius;
+use crate::world::Region;
 use oxium::worldgen::config::WorldgenConfig;
 use std::time::Instant;
 
@@ -45,9 +45,9 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(seed: u64, config: WorldgenConfig, radius: StreamRadius) -> Self {
+    pub fn new(seed: u64, config: WorldgenConfig, region: Region) -> Self {
         Self {
-            session: Session::new(seed, config, radius),
+            session: Session::new(seed, config, region),
             mouse_down: false,
             mmb_down: false,
             last_cursor: None,

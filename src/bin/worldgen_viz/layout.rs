@@ -12,6 +12,10 @@ pub struct LayoutResult {
     pub dirty: bool,
     pub reset_camera: bool,
     pub force_regen: bool,
+    /// User asked to recenter / resize the region. Caller calls
+    /// `World::set_region` which drops chunks outside it and queues
+    /// a regen for the new bounds.
+    pub region_change: Option<crate::world::Region>,
 }
 
 pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
@@ -19,6 +23,7 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
         dirty: false,
         reset_camera: false,
         force_regen: false,
+        region_change: None,
     };
 
     // Top toolbar — paint mode, camera-kind toggle, regen button.
@@ -65,6 +70,54 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
             if ui.button("[R] Regen").clicked() {
                 out.force_regen = true;
             }
+
+            ui.separator();
+
+            // Region centre — chunk coords. Editing either kicks off
+            // a full region regen via World::set_region. Helpful
+            // tooltip on each so users know what the units are.
+            let region = app.session.world.region();
+            let mut cx = region.center_cx;
+            let mut cz = region.center_cz;
+            ui.label("Centre chunk:");
+            let cx_resp = ui
+                .add(
+                    egui::DragValue::new(&mut cx)
+                        .speed(1.0)
+                        .prefix("cx ")
+                        .range(-2048..=2048),
+                )
+                .on_hover_text(
+                    "Chunk X coord of the region centre. 1 chunk = 32 blocks; cx=10 → world X ≈ 320.",
+                );
+            let cz_resp = ui
+                .add(
+                    egui::DragValue::new(&mut cz)
+                        .speed(1.0)
+                        .prefix("cz ")
+                        .range(-2048..=2048),
+                )
+                .on_hover_text("Chunk Z coord of the region centre.");
+            if cx_resp.changed() || cz_resp.changed() {
+                let new_region = crate::world::Region::new(
+                    cx,
+                    cz,
+                    region.radius_xz,
+                    region.radius_y,
+                );
+                out.region_change = Some(new_region);
+            }
+            ui.label(
+                egui::RichText::new(format!(
+                    "({} chunks · {}×{}×{} blocks)",
+                    region.chunk_count(),
+                    (2 * region.radius_xz + 1) * 32,
+                    (2 * region.radius_y + 1) * 32,
+                    (2 * region.radius_xz + 1) * 32,
+                ))
+                .small()
+                .weak(),
+            );
         });
     });
 

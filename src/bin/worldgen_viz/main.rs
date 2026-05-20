@@ -36,17 +36,22 @@ struct Cli {
     /// Run one frame and exit (for CI smoke tests).
     #[arg(long, default_value_t = false)]
     check: bool,
-    /// Stream radius in chunks (XZ, camera-relative). Default 3 = 7×7
-    /// chunk grid ≈ 224 blocks visible horizontally. Larger = more
-    /// world visible but slower regen on every config edit.
+    /// Region XZ half-radius in chunks. Default 3 = 7×7 chunk grid ≈
+    /// 224 blocks visible horizontally. The whole region is generated
+    /// up front and re-meshed on every edit.
     #[arg(long, default_value_t = 3)]
     radius_xz: i32,
-    /// Stream Y half-range in chunks, world-anchored (NOT camera-
-    /// relative). Default 4 = chunks `cy ∈ -4..=4` ≈ blocks -128..=160,
-    /// which covers the full default Oxium world height regardless of
-    /// camera elevation.
+    /// Region Y half-radius in chunks (world-anchored to Y=0).
+    /// Default 4 ≈ blocks -128..=160 — covers the full default
+    /// Oxium world height.
     #[arg(long, default_value_t = 4)]
     radius_y: i32,
+    /// Region centre chunk X. Move it to look at a different XZ.
+    #[arg(long, default_value_t = 0)]
+    center_cx: i32,
+    /// Region centre chunk Z.
+    #[arg(long, default_value_t = 0)]
+    center_cz: i32,
 }
 
 struct VizApp {
@@ -75,12 +80,14 @@ struct KeyState {
 impl VizApp {
     fn new(cli: Cli) -> Self {
         let config = WorldgenConfig::bundled_default().expect("bundled default.ron");
-        let radius = crate::world::stream::StreamRadius {
-            xz: cli.radius_xz.max(0),
-            y: cli.radius_y.max(0),
-        };
+        let region = crate::world::Region::new(
+            cli.center_cx,
+            cli.center_cz,
+            cli.radius_xz.max(0),
+            cli.radius_y.max(0),
+        );
         Self {
-            state: AppState::new(cli.seed, config, radius),
+            state: AppState::new(cli.seed, config, region),
             window: None,
             render: None,
             scene: None,
@@ -251,28 +258,21 @@ impl ApplicationHandler for VizApp {
                         .translate(fwd, strafe, vert, self.keys.shift, dt);
                 }
 
-                // Stream + invalidate. `tick()` promotes any queued
-                // (debounced) config edit to an actual revision bump
-                // if the user has paused for `DEBOUNCE` ms.
+                // Region pipeline: tick the debounce, on bump regen
+                // every chunk in the region, then drain any completed
+                // fill+mesh jobs into the scene. No streaming, no
+                // visible-set refill, no in-flight cap — the whole
+                // region is in flight at once and the rayon pool
+                // chews through it.
                 let t0 = Instant::now();
                 self.state.session.invalidator.tick();
                 if self.state.session.invalidator.take_pending() {
-                    self.state.session.world.wipe();
+                    self.state.session.world.regen();
                     self.state.session.probe.refresh(&self.state.session.generator);
                 }
-                // Every frame: re-request every chunk currently on the
-                // GPU, sorted visible-first by camera distance. Once
-                // chunks are cached the call is a no-op; right after a
-                // wipe, max_in_flight spends its budget on what the
-                // user is actually looking at before getting to the
-                // off-screen chunks they can't see anyway.
-                let cam_pos = self.state.session.camera().position();
-                let visible = scene.chunk_coords_visible_first(cam_pos);
-                self.state.session.world.request_chunks(&visible);
-                self.state.session.world.request_around(cam_pos);
                 let landed = self.state.session.world.drain_results();
-                for (coord, mesh) in landed {
-                    scene.upload_chunk(&render.device, coord, &mesh);
+                for (coord, vertices, indices) in landed {
+                    scene.upload_chunk(&render.device, coord, &vertices, &indices);
                 }
                 if t0.elapsed().as_secs_f32() > 0.001 {
                     self.state.last_regen_ms = Some(t0.elapsed().as_secs_f32() * 1000.0);
@@ -282,11 +282,13 @@ impl ApplicationHandler for VizApp {
                 let raw_input = render.egui_state.take_egui_input(window);
                 let mut reset_cam = false;
                 let mut force_regen = false;
+                let mut region_change: Option<crate::world::Region> = None;
                 let app_ref = &mut self.state;
                 let full_output = render.egui_ctx.clone().run(raw_input, |ctx| {
                     let r = crate::layout::dashboard(ctx, app_ref);
                     reset_cam = r.reset_camera;
                     force_regen = r.force_regen;
+                    region_change = r.region_change;
                 });
                 if reset_cam {
                     self.state.session.fly = crate::camera::FlyCamera::new();
@@ -294,6 +296,15 @@ impl ApplicationHandler for VizApp {
                 }
                 if force_regen {
                     self.state.session.invalidator.bump();
+                }
+                if let Some(new_region) = region_change {
+                    // Region change: drop GPU buffers for chunks that
+                    // fell outside the new bounds, then let World
+                    // regen everything in the new region.
+                    let dropped = self.state.session.world.set_region(new_region);
+                    for coord in dropped {
+                        scene.drop_chunk(coord);
+                    }
                 }
                 render
                     .egui_state

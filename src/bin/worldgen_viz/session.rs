@@ -7,8 +7,7 @@ use crate::overlays::MapView;
 use crate::paint::PaintMode;
 use crate::probe::Probe;
 use crate::world::invalidate::Invalidator;
-use crate::world::stream::StreamRadius;
-use crate::world::World;
+use crate::world::{Region, World};
 use oxium::worldgen::config::{ConfigHolder, WorldgenConfig};
 use oxium::worldgen::Generator;
 use std::sync::Arc;
@@ -34,14 +33,10 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(seed: u64, config: WorldgenConfig, radius: StreamRadius) -> Self {
+    pub fn new(seed: u64, config: WorldgenConfig, region: Region) -> Self {
         let holder = ConfigHolder::new(config);
         let generator = Arc::new(Generator::with_config(seed, holder.clone()));
-        // Cache capacity sized 4× the radius volume so chunks that
-        // briefly scroll off-screen during a camera fly-around aren't
-        // re-filled when they come back into view.
-        let radius_volume = ((2 * radius.xz + 1).pow(2) * (2 * radius.y + 1)) as usize;
-        let world = World::new(generator.clone(), radius, radius_volume.saturating_mul(4));
+        let world = World::new(generator.clone(), region);
         Self {
             seed,
             config: holder,
