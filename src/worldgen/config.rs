@@ -14,6 +14,102 @@ use std::path::Path;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorldgenConfig {
     pub density: DensityConfig,
+    pub climate: ClimateConfig,
+}
+
+/// Climate-driven spline pipeline tuning (PR 3).
+///
+/// Three 2D inputs feed nested cubic Hermite splines:
+///
+/// * `continentalness` — plate Voronoi signed distance field
+///   blended via `plate_t`. Positive inland, negative offshore.
+/// * `terrain_shape` — low-frequency 2D noise (~2000-block period)
+///   plus per-plate `roughness_bias`. Low values produce mountains.
+/// * `ridges_pv` — peaks-and-valleys triangle fold on a
+///   higher-frequency ridge noise. Drives jaggedness.
+///
+/// Each spline is nested: outer keyed on continentalness, inner
+/// (the knot's value) keyed on terrain_shape or ridges_pv. The
+/// innermost result is a scalar in roughly `[-1.5, 1.5]`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ClimateConfig {
+    pub offset_spline: NestedSpline,
+    pub factor_spline: NestedSpline,
+    pub jaggedness_spline: NestedSpline,
+    pub plate_roughness_bias_range: (f32, f32),
+    pub terrain_shape_period: f32,
+    pub terrain_shape_amplitude: f32,
+    pub ridges_period: f32,
+    pub ridges_amplitude: f32,
+}
+
+/// A nested spline: each knot's value is itself a spline. The
+/// `evaluate` method takes three inputs `(c, s, r)` and walks the
+/// nesting — outer on `c`, mid on `s`, inner on `r`. Constants
+/// short-circuit (so any depth can be a leaf).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum NestedSpline {
+    Constant(f32),
+    Multipoint(Vec<NestedKnot>),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NestedKnot {
+    pub loc: f32,
+    pub val: NestedSpline,
+    pub slope: f32,
+}
+
+impl NestedSpline {
+    pub fn evaluate(&self, c: f32, s: f32, r: f32) -> f32 {
+        self.evaluate_inner(&[c, s, r], 0)
+    }
+
+    fn evaluate_inner(&self, inputs: &[f32], depth: usize) -> f32 {
+        match self {
+            NestedSpline::Constant(v) => *v,
+            NestedSpline::Multipoint(knots) => {
+                assert!(!knots.is_empty(), "nested spline must have ≥1 knot");
+                let input = inputs.get(depth).copied().unwrap_or(0.0);
+                if input <= knots[0].loc {
+                    let base = knots[0].val.evaluate_inner(inputs, depth + 1);
+                    return base + knots[0].slope * (input - knots[0].loc);
+                }
+                let last = knots.last().unwrap();
+                if input >= last.loc {
+                    let base = last.val.evaluate_inner(inputs, depth + 1);
+                    return base + last.slope * (input - last.loc);
+                }
+                let mut i = 0;
+                while i + 1 < knots.len() && knots[i + 1].loc < input {
+                    i += 1;
+                }
+                let k1 = &knots[i];
+                let k2 = &knots[i + 1];
+                let v1 = k1.val.evaluate_inner(inputs, depth + 1);
+                let v2 = k2.val.evaluate_inner(inputs, depth + 1);
+                let dx = k2.loc - k1.loc;
+                let t = (input - k1.loc) / dx;
+                let a = k1.slope * dx - (v2 - v1);
+                let b = -k2.slope * dx + (v2 - v1);
+                let lerp_y = v1 + t * (v2 - v1);
+                let lerp_ab = a + t * (b - a);
+                lerp_y + t * (1.0 - t) * lerp_ab
+            }
+        }
+    }
+}
+
+impl ClimateConfig {
+    pub fn offset_spline_at(&self, c: f32, s: f32, r: f32) -> f32 {
+        self.offset_spline.evaluate(c, s, r)
+    }
+    pub fn factor_spline_at(&self, c: f32, s: f32, r: f32) -> f32 {
+        self.factor_spline.evaluate(c, s, r)
+    }
+    pub fn jaggedness_spline_at(&self, c: f32, s: f32, r: f32) -> f32 {
+        self.jaggedness_spline.evaluate(c, s, r)
+    }
 }
 
 /// Density composition tuning (PR 2 introduces this section; PR 3+

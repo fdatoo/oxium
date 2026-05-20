@@ -38,4 +38,93 @@
         // of continentalness with mountain/plain/ocean knots.
         offset_spline: Constant(0.0),
     ),
+
+    // ── Climate / spline pipeline (PR 3) ──────────────────────────────
+    //
+    // Three 2D inputs drive nested cubic Hermite splines:
+    //   continentalness ∈ [-1, 1]: -1 deep ocean, +1 deep inland
+    //   terrain_shape   ∈ [-1, 1]: -1 mountainous, +1 flat
+    //   ridges_pv       ∈ [-1, 1]: PV fold; +1 = ridge peak
+    //
+    // Knot values derived from Minecraft 1.18+ TerrainProvider.java,
+    // scaled 1.5× to match Oxium's y_gradient_amplitude.
+    climate: (
+        plate_roughness_bias_range: (-0.25, 0.25),
+        terrain_shape_period: 2000.0,
+        terrain_shape_amplitude: 1.0,
+        ridges_period: 500.0,
+        ridges_amplitude: 1.0,
+
+        // offset_spline: continentalness → base column height (in
+        // y_gradient units). Negative = ocean, positive = mountain.
+        offset_spline: Multipoint([
+            (loc: -1.10, val: Constant(0.066),  slope: 0.0),
+            (loc: -1.02, val: Constant(-0.333), slope: 0.0),
+            (loc: -0.51, val: Constant(-0.333), slope: 0.0),
+            (loc: -0.44, val: Constant(-0.18),  slope: 0.0),
+            (loc: -0.18, val: Constant(-0.18),  slope: 0.0),
+            // Hard step into beach (duplicated location).
+            (loc: -0.16, val: Constant(-0.03),  slope: 0.0),
+            (loc: -0.15, val: Constant(-0.03),  slope: 0.0),
+            // Lowlands → midlands → highlands. The inner spline keys
+            // on terrain_shape (low = mountainous).
+            (loc: -0.10, val: Multipoint([
+                (loc: -0.85, val: Constant(0.10), slope: 0.0),
+                (loc: -0.40, val: Constant(0.05), slope: 0.0),
+                (loc:  0.20, val: Constant(0.00), slope: 0.0),
+                (loc:  0.70, val: Constant(-0.03), slope: 0.0),
+            ]), slope: 0.0),
+            (loc:  0.25, val: Multipoint([
+                (loc: -0.85, val: Constant(0.60), slope: 0.0),
+                (loc: -0.40, val: Constant(0.30), slope: 0.0),
+                (loc: -0.10, val: Constant(0.15), slope: 0.0),
+                (loc:  0.20, val: Constant(0.05), slope: 0.0),
+                (loc:  0.70, val: Constant(-0.03), slope: 0.0),
+            ]), slope: 0.0),
+            (loc:  1.00, val: Multipoint([
+                (loc: -0.85, val: Constant(1.20), slope: 0.0),
+                (loc: -0.40, val: Constant(0.75), slope: 0.0),
+                (loc: -0.10, val: Constant(0.30), slope: 0.0),
+                (loc:  0.20, val: Constant(0.10), slope: 0.0),
+                (loc:  0.70, val: Constant(0.01), slope: 0.0),
+            ]), slope: 0.0),
+        ]),
+
+        // factor_spline: controls vertical sharpness. Higher = sharper.
+        factor_spline: Multipoint([
+            (loc: -0.19, val: Constant(3.95), slope: 0.0),
+            (loc: -0.15, val: Multipoint([
+                (loc: -0.85, val: Constant(6.25), slope: 0.0),
+                (loc:  0.20, val: Constant(5.47), slope: 0.0),
+            ]), slope: 0.0),
+            (loc:  0.03, val: Multipoint([
+                (loc: -0.85, val: Constant(5.08), slope: 0.0),
+                (loc:  0.20, val: Constant(4.69), slope: 0.0),
+            ]), slope: 0.0),
+            (loc:  1.00, val: Multipoint([
+                (loc: -0.85, val: Constant(5.08), slope: 0.0),
+                (loc:  0.20, val: Constant(4.69), slope: 0.0),
+            ]), slope: 0.0),
+        ]),
+
+        // jaggedness_spline: only at peaks (high ridges_pv, low
+        // terrain_shape, far inland).
+        jaggedness_spline: Multipoint([
+            (loc: -0.11, val: Constant(0.0), slope: 0.0),
+            (loc:  0.03, val: Multipoint([
+                (loc: -0.78, val: Multipoint([
+                    (loc: -0.5, val: Constant(0.0), slope: 0.0),
+                    (loc:  0.5, val: Constant(0.5), slope: 0.0),
+                ]), slope: 0.0),
+                (loc: -0.375, val: Constant(0.0), slope: 0.0),
+            ]), slope: 0.0),
+            (loc:  0.65, val: Multipoint([
+                (loc: -0.78, val: Multipoint([
+                    (loc: -0.5, val: Constant(0.0), slope: 0.0),
+                    (loc:  0.5, val: Constant(1.0), slope: 0.0),
+                ]), slope: 0.0),
+                (loc: -0.375, val: Constant(0.0), slope: 0.0),
+            ]), slope: 0.0),
+        ]),
+    ),
 )
