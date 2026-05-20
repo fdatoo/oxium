@@ -6,8 +6,16 @@
 use egui::{ColorImage, TextureHandle, TextureOptions, Ui};
 use oxium::worldgen::Generator;
 
-const PLOT_PX: usize = 128;
 const PLOT_BLOCKS_PER_PIXEL_INITIAL: f32 = 1.0;
+/// Horizontal slice (XZ) is square — both axes are XZ-plane axes,
+/// equally interesting.
+const SQUARE_PX: usize = 160;
+/// Vertical slices (XY / YZ) get a 2:3 portrait so the world's
+/// vertical extent (≈256 blocks of useful Y) doesn't get cropped by
+/// the square aspect we used in v1. Right panel is much taller than
+/// wide on a typical screen — exploit it.
+const TALL_W_PX: usize = 128;
+const TALL_H_PX: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Orientation {
@@ -33,6 +41,16 @@ impl Orientation {
             Orientation::Xz => "slice Y",
             Orientation::Xy => "slice Z",
             Orientation::Yz => "slice X",
+        }
+    }
+
+    /// Internal image size for this orientation. Horizontal slices
+    /// stay square; vertical slices go portrait so the world's
+    /// vertical extent isn't cropped to the square aspect.
+    fn dimensions(self) -> (usize, usize) {
+        match self {
+            Orientation::Xz => (SQUARE_PX, SQUARE_PX),
+            Orientation::Xy | Orientation::Yz => (TALL_W_PX, TALL_H_PX),
         }
     }
 }
@@ -128,10 +146,10 @@ impl CrossSection {
 
     /// Map a pixel in the cross-section image to a world `(wx, wy, wz)`.
     fn pixel_to_world(&self, px: f32, py: f32) -> (i32, i32, i32) {
-        let half = PLOT_PX as f32 * 0.5;
-        let a = self.center_a + (px - half) * self.blocks_per_pixel;
+        let (w, h) = self.orientation.dimensions();
+        let a = self.center_a + (px - w as f32 * 0.5) * self.blocks_per_pixel;
         // py grows downward in image space; flip for "up = +" feel.
-        let b = self.center_b - (py - half) * self.blocks_per_pixel;
+        let b = self.center_b - (py - h as f32 * 0.5) * self.blocks_per_pixel;
         let (wx, wy, wz) = match self.orientation {
             Orientation::Xz => (a, self.slice_axis as f32, b), // XZ slice: b is world Z, slice = Y
             Orientation::Xy => (a, b, self.slice_axis as f32), // XY slice: a = X, b = Y, slice = Z
@@ -153,18 +171,19 @@ impl CrossSection {
         if self.last_key.as_ref() == Some(&key) && self.texture.is_some() {
             return;
         }
-        let mut pixels = vec![egui::Color32::TRANSPARENT; PLOT_PX * PLOT_PX];
-        for py in 0..PLOT_PX {
-            for px in 0..PLOT_PX {
+        let (w, h) = self.orientation.dimensions();
+        let mut pixels = vec![egui::Color32::TRANSPARENT; w * h];
+        for py in 0..h {
+            for px in 0..w {
                 let (wx, wy, wz) = self.pixel_to_world(px as f32, py as f32);
                 let rgba = sample_pixel(generator, self.layer, wx, wy, wz);
-                pixels[py * PLOT_PX + px] = egui::Color32::from_rgba_premultiplied(
+                pixels[py * w + px] = egui::Color32::from_rgba_premultiplied(
                     rgba[0], rgba[1], rgba[2], rgba[3],
                 );
             }
         }
         let img = ColorImage {
-            size: [PLOT_PX, PLOT_PX],
+            size: [w, h],
             pixels,
         };
         let tex = ctx.load_texture("viz_crosssection", img, TextureOptions::NEAREST);
@@ -254,8 +273,15 @@ impl CrossSection {
             .changed();
 
         self.regenerate(generator, ui.ctx(), revision);
+        let (w_px, h_px) = self.orientation.dimensions();
         if let Some(tex) = self.texture.as_ref() {
-            let size = egui::vec2(PLOT_PX as f32 * 2.0, PLOT_PX as f32 * 2.0);
+            // Display at native panel width if it fits, else scale
+            // down preserving aspect. 2x is the visual sweet spot —
+            // each sampled pixel becomes a 2×2 block on screen,
+            // matches the map widget's NEAREST upsampling.
+            let panel_w = ui.available_width();
+            let scale = (panel_w / w_px as f32).min(2.0);
+            let size = egui::vec2(w_px as f32 * scale, h_px as f32 * scale);
             ui.image((tex.id(), size));
         }
         let centre_status = match pin {
@@ -268,7 +294,7 @@ impl CrossSection {
         ui.label(
             egui::RichText::new(format!(
                 "{centre_status} · {:.2} blocks/px · {}×{} px",
-                self.blocks_per_pixel, PLOT_PX, PLOT_PX,
+                self.blocks_per_pixel, w_px, h_px,
             ))
             .small()
             .weak(),
