@@ -162,10 +162,10 @@ pub const WORMHOLE_BAND: f64 = 0.05;
 /// get their grass/dirt surface so coastal cold regions don't put
 /// a strip of snow directly against the ocean.
 pub const COLD_SNOW_MIN_ABOVE_SEA: i32 = 8;
-/// Sand transition band on the grass side of a desert boundary
-/// (in temperature-noise units). Inside this band the surface block
-/// is rolled stochastically per column.
-pub const SAND_TRANSITION_BAND: f32 = 0.05;
+// PR 6: SAND_TRANSITION_BAND is gone. The stochastic sand/grass
+// transition is now expressible as `SandTransitionRoll` inside the
+// surface rule tree (`assets/worldgen/default.ron`); the default
+// tree doesn't use it, but the DSL primitive exists.
 /// Spatial width (blocks) over which tree density is interpolated
 /// across a biome boundary.
 pub const TREE_BLEND_WIDTH: f32 = 12.0;

@@ -92,7 +92,7 @@ pub use crate::worldgen::tuning::SEA_LEVEL;
 use crate::worldgen::tuning::{
     CAVE_FLOOR_Y, CAVE_SDF_INTENSITY,
     CAVE_SURFACE_BUFFER, COLD_SNOW_MIN_ABOVE_SEA,
-    SAND_TRANSITION_BAND, SNOW_LINE, SURFACE_BAND, TREE_CELL_SIZE, TREE_MARGIN,
+    SNOW_LINE, SURFACE_BAND, TREE_CELL_SIZE, TREE_MARGIN,
     TREE_RATE_FOREST, TREE_RATE_PLAINS,
 };
 
@@ -132,6 +132,9 @@ pub struct Generator {
     /// init from the bundled config's `BiomesConfig::entries`.
     /// Hot-reloading the biome table requires a Generator restart.
     biome_list: std::sync::Arc<climate::ParameterList>,
+    /// PR 6: surface rules DSL. Rebuilt from `cfg.surface` on every
+    /// chunk fill (cheap — just an `Arc::clone` of the tree).
+    surface_system: std::sync::Arc<surface::SurfaceSystem>,
     seed: u64,
     /// LRU cache of pre-built fine regions. Consulted per chunk fill
     /// to evaluate valley carve and lake water; built on first touch.
@@ -221,6 +224,10 @@ impl Generator {
         let biome_list = std::sync::Arc::new(climate::ParameterList::new(
             bundled.biomes.entries.clone(),
         ));
+        // Build the surface rules system from the bundled rules.
+        let surface_system = std::sync::Arc::new(surface::SurfaceSystem::new(
+            bundled.surface.clone(),
+        ));
         Self {
             heightmap,
             density,
@@ -229,6 +236,7 @@ impl Generator {
             wormhole_noise,
             weirdness_noise,
             biome_list,
+            surface_system,
             seed,
             fine_cache: region::fresh_fine_cache(),
             macro_cache: region::fresh_macro_cache(),
@@ -537,60 +545,30 @@ impl Generator {
                             Block::Air
                         }
                     } else {
-                        // Solid — depth is "blocks below the air→solid
-                        // transition we just crossed". `near_surface`
-                        // gates surface-block selection: every air
-                        // voxel still resets `depth`, but only the
-                        // first solid block within ±SURFACE_BAND of the
-                        // column's preliminary surface becomes a real
-                        // surface. Deep cave floors, chunk-boundary
-                        // resets, and 3D-noise overhangs above the
-                        // surface band all fall through to Stone.
+                        // Solid — `depth` counts blocks below the most
+                        // recent air→solid transition. PR 6 delegates
+                        // the surface/sub-surface block decision to
+                        // the data-driven rule tree
+                        // (`SurfaceSystem::surface_block`); the
+                        // `WithinSurfaceBand` condition replaces the
+                        // pre-PR-6 inline near_surface gate.
                         let depth = depth_below_surface.map(|d| d + 1).unwrap_or(0);
                         depth_below_surface = Some(depth);
-                        let near_surface =
-                            (h_target - wy as f32).abs() <= SURFACE_BAND as f32;
-                        if col.is_cliff || !near_surface {
-                            Block::Stone
-                        } else if depth == 0 {
-                            // Topmost solid within the surface band.
-                            if wy >= SEA_LEVEL - 1
-                                && wy <= SEA_LEVEL + 2
-                                && !col.biome.snow_capped()
-                            {
-                                Block::Sand
-                            } else if wy >= SNOW_LINE {
-                                Block::Snow
-                            } else if col.biome.snow_capped()
-                                && wy >= SEA_LEVEL + COLD_SNOW_MIN_ABOVE_SEA
-                            {
-                                Block::Snow
-                            } else if col.biome == Biome::Desert {
-                                Block::Sand
-                            } else {
-                                let dist_to_boundary = 0.30 - col.desertness;
-                                if dist_to_boundary > 0.0
-                                    && dist_to_boundary < SAND_TRANSITION_BAND
-                                {
-                                    let p = 0.5
-                                        * (1.0
-                                            - dist_to_boundary
-                                                / SAND_TRANSITION_BAND);
-                                    let roll = hash::mix_unit(self.seed, &[wx, wz, 71]);
-                                    if roll < p {
-                                        Block::Sand
-                                    } else {
-                                        Block::Grass
-                                    }
-                                } else {
-                                    Block::Grass
-                                }
-                            }
-                        } else if depth <= 3 {
-                            Block::Dirt
-                        } else {
-                            Block::Stone
-                        }
+                        let surf_ctx = surface::SurfaceContext {
+                            wx,
+                            wy,
+                            wz,
+                            h_target: height,
+                            biome: col.biome,
+                            is_cliff: col.is_cliff,
+                            desertness: col.desertness,
+                            depth_below_surface: depth,
+                            lake_rim,
+                            seed: self.seed,
+                            cfg: &cfg,
+                            sea_level: SEA_LEVEL,
+                        };
+                        self.surface_system.surface_block(&surf_ctx)
                     };
                     out.set(local, block);
                 }

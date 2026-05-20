@@ -16,6 +16,7 @@ pub struct WorldgenConfig {
     pub density: DensityConfig,
     pub climate: ClimateConfig,
     pub biomes: BiomesConfig,
+    pub surface: crate::worldgen::surface::RuleSource,
 }
 
 /// PR 4 biome lookup config. The 6 existing biomes (Tundra,

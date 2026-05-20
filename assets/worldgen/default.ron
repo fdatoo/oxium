@@ -244,4 +244,55 @@
             ),
         ],
     ),
+
+    // ── Surface block rule tree (PR 6) ──────────────────────────────────
+    //
+    // Walked once per voxel by `SurfaceSystem::surface_block`.
+    // `Sequence` is short-circuit OR; `If` is short-circuit AND.
+    // First matching `Block` wins.
+    //
+    // The rule tree below mirrors the pre-PR-6 inline selector
+    // exactly, just expressed declaratively. Edit knobs:
+    //   * `WithinSurfaceBand(16)` → cliff/non-surface fall through to Stone
+    //   * `BeachBand(below_sea: 1, above_sea: 2)` → 4-block-wide beach
+    //   * `YAbove(110)` → alpine snow line
+    //   * `IsCold AND YAbove(70)` → cold-biome snow cap floor
+    surface: Sequence([
+        // 1. Cliff faces → Stone (regardless of depth).
+        If(condition: IsCliff,             then: Block(Stone)),
+        // 2. Outside the surface band → Stone. The chunk-cycle
+        //    depth-reset bug fix: deep underground "depth==0"
+        //    voxels (from chunk-y reset or cave floors) don't get
+        //    grass.
+        If(condition: Not(WithinSurfaceBand(16)), then: Block(Stone)),
+        // 3. Topmost solid (depth == 0): pick the surface material.
+        If(condition: OnFloor, then: Sequence([
+            // Beach band around sea level (and not snow-capped biome).
+            If(
+                condition: All([
+                    BeachBand(below_sea: 1, above_sea: 2),
+                    Not(IsCold),
+                ]),
+                then: Block(Sand),
+            ),
+            // Alpine snow line — applies to any biome.
+            If(condition: YAbove(110), then: Block(Snow)),
+            // Cold-biome snow cap.
+            If(
+                condition: All([IsCold, YAbove(70)]),
+                then: Block(Snow),
+            ),
+            // Desert biome: sand surface.
+            If(
+                condition: Biome([Desert]),
+                then: Block(Sand),
+            ),
+            // Default surface: Grass.
+            Block(Grass),
+        ])),
+        // 4. Sub-surface: 1-3 blocks below topmost = Dirt.
+        If(condition: UnderFloor(3), then: Block(Dirt)),
+        // 5. Default fallthrough: Stone.
+        Block(Stone),
+    ]),
 )
