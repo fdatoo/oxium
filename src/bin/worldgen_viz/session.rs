@@ -32,10 +32,14 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(seed: u64, config: WorldgenConfig) -> Self {
+    pub fn new(seed: u64, config: WorldgenConfig, radius: StreamRadius) -> Self {
         let holder = ConfigHolder::new(config);
         let generator = Arc::new(Generator::with_config(seed, holder.clone()));
-        let world = World::new(generator.clone(), StreamRadius::DEFAULT, 1024);
+        // Cache capacity sized 4× the radius volume so chunks that
+        // briefly scroll off-screen during a camera fly-around aren't
+        // re-filled when they come back into view.
+        let radius_volume = ((2 * radius.xz + 1).pow(2) * (2 * radius.y + 1)) as usize;
+        let world = World::new(generator.clone(), radius, radius_volume.saturating_mul(4));
         Self {
             seed,
             config: holder,

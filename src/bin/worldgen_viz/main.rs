@@ -34,6 +34,15 @@ struct Cli {
     /// Run one frame and exit (for CI smoke tests).
     #[arg(long, default_value_t = false)]
     check: bool,
+    /// Stream radius in chunks (XZ). Default 3 = 7×7 chunk grid ≈
+    /// 224 blocks visible horizontally. Larger = more world visible
+    /// but slower regen on every config edit.
+    #[arg(long, default_value_t = 3)]
+    radius_xz: i32,
+    /// Stream radius in chunks (Y). Default 2 = 5 vertical layers ≈
+    /// 160 blocks tall.
+    #[arg(long, default_value_t = 2)]
+    radius_y: i32,
 }
 
 struct VizApp {
@@ -61,8 +70,12 @@ struct KeyState {
 impl VizApp {
     fn new(cli: Cli) -> Self {
         let config = WorldgenConfig::bundled_default().expect("bundled default.ron");
+        let radius = crate::world::stream::StreamRadius {
+            xz: cli.radius_xz.max(0),
+            y: cli.radius_y.max(0),
+        };
         Self {
-            state: AppState::new(cli.seed, config),
+            state: AppState::new(cli.seed, config, radius),
             window: None,
             render: None,
             scene: None,

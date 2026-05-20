@@ -1,6 +1,7 @@
 //! AppState: aggregates session + UI state + frame timing.
 
 use crate::session::Session;
+use crate::world::stream::StreamRadius;
 use oxium::worldgen::config::WorldgenConfig;
 use std::time::Instant;
 
@@ -13,9 +14,9 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(seed: u64, config: WorldgenConfig) -> Self {
+    pub fn new(seed: u64, config: WorldgenConfig, radius: StreamRadius) -> Self {
         Self {
-            session: Session::new(seed, config),
+            session: Session::new(seed, config, radius),
             mouse_down: false,
             last_cursor: None,
             last_frame: Instant::now(),

@@ -3,7 +3,11 @@
 use glam::{IVec3, Vec3};
 use oxium::voxel::coords::{ChunkCoord, CHUNK_DIM_U};
 
-/// Radius (in chunks) around the camera. Spec defaults: 8 XZ, 4 Y.
+/// Radius (in chunks) around the camera. Cut from the spec's
+/// (xz=8, y=4)=2601 chunks down to (xz=3, y=2)=245 to make edit-time
+/// regens feel sub-second; the spec radius was too aggressive in
+/// practice (each slider drag wiped + refilled 2601 chunks). Tune via
+/// `--radius-xz` / `--radius-y` if you want a wider visible window.
 #[derive(Debug, Clone, Copy)]
 pub struct StreamRadius {
     pub xz: i32,
@@ -11,7 +15,7 @@ pub struct StreamRadius {
 }
 
 impl StreamRadius {
-    pub const DEFAULT: Self = Self { xz: 8, y: 4 };
+    pub const DEFAULT: Self = Self { xz: 3, y: 2 };
 }
 
 /// Which chunk does the given world position sit in?
