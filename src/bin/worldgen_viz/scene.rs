@@ -26,11 +26,15 @@ pub struct OrbitCamera {
 
 impl OrbitCamera {
     pub fn new() -> Self {
+        // Center the orbit target inside the visualizer's 3×3×5
+        // chunk region (worldgen_bridge constants). X/Z center ≈ 48
+        // (3 chunks × 32 / 2). Y target at ~70 — typical surface
+        // height in plains/forest, so we look at terrain not sky.
         Self {
-            target: Vec3::new(32.0, 60.0, 32.0),
-            yaw: 0.5,
-            pitch: 0.3,
-            distance: 128.0,
+            target: Vec3::new(48.0, 70.0, 48.0),
+            yaw: 0.8,
+            pitch: 0.4,
+            distance: 180.0,
         }
     }
     pub fn view_proj(&self, aspect: f32) -> Mat4 {

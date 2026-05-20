@@ -14,10 +14,13 @@ use oxium::worldgen::Generator;
 
 /// Visualizer-fixed region. At 32^3 voxels per chunk, 2×2 horizontal ×
 /// 4 vertical = 16 chunks = ~500k voxels — meshes in ~30-50ms.
-pub const REGION_CHUNKS_X: i32 = 2;
-pub const REGION_CHUNKS_Z: i32 = 2;
-pub const REGION_CHUNKS_Y_MIN: i32 = -2;
-pub const REGION_CHUNKS_Y_MAX: i32 = 2; // exclusive
+pub const REGION_CHUNKS_X: i32 = 3;
+pub const REGION_CHUNKS_Z: i32 = 3;
+/// Include enough vertical range to cover the actual terrain
+/// surface (typical Oxium heights are 50-110 in land biomes), plus
+/// a couple chunks below for cave visibility. Y range = -32..127.
+pub const REGION_CHUNKS_Y_MIN: i32 = -1;
+pub const REGION_CHUNKS_Y_MAX: i32 = 4; // exclusive
 
 /// Generate the region and return mesh vertices + indices for the
 /// visualizer's debug shader.
