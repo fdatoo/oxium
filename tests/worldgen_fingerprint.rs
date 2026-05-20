@@ -15,13 +15,15 @@ use std::hash::{Hash, Hasher};
 
 /// Pinned hash of the PNG bytes. Update whenever an intentional
 /// generator change lands.
-const EXPECTED_HASH: u64 = 0x121A_2133_D9E7_9848;
+const EXPECTED_HASH: u64 = 0x25E0_9164_E204_E2C7;
 
 /// Render a 256 × 256 fingerprint PNG of `h_pre` at seed 42 sampled
 /// every 8 blocks over `[-1024, 1024]²`. Returns the PNG bytes.
 fn render_fingerprint() -> Vec<u8> {
     let seed = 42u64;
-    let noise = HeightmapNoise::new(seed);
+    let cfg = oxium::worldgen::config::WorldgenConfig::bundled_default()
+        .expect("bundled default.ron must parse");
+    let noise = HeightmapNoise::new(seed, &cfg.climate);
     let n = 256usize;
     let mut pixels = vec![0u8; n * n * 3];
     for iz in 0..n {
@@ -29,7 +31,7 @@ fn render_fingerprint() -> Vec<u8> {
             // Sample world coords from `[-1024, 1024)` at 8 m/pixel.
             let wx = (ix as i32 * 8) - 1024;
             let wz = (iz as i32 * 8) - 1024;
-            let h = noise.h_pre(seed, wx as f32, wz as f32);
+            let h = noise.h_pre(seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
             // Map height to grayscale. Range roughly `[-50, 140]`;
             // we shift+scale to `[0, 255]` then clamp.
             let v = (((h + 60.0) / 200.0) * 255.0).clamp(0.0, 255.0) as u8;

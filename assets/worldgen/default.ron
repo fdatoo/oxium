@@ -42,88 +42,123 @@
     // ── Climate / spline pipeline (PR 3) ──────────────────────────────
     //
     // Three 2D inputs drive nested cubic Hermite splines:
-    //   continentalness ∈ [-1, 1]: -1 deep ocean, +1 deep inland
-    //   terrain_shape   ∈ [-1, 1]: -1 mountainous, +1 flat
-    //   ridges_pv       ∈ [-1, 1]: PV fold; +1 = ridge peak
+    //   continentalness ∈ [-1.1, 1.1]: -1 deep ocean, 0 coastline, +1 deep inland
+    //   terrain_shape   ∈ [-1, 1]:    -1 mountainous, +1 flat (plus per-plate bias)
+    //   ridges_pv       ∈ [-1, 1]:    PV fold; +1 = ridge peak
     //
-    // Knot values derived from Minecraft 1.18+ TerrainProvider.java,
-    // scaled 1.5× to match Oxium's y_gradient_amplitude.
+    // Spline output is an `offset` in y_gradient units. The world Y
+    // for a given offset is:
+    //   y = y_min + (y_max - y_min) * (1 + offset / y_grad_amp) * 0.5
+    // For Oxium's geometry (y_min=-120, y_max=140, amp=1.5):
+    //   offset 0.10 → y= 18  (deep ocean floor)
+    //   offset 0.35 → y= 40  (continental shelf)
+    //   offset 0.55 → y= 58  (beach / just below sea level 62)
+    //   offset 0.65 → y= 70  (just above sea level)
+    //   offset 0.80 → y= 83  (lowland)
+    //   offset 1.00 → y=100  (hills)
+    //   offset 1.20 → y=115  (mountain)
+    //   offset 1.40 → y=130  (high peak / snow cap)
+    //
+    // Knot shapes mirror Minecraft 1.18+ TerrainProvider.java but the
+    // values are Oxium-calibrated (MC's coastline-bias constant is
+    // baked directly into knot values here).
     climate: (
+        // Per-plate roughness bias added to terrain_shape: more
+        // negative = mountains. Preserves "rocky vs gentle continent"
+        // identity even with a smooth shape noise field.
         plate_roughness_bias_range: (-0.25, 0.25),
         terrain_shape_period: 2000.0,
         terrain_shape_amplitude: 1.0,
         ridges_period: 500.0,
         ridges_amplitude: 1.0,
 
-        // offset_spline: continentalness → base column height (in
-        // y_gradient units). Negative = ocean, positive = mountain.
+        // offset_spline: continentalness → surface offset.
+        // Outer knot values are scalars (deep ocean / coast) or
+        // inner Multipoint splines on terrain_shape (deep inland).
         offset_spline: Multipoint([
-            (loc: -1.10, val: Constant(0.066),  slope: 0.0),
-            (loc: -1.02, val: Constant(-0.333), slope: 0.0),
-            (loc: -0.51, val: Constant(-0.333), slope: 0.0),
-            (loc: -0.44, val: Constant(-0.18),  slope: 0.0),
-            (loc: -0.18, val: Constant(-0.18),  slope: 0.0),
-            // Hard step into beach (duplicated location).
-            (loc: -0.16, val: Constant(-0.03),  slope: 0.0),
-            (loc: -0.15, val: Constant(-0.03),  slope: 0.0),
-            // Lowlands → midlands → highlands. The inner spline keys
-            // on terrain_shape (low = mountainous).
-            (loc: -0.10, val: Multipoint([
-                (loc: -0.85, val: Constant(0.10), slope: 0.0),
-                (loc: -0.40, val: Constant(0.05), slope: 0.0),
-                (loc:  0.20, val: Constant(0.00), slope: 0.0),
-                (loc:  0.70, val: Constant(-0.03), slope: 0.0),
+            // Mushroom-cap saturation cap above deep ocean.
+            (loc: -1.10, val: Constant(0.30),  slope: 0.0),
+            // Deep ocean floor — flat plateau between -1.02 and -0.51.
+            (loc: -1.02, val: Constant(0.10),  slope: 0.0),
+            (loc: -0.51, val: Constant(0.10),  slope: 0.0),
+            // Continental shelf (gradually shallowing toward coast).
+            (loc: -0.30, val: Constant(0.30),  slope: 0.0),
+            (loc: -0.10, val: Constant(0.45),  slope: 0.0),
+            // Coastline (c≈0 = C-O plate boundary). Hard step into
+            // beach via duplicated location (MC's trick).
+            (loc: -0.02, val: Constant(0.55),  slope: 0.0),
+            (loc:  0.02, val: Constant(0.62),  slope: 0.0),
+            // Lowlands (c=+0.10): terrain_shape-driven hills.
+            (loc:  0.10, val: Multipoint([
+                (loc: -0.85, val: Constant(0.85), slope: 0.0),  // low-erosion hill
+                (loc: -0.40, val: Constant(0.78), slope: 0.0),
+                (loc:  0.20, val: Constant(0.70), slope: 0.0),
+                (loc:  0.70, val: Constant(0.65), slope: 0.0),  // high-erosion plain
             ]), slope: 0.0),
-            (loc:  0.25, val: Multipoint([
-                (loc: -0.85, val: Constant(0.60), slope: 0.0),
-                (loc: -0.40, val: Constant(0.30), slope: 0.0),
-                (loc: -0.10, val: Constant(0.15), slope: 0.0),
-                (loc:  0.20, val: Constant(0.05), slope: 0.0),
-                (loc:  0.70, val: Constant(-0.03), slope: 0.0),
+            // Mid-inland (c=+0.30): bigger range.
+            (loc:  0.30, val: Multipoint([
+                (loc: -0.85, val: Constant(1.05), slope: 0.0),  // hill
+                (loc: -0.40, val: Constant(0.92), slope: 0.0),
+                (loc:  0.20, val: Constant(0.80), slope: 0.0),  // plain
+                (loc:  0.70, val: Constant(0.70), slope: 0.0),
             ]), slope: 0.0),
+            // Far inland (c=+0.70): mountain ranges become available.
+            (loc:  0.70, val: Multipoint([
+                (loc: -0.85, val: Constant(1.30), slope: 0.0),  // mountain
+                (loc: -0.40, val: Constant(1.10), slope: 0.0),
+                (loc:  0.20, val: Constant(0.90), slope: 0.0),
+                (loc:  0.70, val: Constant(0.75), slope: 0.0),
+            ]), slope: 0.0),
+            // Deep continental (c=+1.00): high peaks possible.
             (loc:  1.00, val: Multipoint([
-                (loc: -0.85, val: Constant(1.20), slope: 0.0),
-                (loc: -0.40, val: Constant(0.75), slope: 0.0),
-                (loc: -0.10, val: Constant(0.30), slope: 0.0),
-                (loc:  0.20, val: Constant(0.10), slope: 0.0),
-                (loc:  0.70, val: Constant(0.01), slope: 0.0),
+                (loc: -0.85, val: Constant(1.42), slope: 0.0),  // high peak
+                (loc: -0.40, val: Constant(1.20), slope: 0.0),
+                (loc:  0.20, val: Constant(1.00), slope: 0.0),
+                (loc:  0.70, val: Constant(0.80), slope: 0.0),
             ]), slope: 0.0),
         ]),
 
-        // factor_spline: controls vertical sharpness. Higher = sharper.
+        // factor_spline: multiplier on the (depth + jagged * noise)
+        // term. Higher = sharper vertical transition (steeper cliffs).
+        // Values match MC's TerrainProvider.getErosionFactor scales.
         factor_spline: Multipoint([
-            (loc: -0.19, val: Constant(3.95), slope: 0.0),
-            (loc: -0.15, val: Multipoint([
-                (loc: -0.85, val: Constant(6.25), slope: 0.0),
-                (loc:  0.20, val: Constant(5.47), slope: 0.0),
-            ]), slope: 0.0),
-            (loc:  0.03, val: Multipoint([
-                (loc: -0.85, val: Constant(5.08), slope: 0.0),
+            (loc: -0.30, val: Constant(3.95), slope: 0.0),  // ocean: flat-ish
+            (loc: -0.10, val: Constant(4.50), slope: 0.0),  // shelf
+            (loc:  0.10, val: Multipoint([
+                (loc: -0.85, val: Constant(5.50), slope: 0.0),
                 (loc:  0.20, val: Constant(4.69), slope: 0.0),
+            ]), slope: 0.0),
+            (loc:  0.50, val: Multipoint([
+                (loc: -0.85, val: Constant(6.25), slope: 0.0),  // sharp peaks
+                (loc:  0.20, val: Constant(5.08), slope: 0.0),
             ]), slope: 0.0),
             (loc:  1.00, val: Multipoint([
-                (loc: -0.85, val: Constant(5.08), slope: 0.0),
-                (loc:  0.20, val: Constant(4.69), slope: 0.0),
+                (loc: -0.85, val: Constant(6.25), slope: 0.0),
+                (loc:  0.20, val: Constant(5.08), slope: 0.0),
             ]), slope: 0.0),
         ]),
 
-        // jaggedness_spline: only at peaks (high ridges_pv, low
-        // terrain_shape, far inland).
+        // jaggedness_spline: amplitude of the high-frequency rider.
+        // Active only at peaks (high ridges_pv, low terrain_shape,
+        // far inland). Multiplied by base_3d_noise → adds ±0.3-0.5
+        // to depth at peaks, creating jagged mountain detail.
         jaggedness_spline: Multipoint([
-            (loc: -0.11, val: Constant(0.0), slope: 0.0),
-            (loc:  0.03, val: Multipoint([
-                (loc: -0.78, val: Multipoint([
+            (loc:  0.05, val: Constant(0.0), slope: 0.0),
+            (loc:  0.50, val: Multipoint([
+                // terrain_shape: low (mountains) = jagged, high = smooth
+                (loc: -0.85, val: Multipoint([
+                    // ridges_pv: peaks have jaggedness, valleys don't
                     (loc: -0.5, val: Constant(0.0), slope: 0.0),
-                    (loc:  0.5, val: Constant(0.5), slope: 0.0),
+                    (loc:  0.5, val: Constant(0.30), slope: 0.0),
                 ]), slope: 0.0),
-                (loc: -0.375, val: Constant(0.0), slope: 0.0),
+                (loc:  0.20, val: Constant(0.0), slope: 0.0),
             ]), slope: 0.0),
-            (loc:  0.65, val: Multipoint([
-                (loc: -0.78, val: Multipoint([
+            (loc:  1.00, val: Multipoint([
+                (loc: -0.85, val: Multipoint([
                     (loc: -0.5, val: Constant(0.0), slope: 0.0),
-                    (loc:  0.5, val: Constant(1.0), slope: 0.0),
+                    (loc:  0.5, val: Constant(0.50), slope: 0.0),
                 ]), slope: 0.0),
-                (loc: -0.375, val: Constant(0.0), slope: 0.0),
+                (loc:  0.20, val: Constant(0.0), slope: 0.0),
             ]), slope: 0.0),
         ]),
     ),

@@ -47,11 +47,12 @@ pub struct Plate {
     /// World-space seed point inside the cell. Distances are measured
     /// to this point when classifying a column's plate.
     pub seed_xz: Vec2,
-    /// Sea-level-frame base elevation contribution. Positive for
-    /// continental plates, negative for oceanic.
-    pub base_elevation: f32,
-    /// Multiplier applied to the warped-FBM base relief. Higher →
-    /// more dramatic hills inside this plate.
+    /// Per-plate variation used as an additive bias on the climate
+    /// `terrain_shape` channel. Higher value → more mountainous
+    /// continent (post-PR-3; pre-PR-3 this was a multiplicative
+    /// scale on the now-removed warped-FBM relief). Still raw
+    /// `ROUGHNESS_RANGE` so other consumers (visualizer, debug)
+    /// can interpret it; the bias map lives in heightmap.rs.
     pub roughness: f32,
 }
 
@@ -76,21 +77,6 @@ impl Plate {
         } else {
             PlateKind::Oceanic
         };
-        // Base elevation: per-kind range, salt 3.
-        let base_elevation = match kind {
-            PlateKind::Continental => mix_range(
-                seed,
-                &[cell_x, cell_z, 3],
-                CONTINENTAL_BASE_RANGE.0,
-                CONTINENTAL_BASE_RANGE.1,
-            ),
-            PlateKind::Oceanic => mix_range(
-                seed,
-                &[cell_x, cell_z, 3],
-                OCEANIC_BASE_RANGE.0,
-                OCEANIC_BASE_RANGE.1,
-            ),
-        };
         // Roughness, salt 4.
         let roughness = mix_range(
             seed,
@@ -102,7 +88,6 @@ impl Plate {
             id,
             kind,
             seed_xz,
-            base_elevation,
             roughness,
         }
     }
@@ -170,82 +155,10 @@ pub fn plate_at(seed: u64, wx: i32, wz: i32) -> PlateLookup {
     PlateLookup { a, b, d_a, d_b, t }
 }
 
-/// Per-pair maximum mountain-ridge peak height. Driven by the two
-/// plates' kinds. See spec Section "Plate-edge ridges".
-pub fn ridge_peak_for_pair(a: PlateKind, b: PlateKind) -> f32 {
-    use PlateKind::*;
-    match (a, b) {
-        (Continental, Continental) => RIDGE_PEAK_CC,
-        (Continental, Oceanic) | (Oceanic, Continental) => RIDGE_PEAK_CO,
-        (Oceanic, Oceanic) => RIDGE_PEAK_OO,
-    }
-}
-
-/// Mountain-ridge contribution (blocks) added on top of the base
-/// continental shelf at world `(wx, wz)`.
-///
-/// Geometry: smoothstep falloff with boundary intensity `t`. Inside
-/// `t < BOUNDARY_RIDGE_WIDTH`, lift smoothly tapers from `peak` at
-/// `t = 0` to 0 at `t = BOUNDARY_RIDGE_WIDTH`. Smoothstep (not
-/// linear) so the boundary between ridge band and non-ridge terrain
-/// doesn't read as a sharp mesa edge.
-///
-/// The `peak` itself is modulated along the boundary by a 1D noise
-/// **sampled at the query position projected onto the boundary axis**
-/// — so the chain has real saddles and crests at the chunk scale,
-/// not a constant value per plate pair.
-pub fn ridge_lift(look: &PlateLookup, query_xz: Vec2, seed: u64) -> f32 {
-    // Outside the ridge window — no contribution.
-    if look.t >= BOUNDARY_RIDGE_WIDTH {
-        return 0.0;
-    }
-    let peak_max = ridge_peak_for_pair(look.a.kind, look.b.kind);
-
-    // 1D noise along the boundary, sampled at the *query position*
-    // projected onto the boundary axis. This is the key fix: in the
-    // previous version we used the midpoint of the two seed points,
-    // which is a constant per pair → uniform ridges per chain. With
-    // the query's projection, ridges actually vary along their length.
-    let axis = (look.b.seed_xz - look.a.seed_xz).normalize_or_zero();
-    let along_world = query_xz.dot(axis);
-    let bucket = (along_world / 32.0).floor() as i32;
-    let bucket_frac = (along_world / 32.0) - bucket as f32;
-    let pair_salt = mix_u32(
-        seed,
-        &[
-            look.a.id.cell_x,
-            look.a.id.cell_z,
-            look.b.id.cell_x,
-            look.b.id.cell_z,
-        ],
-    );
-    let n0 = mix_unit(seed, &[pair_salt as i32, bucket, 0]);
-    let n1 = mix_unit(seed, &[pair_salt as i32, bucket + 1, 0]);
-    let n = n0 * (1.0 - bucket_frac) + n1 * bucket_frac;
-    // Map noise to [0.35, 1.0] — wider range than before so saddles
-    // dip lower than crests, producing real silhouette variation.
-    let mod_factor = 0.35 + 0.65 * n;
-
-    // Smoothstep falloff (was linear). At `t = 0` the lift is full
-    // peak; at `t = BOUNDARY_RIDGE_WIDTH` it's zero; in between the
-    // Hermite curve produces a soft taper instead of a hard mesa
-    // edge.
-    let u = (look.t / BOUNDARY_RIDGE_WIDTH).clamp(0.0, 1.0);
-    let falloff = 1.0 - u * u * (3.0 - 2.0 * u);
-    peak_max * falloff * mod_factor
-}
-
-/// Continental-shelf-tapered base elevation at world `(wx, wz)`.
-/// Lerps between plate `a`'s and plate `b`'s base elevations by a
-/// weight derived from boundary intensity `t`. Inside the ridge band
-/// the blend is sharp; deep inside a plate the blend pulls toward
-/// `a`'s base.
-pub fn shelf_base(look: &PlateLookup) -> f32 {
-    // Weight: how much of `a`'s base elevation to use. `t = 1` (deep
-    // inside `a`) → fully `a`. `t = 0` (on the boundary) → 50/50.
-    let w_a = 0.5 + 0.5 * look.t.clamp(0.0, 1.0);
-    look.a.base_elevation * w_a + look.b.base_elevation * (1.0 - w_a)
-}
+// `ridge_peak_for_pair`, `ridge_lift`, and `shelf_base` were the
+// pre-PR-3 plate-mosaic heightmap primitives. Removed: the spline
+// pipeline in `heightmap.rs` replaces them. Plate Voronoi geometry
+// is still used to derive `signed_continentalness` for the spline.
 
 #[cfg(test)]
 mod tests {
@@ -330,36 +243,6 @@ mod tests {
     fn plate_id_round_trips_through_of() {
         let p = Plate::of(42, 7, -3);
         assert_eq!(p.id, PlateId { cell_x: 7, cell_z: -3 });
-    }
-
-    #[test]
-    fn ridge_lift_zero_outside_band() {
-        let mut look = plate_at(42, 0, 0);
-        look.t = 0.5; // way outside BOUNDARY_RIDGE_WIDTH
-        assert_eq!(ridge_lift(&look, Vec2::ZERO, 42), 0.0);
-    }
-
-    #[test]
-    fn ridge_lift_positive_at_boundary() {
-        // Find a column on a CC boundary by scanning until t is small
-        // and both plates are continental.
-        for wx in (-2000..2000).step_by(20) {
-            for wz in (-2000..2000).step_by(20) {
-                let look = plate_at(42, wx, wz);
-                if look.t < 0.05
-                    && matches!(look.a.kind, PlateKind::Continental)
-                    && matches!(look.b.kind, PlateKind::Continental)
-                {
-                    let lift = ridge_lift(&look, Vec2::new(wx as f32, wz as f32), 42);
-                    assert!(
-                        lift > 0.0,
-                        "expected positive ridge lift on CC boundary, got {lift}"
-                    );
-                    return;
-                }
-            }
-        }
-        panic!("no CC boundary found in scan — adjust CONTINENTAL_RATIO?");
     }
 
 }

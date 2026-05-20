@@ -186,8 +186,13 @@ impl Generator {
         // PR 2: the plate-driven heightmap owns its own FBM + warp
         // noise fields. The old `height_noise`, `mountain_noise`, and
         // `mountainness_map` are gone — plate geometry replaces them.
-        let heightmap = heightmap::HeightmapNoise::new(seed);
-        let density = heightmap::DensityNoise::new(seed);
+        // Load the bundled default once so all noise fields share a
+        // consistent initial config (the file watcher can later swap
+        // values, but the noise *frequencies* baked here stay).
+        let bundled = config::WorldgenConfig::bundled_default()
+            .expect("bundled default.ron must parse");
+        let heightmap = heightmap::HeightmapNoise::new(seed, &bundled.climate);
+        let density = heightmap::DensityNoise::new(seed, &bundled.density);
         // Biome maps: large period so each biome covers many chunks.
         let desert_map = Fbm::<Simplex>::new(seed.wrapping_add(4) as u32)
             .set_octaves(2)
@@ -214,8 +219,6 @@ impl Generator {
             .set_octaves(2)
             .set_frequency(1.0 / BIOME_JITTER_PERIOD as f64)
             .set_persistence(0.5);
-        let default_cfg = config::WorldgenConfig::bundled_default()
-            .expect("bundled default.ron must parse");
         Self {
             heightmap,
             density,
@@ -227,7 +230,7 @@ impl Generator {
             seed,
             fine_cache: region::fresh_fine_cache(),
             macro_cache: region::fresh_macro_cache(),
-            config: config::ConfigHolder::new(default_cfg),
+            config: config::ConfigHolder::new(bundled),
         }
     }
 
@@ -253,15 +256,25 @@ impl Generator {
     fn build_fine_region(&self, coord: region::RegionCoord) -> region::FineRegion {
         let mut r = region::FineRegion::empty(coord);
         r.coord = coord;
+        let cfg = self.config.load();
         hydrology::build_fine_hydro(
             self.seed,
             coord,
             &self.heightmap,
+            &cfg.climate,
+            &cfg.density,
             &self.macro_cache,
             &self.fine_cache,
             &mut r,
         );
-        caves::build_systems_for_region(self.seed, coord, &self.heightmap, &mut r);
+        caves::build_systems_for_region(
+            self.seed,
+            coord,
+            &self.heightmap,
+            &cfg.climate,
+            &cfg.density,
+            &mut r,
+        );
         r
     }
 
@@ -305,17 +318,24 @@ impl Generator {
     /// per-column hot path inside `fill_chunk` calls this version so
     /// we don't pay 9 mutex-protected cache lookups per column.
     fn column_data_with(&self, wx: i32, wz: i32, regions: &ChunkRegions) -> ColumnData {
-        // Pre-river heightmap from plates + warped FBM.
-        let h_pre = self.heightmap.h_pre(self.seed, wx as f32, wz as f32);
-        // Slope-driven cliff classification on the *unmodified* h_pre.
-        let is_cliff = self.heightmap.is_cliff(self.seed, wx as f32, wz as f32);
+        let cfg = self.config.load();
+        // PR 3: spline-driven heightmap. h_pre is now the surface Y
+        // derived from the climate-spline `offset_spline`, NOT the
+        // old plate-mosaic shelf+ridge+warpedFBM formula.
+        let h_pre = self
+            .heightmap
+            .h_pre(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
+        // Cliff = high slope + no stencil sample dipping below sea.
+        // The pre-PR-3 CLIFF_MIN_HEIGHT gate is gone (the spline
+        // already places mountains far from the coast by design).
+        let is_cliff = self
+            .heightmap
+            .is_cliff(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
 
         // Valley carve over the chunk's pre-fetched 3 × 3 region
-        // neighbourhood. Slightly larger ring than strictly correct
-        // (would need a 5 × 5 ring to handle valley contributions
-        // from segments 2 regions away from a chunk's edge column),
-        // but in practice rivers cross at most 1 region boundary
-        // within the carve radius. Minor visual artifact for v1.
+        // neighbourhood. Operates on the spline-derived h_pre (PR 3
+        // interface change — same shape as before, just a different
+        // h_pre source).
         let carve = regions.valley_carve(wx, wz, self.seed);
         let height = (h_pre - carve)
             .clamp((CAVE_FLOOR_Y + 8) as f32, MAX_TERRAIN_Y as f32) as i32;
@@ -394,19 +414,28 @@ impl Generator {
                 //     transition (so depth=0 is the topmost solid
                 //     block of an exposed surface).
                 let h_target = height as f32;
+                // PR 3: sample climate triple once per column and
+                // resolve the three splines. These outputs drive the
+                // entire y-loop's density composition.
+                let (c, s, r, _) =
+                    self.heightmap
+                        .climate(self.seed, wx as f32, wz as f32, &cfg.climate);
+                let offset = cfg.climate.offset_spline.evaluate(c, s, r);
+                let factor = cfg.climate.factor_spline.evaluate(c, s, r);
+                let jagged = cfg.climate.jaggedness_spline.evaluate(c, s, r);
                 // Seed `depth_below_surface` from the voxel one above
                 // the chunk's top: if the column continues solid into
                 // this chunk from above (i.e. we're deep underground),
                 // start with a depth large enough to skip the
-                // grass/dirt branches. Without this, every vertical
-                // chunk boundary reset the counter and produced a
-                // fresh grass-dirt-stone cycle every 32 blocks.
+                // grass/dirt branches.
                 let above_chunk_top_wy = origin.y + CHUNK_DIM_U as i32;
-                let above_density = self.density.evaluate_v2(
-                    h_target,
+                let above_density = self.density.evaluate(
                     wx,
                     above_chunk_top_wy,
                     wz,
+                    offset,
+                    factor,
+                    jagged,
                     &cfg.density,
                 );
                 let mut depth_below_surface: Option<i32> =
@@ -423,8 +452,28 @@ impl Generator {
                     // small enough that any positive cave contribution
                     // carves cleanly — no `min(2.0)` cap needed.
                     let approx_depth = height - wy;
-                    let raw_density =
-                        self.density.evaluate_v2(h_target, wx, wy, wz, &cfg.density);
+                    // PR 3 above-water 3D-noise clamp: in the
+                    // 4-block band immediately above any water
+                    // surface (lake_rim or ocean sea-level), zero
+                    // positive 3D-noise contribution so noise peaks
+                    // can't form solid overhang ceilings that close
+                    // the water body into a tunnel.
+                    let water_y_for_clamp: Option<i32> = lake_rim
+                        .or(if height <= SEA_LEVEL { Some(SEA_LEVEL) } else { None });
+                    let clamp_noise = match water_y_for_clamp {
+                        Some(wy_water) => wy > wy_water && wy <= wy_water + 4,
+                        None => false,
+                    };
+                    let raw_density = self.density.evaluate_with_noise_clamp(
+                        wx,
+                        wy,
+                        wz,
+                        offset,
+                        factor,
+                        jagged,
+                        &cfg.density,
+                        clamp_noise,
+                    );
 
                     let mut cave_contribution = 0.0_f32;
                     if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y {
@@ -626,6 +675,17 @@ impl Generator {
         // `col.height`; use a top-down density walk so the tree's
         // trunk lands on the real surface, not the heightmap target.
         let cfg = self.config_snapshot();
+        // Sample the climate triple at this column so the topmost-solid
+        // search uses the same spline outputs the chunk fill does.
+        let (cc, sc, rc, _) = self.heightmap.climate(
+            self.seed,
+            wx as f32,
+            wz as f32,
+            &cfg.climate,
+        );
+        let offset = cfg.climate.offset_spline.evaluate(cc, sc, rc);
+        let factor = cfg.climate.factor_spline.evaluate(cc, sc, rc);
+        let jagged = cfg.climate.jaggedness_spline.evaluate(cc, sc, rc);
         let height = self
             .density
             .topmost_solid(
@@ -633,6 +693,9 @@ impl Generator {
                 wx,
                 wz,
                 col.height + SURFACE_BAND + 2,
+                offset,
+                factor,
+                jagged,
                 &cfg.density,
             )
             .unwrap_or(col.height);
@@ -1050,7 +1113,7 @@ mod tests {
         // SURFACE_BAND. The surface is now fuzz-jittered by 3D
         // relief noise instead of being column-quantised, so the
         // chevron-staircase artifact on moderate slopes is gone.
-        const GOLDEN_42_002: u64 = 0xF858_4012_97B9_85E0;
+        const GOLDEN_42_002: u64 = 0xC61C_CC96_419A_D929;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);

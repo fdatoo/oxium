@@ -295,6 +295,8 @@ pub fn build_macro_region(
     seed: u64,
     coord: MacroRegionCoord,
     heightmap: &HeightmapNoise,
+    climate: &crate::worldgen::config::ClimateConfig,
+    density: &crate::worldgen::config::DensityConfig,
 ) -> MacroRegion {
     let halo = MACRO_HALO_REGIONS;
     let inner = MACRO_CELLS_PER_REGION;
@@ -318,7 +320,8 @@ pub fn build_macro_region(
         for ix in 0..n {
             let wx = origin_x + (ix as i32) * MACRO_CELL + MACRO_CELL / 2;
             let wz = origin_z + (iz as i32) * MACRO_CELL + MACRO_CELL / 2;
-            grid.h[iz * n + ix] = heightmap.h_pre(seed, wx as f32, wz as f32) as i16;
+            grid.h[iz * n + ix] =
+                heightmap.h_pre(seed, wx as f32, wz as f32, climate, density) as i16;
         }
     }
 
@@ -420,6 +423,8 @@ pub fn build_fine_hydro(
     seed: u64,
     coord: RegionCoord,
     heightmap: &HeightmapNoise,
+    climate: &crate::worldgen::config::ClimateConfig,
+    density: &crate::worldgen::config::DensityConfig,
     macro_cache: &MacroCache,
     fine_cache: &crate::worldgen::region::FineCache,
     region: &mut FineRegion,
@@ -448,7 +453,8 @@ pub fn build_fine_hydro(
         for ix in 0..n {
             let wx = origin_x + (ix as i32) * FINE_CELL + FINE_CELL / 2;
             let wz = origin_z + (iz as i32) * FINE_CELL + FINE_CELL / 2;
-            grid.h[iz * n + ix] = heightmap.h_pre(seed, wx as f32, wz as f32) as i16;
+            grid.h[iz * n + ix] =
+                heightmap.h_pre(seed, wx as f32, wz as f32, climate, density) as i16;
         }
     }
 
@@ -474,7 +480,7 @@ pub fn build_fine_hydro(
         for mrx in mr_min.x..=mr_max.x {
             let mr_coord = MacroRegionCoord { x: mrx, z: mrz };
             let mr = crate::worldgen::region::get_macro(macro_cache, mr_coord, || {
-                build_macro_region(seed, mr_coord, heightmap)
+                build_macro_region(seed, mr_coord, heightmap, climate, density)
             });
             let mr_origin = mr_coord.origin();
             for miz in 0..(MACRO_CELLS_PER_REGION as usize) {
@@ -878,10 +884,11 @@ mod tests {
 
     #[test]
     fn build_macro_region_is_deterministic() {
-        let hm = HeightmapNoise::new(42);
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let hm = HeightmapNoise::new(42, &cfg.climate);
         let coord = MacroRegionCoord { x: 0, z: 0 };
-        let m1 = build_macro_region(42, coord, &hm);
-        let m2 = build_macro_region(42, coord, &hm);
+        let m1 = build_macro_region(42, coord, &hm, &cfg.climate, &cfg.density);
+        let m2 = build_macro_region(42, coord, &hm, &cfg.climate, &cfg.density);
         // Compare a small sample of cells.
         assert_eq!(m1.flow_dir, m2.flow_dir);
         assert_eq!(m1.flow_acc, m2.flow_acc);
@@ -893,7 +900,8 @@ mod tests {
         // Scan a 5 × 5 grid of regions around the origin. At least one
         // should produce river cells. Some regions are pure ocean and
         // won't have any; we just need one with land + drainage.
-        let hm = HeightmapNoise::new(42);
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let hm = HeightmapNoise::new(42, &cfg.climate);
         let macro_cache = crate::worldgen::region::fresh_macro_cache();
         let fine_cache = crate::worldgen::region::fresh_fine_cache();
         let mut total_river_cells = 0usize;
@@ -903,7 +911,16 @@ mod tests {
                 let mut region =
                     crate::worldgen::region::build_fine_region_placeholder(coord);
                 region.coord = coord;
-                build_fine_hydro(42, coord, &hm, &macro_cache, &fine_cache, &mut region);
+                build_fine_hydro(
+                    42,
+                    coord,
+                    &hm,
+                    &cfg.climate,
+                    &cfg.density,
+                    &macro_cache,
+                    &fine_cache,
+                    &mut region,
+                );
                 let n = (FINE_CELLS_PER_REGION * FINE_CELLS_PER_REGION) as usize;
                 total_river_cells +=
                     (0..n).filter(|&i| bitset_get(&region.is_river, i)).count();
@@ -921,13 +938,23 @@ mod tests {
         // (which is monotone in acc) should too. Pick any river cell
         // in a built region and chase its flow_dir; widths must be
         // non-decreasing.
-        let hm = HeightmapNoise::new(42);
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let hm = HeightmapNoise::new(42, &cfg.climate);
         let macro_cache = crate::worldgen::region::fresh_macro_cache();
         let fine_cache = crate::worldgen::region::fresh_fine_cache();
         let coord = RegionCoord { x: 0, z: 0 };
         let mut region = crate::worldgen::region::build_fine_region_placeholder(coord);
         region.coord = coord;
-        build_fine_hydro(42, coord, &hm, &macro_cache, &fine_cache, &mut region);
+        build_fine_hydro(
+            42,
+            coord,
+            &hm,
+            &cfg.climate,
+            &cfg.density,
+            &macro_cache,
+            &fine_cache,
+            &mut region,
+        );
         let n = FINE_CELLS_PER_REGION as usize;
         for iz in 1..n - 1 {
             for ix in 1..n - 1 {

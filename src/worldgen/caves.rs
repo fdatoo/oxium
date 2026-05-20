@@ -73,6 +73,8 @@ pub fn build_systems_for_region(
     seed: u64,
     coord: RegionCoord,
     heightmap: &HeightmapNoise,
+    climate: &crate::worldgen::config::ClimateConfig,
+    density: &crate::worldgen::config::DensityConfig,
     region: &mut FineRegion,
 ) {
     // Decide how many systems this region hosts.
@@ -83,7 +85,7 @@ pub fn build_systems_for_region(
             % (n_max - n_min + 1));
     region.cave_systems.clear();
     for system_idx in 0..n as i32 {
-        let sys = build_system(seed, coord, system_idx, heightmap);
+        let sys = build_system(seed, coord, system_idx, heightmap, climate, density);
         region.cave_systems.push(sys);
     }
 }
@@ -94,6 +96,8 @@ fn build_system(
     coord: RegionCoord,
     system_idx: i32,
     heightmap: &HeightmapNoise,
+    climate: &crate::worldgen::config::ClimateConfig,
+    density: &crate::worldgen::config::DensityConfig,
 ) -> CaveSystem {
     let band = DepthBand::pick(seed, system_idx, coord);
     let (y_min, y_max) = band.range();
@@ -300,7 +304,13 @@ fn build_system(
         let cwx = chamber.center.x as i32;
         let cwy_top = (chamber.center.y + chamber.radii.y) as i32;
         let cwz = chamber.center.z as i32;
-        let surface_h = heightmap.h_pre(seed, chamber.center.x, chamber.center.z) as i32;
+        let surface_h = heightmap.h_pre(
+            seed,
+            chamber.center.x,
+            chamber.center.z,
+            climate,
+            density,
+        ) as i32;
         // 1. Sinkhole.
         if surface_h - cwy_top <= SINKHOLE_DEPTH_MAX && surface_h - cwy_top >= -2 {
             entrances.push(Entrance {
@@ -317,10 +327,10 @@ fn build_system(
             let theta = step as f32 * std::f32::consts::TAU / 16.0;
             let cwx_f = chamber.center.x + theta.cos() * CLIFF_ENTRANCE_DIST as f32;
             let cwz_f = chamber.center.z + theta.sin() * CLIFF_ENTRANCE_DIST as f32;
-            if heightmap.is_cliff(seed, cwx_f, cwz_f) {
+            if heightmap.is_cliff(seed, cwx_f, cwz_f, climate, density) {
                 found_cliff = Some(IVec3::new(
                     cwx_f as i32,
-                    heightmap.h_pre(seed, cwx_f, cwz_f) as i32,
+                    heightmap.h_pre(seed, cwx_f, cwz_f, climate, density) as i32,
                     cwz_f as i32,
                 ));
                 break;
@@ -700,12 +710,13 @@ mod tests {
     fn system_count_within_bounds() {
         // Roll systems for many regions; the count should always
         // sit in `CAVE_SYSTEMS_PER_REGION` inclusive.
-        let hm = HeightmapNoise::new(42);
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let hm = HeightmapNoise::new(42, &cfg.climate);
         for z in -3..=3 {
             for x in -3..=3 {
                 let coord = RegionCoord { x, z };
                 let mut region = FineRegion::empty(coord);
-                build_systems_for_region(42, coord, &hm, &mut region);
+                build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut region);
                 let n = region.cave_systems.len();
                 assert!(
                     (CAVE_SYSTEMS_PER_REGION.0 as usize..=CAVE_SYSTEMS_PER_REGION.1 as usize)
@@ -718,12 +729,13 @@ mod tests {
 
     #[test]
     fn system_is_pure_in_seed_and_coord() {
-        let hm = HeightmapNoise::new(42);
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let hm = HeightmapNoise::new(42, &cfg.climate);
         let coord = RegionCoord { x: 2, z: -3 };
         let mut r1 = FineRegion::empty(coord);
         let mut r2 = FineRegion::empty(coord);
-        build_systems_for_region(42, coord, &hm, &mut r1);
-        build_systems_for_region(42, coord, &hm, &mut r2);
+        build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut r1);
+        build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut r2);
         assert_eq!(r1.cave_systems.len(), r2.cave_systems.len());
         for (a, b) in r1.cave_systems.iter().zip(&r2.cave_systems) {
             assert_eq!(a.chambers.len(), b.chambers.len());
@@ -736,10 +748,11 @@ mod tests {
     fn mst_connects_all_chambers() {
         // Build a system with ≥2 chambers and confirm the tunnel set
         // makes them reachable via BFS over the chamber graph.
-        let hm = HeightmapNoise::new(42);
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let hm = HeightmapNoise::new(42, &cfg.climate);
         let coord = RegionCoord { x: 0, z: 0 };
         let mut region = FineRegion::empty(coord);
-        build_systems_for_region(42, coord, &hm, &mut region);
+        build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut region);
         for sys in &region.cave_systems {
             if sys.chambers.len() < 2 {
                 continue;
@@ -788,10 +801,11 @@ mod tests {
 
     #[test]
     fn cave_air_returns_true_inside_chamber_center() {
-        let hm = HeightmapNoise::new(42);
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let hm = HeightmapNoise::new(42, &cfg.climate);
         let coord = RegionCoord { x: 0, z: 0 };
         let mut region = FineRegion::empty(coord);
-        build_systems_for_region(42, coord, &hm, &mut region);
+        build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut region);
         for sys in &region.cave_systems {
             if let Some(c) = sys.chambers.first() {
                 let wx = c.center.x as i32;

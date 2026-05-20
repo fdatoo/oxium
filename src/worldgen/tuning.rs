@@ -18,94 +18,31 @@ pub const PLATE_CELL_SIZE: i32 = 1024;
 /// land:ocean ratio.
 pub const CONTINENTAL_RATIO: f32 = 0.45;
 
-/// Per-continental-plate base elevation, sampled uniformly from this
-/// range. Sea-level frame (continental_base + SEA_LEVEL = column floor
-/// before relief). Higher → continents stand prouder above sea level.
-pub const CONTINENTAL_BASE_RANGE: (f32, f32) = (18.0, 28.0);
-/// Per-oceanic-plate base elevation. Negative — oceans sit below sea
-/// level by this amount (before relief). Deep enough that the
-/// continental shelf taper produces shallow coastal water.
-pub const OCEANIC_BASE_RANGE: (f32, f32) = (-50.0, -20.0);
-/// Per-plate amplitude multiplier on the warped-FBM relief. Multiplies
-/// the base relief so some continents read as flat steppe and others
-/// as rolling hills.
+/// Per-plate variation used as an additive bias on the climate
+/// `terrain_shape` channel (post-PR-3). Range preserved so existing
+/// plate rolls stay deterministic; `heightmap::plate_roughness_bias`
+/// maps this range to `ClimateConfig::plate_roughness_bias_range`.
 pub const ROUGHNESS_RANGE: (f32, f32) = (0.7, 1.4);
-
-/// Boundary-intensity threshold below which a plate boundary lifts
-/// ridges. `t = (d_b - d_a) / (d_b + d_a)` — `0` exactly on a
-/// boundary, `1` deep inside a plate.
-///
-/// Widened from 0.12 → 0.30 in the cliff-strip fix: a narrower band
-/// concentrates the ridge falloff into a short distance, making the
-/// peak slope at the band midpoint steep enough to trigger cliff
-/// exposure in a straight strip parallel to the plate boundary. A
-/// wider band spreads the rise out so the peak slope stays below
-/// `CLIFF_SLOPE_THRESH`. Trade-off: ridges are broader / less needle-
-/// sharp, which reads more like a real range silhouette anyway.
-pub const BOUNDARY_RIDGE_WIDTH: f32 = 0.30;
-
-/// Peak ridge height (blocks) at a continental–continental boundary.
-/// Lowered from 90 → 60 in the post-overhaul polish pass: the
-/// previous value combined with `+28` continental base elevation
-/// pegged `MAX_TERRAIN_Y` constantly, which clipped peaks into the
-/// flat-topped mesa silhouette.
-pub const RIDGE_PEAK_CC: f32 = 60.0;
-/// Peak ridge height at a continental–oceanic boundary (Andes-style
-/// coastal range).
-pub const RIDGE_PEAK_CO: f32 = 40.0;
-/// Peak ridge height at an oceanic–oceanic boundary (island arc
-/// archipelago).
-pub const RIDGE_PEAK_OO: f32 = 24.0;
 
 // ── Heightmap ─────────────────────────────────────────────────────────
 
 /// World-space Y at which the sea surface sits.
 pub const SEA_LEVEL: i32 = 62;
-/// Amplitude (blocks) of the domain-warp vector field applied to the
-/// height FBM input coordinates. Bigger → more dramatic finger-ridges
-/// and curved depressions.
-pub const WARP_AMPLITUDE: f32 = 40.0;
-/// Spatial period of the warp vector field.
-pub const WARP_PERIOD: f32 = 400.0;
 /// Slope (in blocks-per-block) above which a column is exposed as a
 /// cliff: surface block becomes `Stone` and the dirt sub-surface is
-/// skipped. Measured over an ±4-block stencil so small-scale FBM
+/// skipped. Measured over an ±4-block stencil so small-scale noise
 /// jitter doesn't register.
 pub const CLIFF_SLOPE_THRESH: f32 = 2.2;
-/// Minimum `h_pre` (world Y) for cliff exposure to apply at all.
-/// Reserved for genuinely tall terrain: any column with `h_pre <
-/// SEA_LEVEL + 28` gets its biome surface material regardless of
-/// slope, so coastal bluffs and low ridges never read as continuous
-/// stone walls. Cliff exposure then becomes a feature of high
-/// mountains only.
-pub const CLIFF_MIN_HEIGHT: i32 = SEA_LEVEL + 28;
 /// Hard upper cap on final terrain Y. Keeps tallest peaks inside the
 /// vertical chunk-load radius.
 pub const MAX_TERRAIN_Y: i32 = 140;
 
-// ── 3D density (PR A: surface-band 3D; PR B: unbounded) ─────────────
+// ── 3D density ──────────────────────────────────────────────────────
 
-/// Scale for the height-bias contribution to density: `bias = (h_target
-/// - wy) / DENSITY_FALLOFF`. Small values pin the surface tightly to
-/// the heightmap (almost no 3D fuzz); large values let the noise push
-/// the surface around by many blocks (dramatic overhangs and
-/// floating spurs). `4.0` is the de-stairs sweet spot — enough fuzz
-/// to break the chevron pattern, not so much that terrain feels
-/// chaotic.
-#[deprecated(note = "Replaced by WorldgenConfig::density (PR 2). Kept for reference; remove in PR 3 cleanup.")]
-pub const DENSITY_FALLOFF: f32 = 4.0;
-/// Amplitude of the 3D relief noise contribution to density. Compared
-/// against the unit-scale bias; `1.0` lets the noise push the
-/// surface by ~`DENSITY_FALLOFF` blocks at maximum.
-#[deprecated(note = "Replaced by WorldgenConfig::density.base_3d_amplitude (PR 2). Remove in PR 3 cleanup.")]
-pub const RELIEF_AMP: f32 = 1.0;
-/// Spatial period of the 3D relief noise's base octave. Smaller →
-/// bumpier surface; larger → smoother.
-pub const RELIEF_PERIOD: f32 = 32.0;
 /// Half-width of the band around `h_target` used by the
 /// `topmost_solid` helper that finds tree-trunk anchor points.
 /// `fill_chunk` no longer short-circuits density evaluation by this
-/// band (PR B evaluates 3D density at every voxel so overhangs can
+/// band (3D density is evaluated at every voxel so overhangs can
 /// appear anywhere); only the tree placer uses it as a search bound.
 pub const SURFACE_BAND: i32 = 16;
 /// Peak intensity of the cave SDF carve. The 3D density (bias +
