@@ -7,8 +7,24 @@
 //! "sliding y" section.
 
 use crate::voxel::block::Block;
-use crate::worldgen::plates::PlateLookup;
+use crate::worldgen::plates::{PlateId, PlateLookup};
 use crate::worldgen::Biome;
+
+/// Lean per-column snapshot for viz paint modes. Cheaper than
+/// `ColumnProbe` — populated with just the fields the per-face paint
+/// pass needs, so a 32×32 chunk's worth (1024 columns) can be
+/// precomputed in a few ms.
+#[derive(Debug, Clone, Copy)]
+pub struct PaintColumn {
+    pub biome: Biome,
+    /// Primary plate (nearest by Voronoi). Used by the PlateId paint mode.
+    pub plate_id: PlateId,
+    /// Pre-carve heightmap value. Used by HeightDelta = h_target - h_pre.
+    pub h_pre: f32,
+    pub h_target: i32,
+    /// `|∇h_pre|` proxy from the cliff-detection gradient. Used by Slope.
+    pub slope: f32,
+}
 
 /// Full pipeline trace for one (wx, wz) column.
 #[derive(Debug, Clone)]

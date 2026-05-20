@@ -26,7 +26,26 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.label("Paint:");
-            ui.selectable_value(&mut app.session.paint, crate::paint::PaintMode::Block, "Block");
+            let prev_paint = app.session.paint;
+            egui::ComboBox::from_id_source("paint_mode_combo")
+                .selected_text(prev_paint.label())
+                .show_ui(ui, |ui| {
+                    for &m in crate::paint::PaintMode::ALL {
+                        let resp = ui.selectable_label(prev_paint == m, m.label());
+                        resp.clone().on_hover_text(m.description());
+                        if resp.clicked() {
+                            app.session.paint = m;
+                        }
+                    }
+                });
+            if app.session.paint != prev_paint {
+                // Push the new mode into the streaming pipeline so the
+                // next batch of jobs picks it up, and bump the
+                // invalidator so the visible scene re-meshes.
+                app.session.world.set_paint_mode(app.session.paint);
+                app.session.invalidator.bump();
+                out.dirty = true;
+            }
 
             ui.separator();
 

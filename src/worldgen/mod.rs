@@ -517,6 +517,29 @@ impl Generator {
         }
     }
 
+    /// Lean per-column snapshot for viz paint passes — strictly the
+    /// fields the per-face paint hook reads, no aquifer / cave /
+    /// hydrology fields. Cheap enough to populate for all 1024 columns
+    /// in a chunk before meshing.
+    pub fn paint_column(&self, wx: i32, wz: i32) -> probe::PaintColumn {
+        let cfg = self.config.load();
+        let col = self.column_data(wx, wz);
+        let plate = crate::worldgen::plates::plate_at(self.seed, wx, wz);
+        let h_pre = self
+            .heightmap
+            .h_pre(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
+        let slope = self
+            .heightmap
+            .slope_at(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
+        probe::PaintColumn {
+            biome: col.biome,
+            plate_id: plate.a.id,
+            h_pre,
+            h_target: col.height,
+            slope,
+        }
+    }
+
     /// Return a single f32 scalar for the given `stage` at world column
     /// `(wx, wz)`. Used by the overlay map to colour each pixel.
     ///

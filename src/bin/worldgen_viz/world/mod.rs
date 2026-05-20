@@ -5,13 +5,14 @@ pub mod invalidate;
 pub mod mesher;
 pub mod stream;
 
+use crate::paint::{PaintContext, PaintMode};
 use crate::world::cache::{ChunkCache, ChunkMeshGpu};
 use crate::world::mesher::mesh_chunk;
 use crate::world::stream::{chunks_in_radius, StreamRadius};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use glam::Vec3;
 use oxium::voxel::chunk::DenseChunk;
-use oxium::voxel::coords::ChunkCoord;
+use oxium::voxel::coords::{ChunkCoord, CHUNK_DIM_U};
 use oxium::worldgen::Generator;
 use rayon::ThreadPool;
 use std::collections::HashSet;
@@ -46,6 +47,11 @@ pub struct World {
     rx: Receiver<ChunkJobResult>,
     in_flight: HashSet<ChunkCoord>,
     max_in_flight: usize,
+    /// Active paint mode at the time each mesh job is spawned. Mesh
+    /// jobs already in flight when this changes complete against the
+    /// old mode; callers should `wipe()` after changing it so visible
+    /// chunks get re-requested under the new mode.
+    paint_mode: PaintMode,
 }
 
 impl World {
@@ -67,7 +73,16 @@ impl World {
             rx,
             in_flight: HashSet::new(),
             max_in_flight: max_in_flight(),
+            paint_mode: PaintMode::default(),
         }
+    }
+
+    pub fn set_paint_mode(&mut self, mode: PaintMode) {
+        self.paint_mode = mode;
+    }
+
+    pub fn paint_mode(&self) -> PaintMode {
+        self.paint_mode
     }
 
     pub fn radius(&self) -> StreamRadius {
@@ -95,6 +110,10 @@ impl World {
             self.in_flight.insert(coord);
             let tx = self.tx.clone();
             let generator = self.generator.clone();
+            let paint_mode = self.paint_mode;
+            let dim = CHUNK_DIM_U as i32;
+            let origin_x = coord.0.x * dim;
+            let origin_z = coord.0.z * dim;
             // FIXME(PR 7): wrap the body in std::panic::catch_unwind. Today a
             // panic inside fill_chunk or mesh_chunk leaves `coord` in `in_flight`
             // forever — silent data loss with no diagnostic. A failure variant
@@ -102,7 +121,8 @@ impl World {
             self.pool.spawn(move || {
                 let mut chunk = DenseChunk::empty();
                 generator.fill_chunk(coord, &mut chunk);
-                let mesh = mesh_chunk(coord, &chunk);
+                let paint = PaintContext::build(paint_mode, &generator, origin_x, origin_z);
+                let mesh = mesh_chunk(coord, &chunk, &paint);
                 let gpu = ChunkMeshGpu {
                     vertices: Arc::new(mesh.vertices),
                     indices: Arc::new(mesh.indices),
