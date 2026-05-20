@@ -35,6 +35,11 @@ ron = "0.8"
 notify-debouncer-mini = "0.4"
 arc-swap = "1"
 
+# Visualizer UI — used by src/bin/worldgen_viz only.
+egui = "0.30"
+egui-wgpu = "0.30"
+egui-winit = "0.30"
+
 # Bit packing
 bitvec = "1"
 
@@ -76,3 +81,7 @@ split-debuginfo = "packed"
 
 [profile.dev]
 opt-level = 1   # debug builds are slow without this for graphics work
+
+[[bin]]
+name = "worldgen_viz"
+path = "src/bin/worldgen_viz/main.rs"
