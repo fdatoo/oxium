@@ -209,6 +209,58 @@ impl DensityNoise {
         bias + noise
     }
 
+    /// New MC-style composition. Replaces `evaluate` once all call
+    /// sites migrate (task 10). Until then, both coexist.
+    ///
+    /// Formula:
+    ///   y_grad     = lerp from +amp at y_min → −amp at y_max
+    ///   offset     = (h_target placement) shifts surface to h_target
+    ///   depth      = y_grad + offset
+    ///   shaped     = (depth + jagged) * factor
+    ///   shaped'    = quarter_negative(shaped)   // soften above surface
+    ///   density    = scale * shaped' + base_3d_noise
+    ///   density    = slide(density, y)          // top→air, bottom→solid
+    pub fn evaluate_v2(
+        &self,
+        h_target: f32,
+        wx: i32,
+        wy: i32,
+        wz: i32,
+        cfg: &crate::worldgen::config::DensityConfig,
+    ) -> f32 {
+        // y_gradient: +amplitude at y_min, -amplitude at y_max,
+        // linear in between.
+        let t = (wy - cfg.y_min) as f32 / (cfg.y_max - cfg.y_min) as f32;
+        let y_gradient = cfg.y_gradient_amplitude * (1.0 - 2.0 * t);
+
+        // Offset: shifts y_gradient so depth=0 at h_target.
+        // PR 2: derive from h_target (preserves current terrain shape).
+        // PR 3 will replace with a spline of (continentalness, erosion, ridges).
+        let t_at_target = (h_target - cfg.y_min as f32) / (cfg.y_max - cfg.y_min) as f32;
+        let offset = cfg.y_gradient_amplitude * (2.0 * t_at_target - 1.0);
+
+        let depth = y_gradient + offset;
+        // PR 3 introduces real jaggedness; for PR 2 it's zero.
+        let jagged = 0.0;
+        let factor = cfg.factor;
+
+        // Quarter-negative softening: positive (below surface) keeps
+        // full magnitude; negative (above surface) scales by
+        // `above_surface_softening`. Net effect: solid below grows fast,
+        // air above grows slowly, so 3D noise can carve overhangs
+        // without piercing solid ground.
+        let shaped_raw = (depth + jagged) * factor;
+        let shaped = if shaped_raw > 0.0 {
+            shaped_raw
+        } else {
+            shaped_raw * cfg.above_surface_softening
+        };
+
+        let base_3d = self.evaluate_base_3d(h_target, wx, wy, wz, cfg);
+        let pre_slide = cfg.composition_scale * shaped + base_3d;
+        slide(pre_slide, wy, cfg)
+    }
+
     /// Sample the anisotropic base 3D noise. Y is scaled by
     /// `cfg.base_3d_y_scale` before sampling — values < 1 stretch
     /// vertical features (make them taller than wide). Used by the
@@ -249,9 +301,80 @@ impl DensityNoise {
     }
 }
 
+/// Apply top and bottom slides to a density value at world Y.
+/// Within `slide_top_blocks` of `y_max`, lerps toward
+/// `slide_top_target`. Within `slide_bottom_blocks` of `y_min`,
+/// lerps toward `slide_bottom_target`. Free helper, no state.
+pub fn slide(density: f32, wy: i32, cfg: &crate::worldgen::config::DensityConfig) -> f32 {
+    // Top: factor goes 0 (no pull) → 1 (full pull) over
+    // (y_max - slide_top_blocks .. y_max).
+    let top_start = cfg.y_max - cfg.slide_top_blocks;
+    let top_f = ((wy - top_start) as f32 / cfg.slide_top_blocks.max(1) as f32).clamp(0.0, 1.0);
+    let after_top = density + (cfg.slide_top_target - density) * top_f;
+
+    // Bottom: factor goes 1 → 0 over (y_min .. y_min + slide_bottom_blocks).
+    let bot_end = cfg.y_min + cfg.slide_bottom_blocks;
+    let bot_f =
+        ((bot_end - wy) as f32 / cfg.slide_bottom_blocks.max(1) as f32).clamp(0.0, 1.0);
+    after_top + (cfg.slide_bottom_target - after_top) * bot_f
+}
+
 #[cfg(test)]
 mod tests_anisotropy {
     use super::*;
+
+    /// At y = h_target the density should be close to 0 (the surface).
+    #[test]
+    fn new_evaluator_density_at_surface_is_near_zero() {
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let d = DensityNoise::new(42);
+        // Average over a small grid to wash out noise.
+        let mut sum = 0.0_f32;
+        let mut n = 0;
+        for wx in 0..16 {
+            for wz in 0..16 {
+                sum += d.evaluate_v2(80.0, wx, 80, wz, &cfg.density);
+                n += 1;
+            }
+        }
+        let avg = sum / n as f32;
+        assert!(
+            avg.abs() < 1.5,
+            "average density at surface should be near 0 (got {avg})"
+        );
+    }
+
+    #[test]
+    fn new_evaluator_density_well_below_is_strongly_positive() {
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let d = DensityNoise::new(42);
+        let v = d.evaluate_v2(80.0, 0, 30, 0, &cfg.density);
+        assert!(v > 1.0, "density 50 below surface should be > 1, got {v}");
+    }
+
+    #[test]
+    fn new_evaluator_density_well_above_is_negative() {
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let d = DensityNoise::new(42);
+        let v = d.evaluate_v2(80.0, 0, 130, 0, &cfg.density);
+        assert!(v < -0.05, "density 50 above surface should be < -0.05, got {v}");
+    }
+
+    #[test]
+    fn new_evaluator_density_at_world_top_pulled_toward_air() {
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let d = DensityNoise::new(42);
+        let v = d.evaluate_v2(80.0, 0, 140, 0, &cfg.density);
+        assert!((v - (-0.078125)).abs() < 0.5, "at y_max density should be near slide_top_target, got {v}");
+    }
+
+    #[test]
+    fn new_evaluator_density_at_world_bottom_pulled_toward_solid() {
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let d = DensityNoise::new(42);
+        let v = d.evaluate_v2(80.0, 0, -120, 0, &cfg.density);
+        assert!((v - 0.1171875).abs() < 0.5, "at y_min density should be near slide_bottom_target, got {v}");
+    }
 
     /// Anisotropic noise: a Y-step should change the noise value
     /// less than an equivalent XZ-step (vertical features are
