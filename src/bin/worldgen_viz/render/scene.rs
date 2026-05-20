@@ -224,6 +224,34 @@ impl SceneRenderer {
             .filter(|c| chunk_in_frustum(self.last_view_proj, **c))
             .count()
     }
+
+    /// Every chunk coord on the GPU, sorted so the streaming pipeline
+    /// re-fills what the user is *looking at* first. Order:
+    ///   1. chunks inside the camera frustum, nearest first
+    ///   2. chunks outside the frustum, nearest first
+    /// Used by the per-frame `request_chunks` call after a wipe so
+    /// the `max_in_flight` budget goes to visible chunks before the
+    /// off-screen ones the user can't see anyway.
+    pub fn chunk_coords_visible_first(&self, camera_pos: glam::Vec3) -> Vec<ChunkCoord> {
+        use oxium::voxel::coords::CHUNK_DIM_U;
+        let dim = CHUNK_DIM_U as f32;
+        let mut items: Vec<(ChunkCoord, bool, f32)> = self
+            .chunks
+            .keys()
+            .map(|&c| {
+                let center = c.0.as_vec3() * dim + glam::Vec3::splat(dim * 0.5);
+                let dist_sq = (center - camera_pos).length_squared();
+                let visible = chunk_in_frustum(self.last_view_proj, c);
+                (c, visible, dist_sq)
+            })
+            .collect();
+        items.sort_by(|a, b| {
+            // visible (true) sorts before not-visible (false), then by distance ascending.
+            b.1.cmp(&a.1)
+                .then(a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+        });
+        items.into_iter().map(|(c, _, _)| c).collect()
+    }
 }
 
 /// CPU-side frustum culling for a 32³ chunk. Projects all 8 AABB

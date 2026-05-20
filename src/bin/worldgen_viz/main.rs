@@ -259,15 +259,14 @@ impl ApplicationHandler for VizApp {
                     self.state.session.probe.refresh(&self.state.session.generator);
                 }
                 // Every frame: re-request every chunk currently on the
-                // GPU. Once they're cached the call is a no-op; right
-                // after a wipe, this is the only path that actually
-                // refills chunks outside the streaming radius (e.g.
-                // orbit cam zoomed out, or chunks meshed at earlier
-                // camera positions). max_in_flight bounds how many
-                // spawn per frame — the rest queue for next frame.
-                let visible = scene.chunk_coords();
-                self.state.session.world.request_chunks(&visible);
+                // GPU, sorted visible-first by camera distance. Once
+                // chunks are cached the call is a no-op; right after a
+                // wipe, max_in_flight spends its budget on what the
+                // user is actually looking at before getting to the
+                // off-screen chunks they can't see anyway.
                 let cam_pos = self.state.session.camera().position();
+                let visible = scene.chunk_coords_visible_first(cam_pos);
+                self.state.session.world.request_chunks(&visible);
                 self.state.session.world.request_around(cam_pos);
                 let landed = self.state.session.world.drain_results();
                 for (coord, mesh) in landed {
