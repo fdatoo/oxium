@@ -3,6 +3,7 @@
 mod app;
 mod camera;
 mod layout;
+mod overlays;
 mod paint;
 mod render;
 mod session;
