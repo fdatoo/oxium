@@ -197,12 +197,12 @@ impl ApplicationHandler for App {
                             }
                         });
                     });
-                    egui::CentralPanel::default().show(ctx, |ui| {
-                        ui.label(format!(
-                            "yaw {:.2} pitch {:.2} dist {:.0} | dirty: {}",
-                            cam_info.0, cam_info.1, cam_info.2, dirty_local
-                        ));
-                    });
+                    // Transparent central panel so the 3D scene shows
+                    // through. The default frame draws an opaque
+                    // background that would cover the mesh viewport.
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::none())
+                        .show(ctx, |_ui| {});
                 });
                 self.dirty = dirty_local || force_regen;
                 self.auto_regen = auto_regen_local;
