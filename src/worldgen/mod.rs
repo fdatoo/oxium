@@ -135,9 +135,11 @@ pub struct Generator {
     /// init from the bundled config's `BiomesConfig::entries`.
     /// Hot-reloading the biome table requires a Generator restart.
     biome_list: std::sync::Arc<climate::ParameterList>,
-    /// PR 6: surface rules DSL. Rebuilt from `cfg.surface` on every
-    /// chunk fill (cheap — just an `Arc::clone` of the tree).
-    surface_system: std::sync::Arc<surface::SurfaceSystem>,
+    // PR 6: surface rules are read straight from the live ConfigHolder
+    // (`cfg.surface`) at chunk-fill time so config swaps from the viz /
+    // file watcher take effect on the next regen. There used to be a
+    // cached `surface_system` field here, but it baked the rules at
+    // construction and silently ignored every config swap.
     /// PR 7: MC-style aquifer. 16×12×16 jittered cell grid with
     /// per-cell `y_top` + fluid kind (Water/Lava). Floods caves
     /// and replaces the primitive ocean/lake-rim filler.
@@ -236,10 +238,6 @@ impl Generator {
         let biome_list = std::sync::Arc::new(climate::ParameterList::new(
             bundled.biomes.entries.clone(),
         ));
-        // Build the surface rules system from the bundled rules.
-        let surface_system = std::sync::Arc::new(surface::SurfaceSystem::new(
-            bundled.surface.clone(),
-        ));
         // PR 7: aquifer system built from the bundled aquifer
         // config. Hot-reloading the aquifer config (cell sizes,
         // probabilities) requires a Generator restart; only the
@@ -258,7 +256,6 @@ impl Generator {
             wormhole_noise,
             weirdness_noise,
             biome_list,
-            surface_system,
             aquifer,
             noise_carvers,
             seed,
@@ -869,7 +866,7 @@ impl Generator {
                 cfg: &cfg,
                 sea_level: SEA_LEVEL,
             };
-            self.surface_system.surface_block(&surf_ctx)
+            cfg.surface.apply(&surf_ctx).unwrap_or(Block::Stone)
         };
 
         probe::DensityBreakdown {
@@ -1145,7 +1142,7 @@ impl Generator {
                             cfg: &cfg,
                             sea_level: SEA_LEVEL,
                         };
-                        self.surface_system.surface_block(&surf_ctx)
+                        cfg.surface.apply(&surf_ctx).unwrap_or(Block::Stone)
                     };
                     out.set(local, block);
                 }
