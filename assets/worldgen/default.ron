@@ -443,18 +443,24 @@
         // about 30 shafts per 32×32 chunk patch on average.
         // Raise → fewer; lower → more.
         surface_entrance_threshold: 0.35,
-        // Intensity 8 — well above the spaghetti / cheese signed
-        // densities (clamped to [-1, 1]) so a fired shaft can punch
-        // through positive raw_density at depth.
-        surface_entrance_intensity: 8.0,
-        // Extended down to Y=10 so shafts reach the depths where
-        // the noise cave network operates (raw_density crosses the
-        // underground threshold around Y ≈ 30 in typical terrain).
-        // Top stays at sea level + 20 so shafts emerge naturally
-        // through hills and ocean floors alike.
-        surface_entrance_y_min: 10,
+        // Intensity 3.0: strong enough to punch through the surface
+        // (raw_density near zero there) but mild enough that, with
+        // the linear depth taper applied in `surface_entrance_y_fade`,
+        // by the time the shaft is well underground the contribution
+        // is small. Any persistent solid rock below the cave layer
+        // overrides it, so shafts don't continue indefinitely into
+        // bedrock past the cave they connect to.
+        surface_entrance_intensity: 3.0,
+        // Active range extends down past the surface, well into
+        // the depths where the spaghetti tube band operates
+        // (typically Y in [-100, -10] for the configured gradient).
+        // The depth taper makes the bottom of this range carry
+        // almost no carving — by the time the shaft is at the
+        // tube band, it's just a hint of negative density that
+        // existing tubes can extend into the surface.
+        surface_entrance_y_min: -20,
         surface_entrance_y_max: 82,
-        surface_entrance_fade_blocks: 4,
+        surface_entrance_fade_blocks: 6,
     ),
 
     // ── Aquifer system (PR 7) ────────────────────────────────────────

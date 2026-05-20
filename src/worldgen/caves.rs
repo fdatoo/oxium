@@ -778,13 +778,13 @@ pub fn surface_entrance_contribution(
         wy as f64 * cfg.surface_entrance_y_scale as f64,
         wz as f64 * cfg.surface_entrance_xz_scale as f64,
     ]) as f32;
-    // Smooth ramp above threshold so the entrance edges aren't a
-    // hard cliff.
+    // Smooth ramp above threshold — a wider band (0.10) gives the
+    // shaft a softer lateral edge instead of a stamped-cookie hole.
     let above = v - cfg.surface_entrance_threshold;
     if above <= 0.0 {
         return 1.0;
     }
-    let t = (above / 0.05).clamp(0.0, 1.0);
+    let t = (above / 0.10).clamp(0.0, 1.0);
     let depth = t * t * (3.0 - 2.0 * t); // smoothstep
     // Return a strongly negative signed value; magnitude scaled by
     // both the smoothstep and the Y-band fade so edges are soft.
@@ -795,10 +795,25 @@ fn surface_entrance_y_fade(wy: i32, cfg: &CaveConfig) -> f32 {
     if wy < cfg.surface_entrance_y_min || wy > cfg.surface_entrance_y_max {
         return 0.0;
     }
-    let from_bottom = (wy - cfg.surface_entrance_y_min) as f32;
+    // Soft top edge: smoothstep up from 0 at y_max to 1 a few
+    // blocks below it, so the surface opening fades in rather
+    // than appearing as a hard cliff.
     let from_top = (cfg.surface_entrance_y_max - wy) as f32;
     let fade_w = cfg.surface_entrance_fade_blocks.max(1) as f32;
-    (from_bottom.min(from_top) / fade_w).clamp(0.0, 1.0)
+    let top_fade = {
+        let t = (from_top / fade_w).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    // Bottom taper: linear ramp from 1 at y_max down to 0 at
+    // y_min. Multiplied by the base intensity, this means the
+    // shaft is strong near the surface and weak at depth — by
+    // the time it reaches the underground cave network, the
+    // carving contribution is small enough that any solid rock
+    // below the cave overrides it (no continuing-into-bedrock).
+    let band_height = (cfg.surface_entrance_y_max - cfg.surface_entrance_y_min).max(1) as f32;
+    let from_bottom = (wy - cfg.surface_entrance_y_min) as f32;
+    let depth_taper = (from_bottom / band_height).clamp(0.0, 1.0);
+    top_fade * depth_taper
 }
 
 /// Signed-density cheese contribution.
