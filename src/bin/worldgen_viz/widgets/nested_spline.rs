@@ -34,7 +34,7 @@ pub fn show(ui: &mut Ui, spline: &mut NestedSpline, depth: usize) -> bool {
     let axis = AXIS_NAMES.get(depth).copied().unwrap_or("(beyond inputs)");
 
     if matches!(spline, NestedSpline::Multipoint(_)) {
-        draw_curve(ui, spline);
+        dirty |= draw_and_drag_curve(ui, spline);
     }
 
     match spline {
@@ -167,18 +167,25 @@ pub fn show(ui: &mut Ui, spline: &mut NestedSpline, depth: usize) -> bool {
     dirty
 }
 
-/// Draw a 1D curve plot of `spline.evaluate(x, 0, 0)` over the input
-/// range. Read-only — the editor below the plot does the mutation.
-/// Knot positions overlay as yellow dots so you can see where each
-/// outer knot lands on the curve.
-fn draw_curve(ui: &mut Ui, spline: &NestedSpline) {
+/// Draw the 1D curve plot AND let the user drag the knot markers.
+/// Returns true if a drag mutated the spline this frame.
+///
+/// Horizontal drag → `knot.loc`. Vertical drag → shifts `knot.val` by
+/// the implied delta: if the sub-spline is a Constant, the constant
+/// moves; if it's a sub-Multipoint, every inner Constant moves by the
+/// same delta, preserving the relative shape of the sub-curve. That's
+/// the only sensible interpretation of "drag this region up by 0.3"
+/// when the knot's value isn't a scalar.
+fn draw_and_drag_curve(ui: &mut Ui, spline: &mut NestedSpline) -> bool {
     let width = ui.available_width().min(280.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 64.0), Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(width, 64.0),
+        Sense::click_and_drag(),
+    );
     let painter = ui.painter_at(rect);
 
     painter.rect_filled(rect, 4.0, Color32::from_rgb(20, 20, 26));
 
-    // y=0 reference line.
     let y0 = rect.min.y + 0.5 * rect.height();
     painter.line_segment(
         [Pos2::new(rect.min.x, y0), Pos2::new(rect.max.x, y0)],
@@ -193,7 +200,16 @@ fn draw_curve(ui: &mut Ui, spline: &NestedSpline) {
         let t = (x - INPUT_RANGE.0) / (INPUT_RANGE.1 - INPUT_RANGE.0);
         rect.min.x + t * rect.width()
     };
+    let x_to_input = |px: f32| -> f32 {
+        let t = (px - rect.min.x) / rect.width();
+        INPUT_RANGE.0 + t * (INPUT_RANGE.1 - INPUT_RANGE.0)
+    };
+    let y_to_value = |py: f32| -> f32 {
+        let t = (rect.max.y - py) / rect.height();
+        VALUE_RANGE.0 + t * (VALUE_RANGE.1 - VALUE_RANGE.0)
+    };
 
+    // Curve trace.
     let n = 80;
     let mut prev: Option<Pos2> = None;
     for i in 0..=n {
@@ -207,15 +223,96 @@ fn draw_curve(ui: &mut Ui, spline: &NestedSpline) {
         prev = Some(p);
     }
 
-    // Knot markers: outer knot positions on the curve, drawn at the
-    // sub-spline's value at (0, 0, 0) so the marker tracks the curve.
+    // Drag interaction — only meaningful for Multipoint.
+    let mut dirty = false;
+    let drag_id = response.id;
     if let NestedSpline::Multipoint(knots) = spline {
-        for knot in knots {
-            let x = knot.loc.clamp(INPUT_RANGE.0, INPUT_RANGE.1);
-            let v = knot.val.evaluate(0.0, 0.0, 0.0);
-            let p = Pos2::new(input_to_x(x), value_to_y(v));
-            painter.circle_filled(p, 3.5, Color32::from_rgb(255, 220, 70));
-            painter.circle_stroke(p, 3.5, Stroke::new(1.0, Color32::from_rgb(120, 100, 30)));
+        // Find the knot closest to the pointer (within 12 px).
+        let hovered_idx = response.hover_pos().and_then(|hp| {
+            let mut best: Option<(usize, f32)> = None;
+            for (i, knot) in knots.iter().enumerate() {
+                let x = input_to_x(knot.loc.clamp(INPUT_RANGE.0, INPUT_RANGE.1));
+                let y = value_to_y(knot.val.evaluate(0.0, 0.0, 0.0));
+                let d = (hp - Pos2::new(x, y)).length();
+                if d <= 12.0 && best.map_or(true, |(_, bd)| d < bd) {
+                    best = Some((i, d));
+                }
+            }
+            best.map(|(i, _)| i)
+        });
+
+        // Start drag → stash the knot index in egui memory.
+        if response.drag_started() {
+            if let Some(i) = hovered_idx {
+                ui.ctx().memory_mut(|m| m.data.insert_temp(drag_id, i));
+            }
+        }
+
+        // During drag → update loc + shift val.
+        if response.dragged() {
+            let stashed: Option<usize> =
+                ui.ctx().memory(|m| m.data.get_temp::<usize>(drag_id));
+            if let (Some(idx), Some(pos)) = (stashed, response.interact_pointer_pos()) {
+                if idx < knots.len() {
+                    let new_loc = x_to_input(pos.x).clamp(INPUT_RANGE.0, INPUT_RANGE.1);
+                    let new_val = y_to_value(pos.y).clamp(VALUE_RANGE.0, VALUE_RANGE.1);
+                    let current_val = knots[idx].val.evaluate(0.0, 0.0, 0.0);
+                    let delta = new_val - current_val;
+                    if (knots[idx].loc - new_loc).abs() > 1e-6 || delta.abs() > 1e-6 {
+                        knots[idx].loc = new_loc;
+                        offset_nested(&mut knots[idx].val, delta);
+                        dirty = true;
+                    }
+                }
+            }
+        }
+
+        // End drag → resort by loc so the spline stays well-ordered;
+        // clear the stashed index.
+        if response.drag_stopped() {
+            knots.sort_by(|a, b| a.loc.partial_cmp(&b.loc).unwrap_or(std::cmp::Ordering::Equal));
+            ui.ctx().memory_mut(|m| m.data.remove::<usize>(drag_id));
+        }
+
+        // Knot markers — bright hover, even brighter while dragging.
+        let dragging_idx: Option<usize> = if response.dragged() {
+            ui.ctx().memory(|m| m.data.get_temp::<usize>(drag_id))
+        } else {
+            None
+        };
+        for (i, knot) in knots.iter().enumerate() {
+            let x = input_to_x(knot.loc.clamp(INPUT_RANGE.0, INPUT_RANGE.1));
+            let y = value_to_y(knot.val.evaluate(0.0, 0.0, 0.0));
+            let p = Pos2::new(x, y);
+            let (fill, ring, radius) = if dragging_idx == Some(i) {
+                (Color32::from_rgb(255, 255, 120), Color32::from_rgb(200, 160, 30), 5.0)
+            } else if hovered_idx == Some(i) {
+                (Color32::from_rgb(255, 240, 100), Color32::from_rgb(160, 130, 40), 4.5)
+            } else {
+                (Color32::from_rgb(255, 220, 70), Color32::from_rgb(120, 100, 30), 3.5)
+            };
+            painter.circle_filled(p, radius, fill);
+            painter.circle_stroke(p, radius, Stroke::new(1.0, ring));
+        }
+    }
+
+    if response.hovered() && !response.dragged() {
+        response.clone().on_hover_text("Drag a yellow knot to move it on (loc, val).");
+    }
+
+    dirty
+}
+
+/// Recursively offset every leaf Constant in `spline` by `delta`.
+/// Preserves the shape of any sub-Multipoint by lifting all its
+/// leaves the same amount.
+fn offset_nested(spline: &mut NestedSpline, delta: f32) {
+    match spline {
+        NestedSpline::Constant(v) => *v += delta,
+        NestedSpline::Multipoint(knots) => {
+            for knot in knots {
+                offset_nested(&mut knot.val, delta);
+            }
         }
     }
 }
