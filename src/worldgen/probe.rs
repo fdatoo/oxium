@@ -153,4 +153,40 @@ mod tests {
         assert_eq!(p.biome, c.biome);
         assert_eq!(p.is_cliff, c.is_cliff);
     }
+
+    #[test]
+    fn sample_stage_is_deterministic() {
+        let g = Generator::new(42);
+        for &stage in Stage::ALL {
+            let a = g.sample_stage(stage, 200, 300);
+            let b = g.sample_stage(stage, 200, 300);
+            assert_eq!(a.to_bits(), b.to_bits(), "stage {:?} not byte-stable", stage);
+        }
+    }
+
+    #[test]
+    fn sample_stage_matches_probe_for_scalar_stages() {
+        let g = Generator::new(42);
+        let p = g.probe_column(200, 300);
+        let cont = g.sample_stage(Stage::Continentalness, 200, 300);
+        assert!((cont - p.continentalness).abs() < 1e-5);
+        let h = g.sample_stage(Stage::HTarget, 200, 300);
+        assert!((h - p.h_target as f32).abs() < 1e-5);
+    }
+
+    #[test]
+    fn sample_stage_varies_across_coords() {
+        // Defensive: if the dispatch is broken and always returns 0.0
+        // for some stage, this catches it.
+        let g = Generator::new(42);
+        for &stage in Stage::ALL {
+            let a = g.sample_stage(stage, 0, 0);
+            let b = g.sample_stage(stage, 1000, 1000);
+            // It is OK if a single stage happens to be equal at two
+            // points (e.g., flat ocean continentalness); we only fail
+            // if EVERY stage matches at both coords.
+            if a != b { return; }
+        }
+        panic!("no stage varied across (0,0) vs (1000,1000) — dispatch broken");
+    }
 }

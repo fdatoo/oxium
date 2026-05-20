@@ -517,6 +517,104 @@ impl Generator {
         }
     }
 
+    /// Return a single f32 scalar for the given `stage` at world column
+    /// `(wx, wz)`. Used by the overlay map to colour each pixel.
+    ///
+    /// Each arm calls the *minimum* code needed for that stage — no arm
+    /// routes through `probe_column` (which does the full pipeline).
+    pub fn sample_stage(&self, stage: probe::Stage, wx: i32, wz: i32) -> f32 {
+        use probe::Stage;
+        match stage {
+            Stage::Continentalness => {
+                let plate = crate::worldgen::plates::plate_at(self.seed, wx, wz);
+                crate::worldgen::heightmap::signed_continentalness(&plate)
+            }
+            Stage::PlateId => {
+                let plate = crate::worldgen::plates::plate_at(self.seed, wx, wz);
+                // Hash the plate cell coords against the world seed for a
+                // stable per-plate hue that is independent of spatial
+                // position within the plate.
+                // `plate.a` is the closest (primary) plate at this column.
+                crate::worldgen::hash::mix_unit(
+                    self.seed,
+                    &[plate.a.id.cell_x, plate.a.id.cell_z],
+                )
+            }
+            Stage::Temperature => {
+                let xz = [wx as f64, wz as f64];
+                self.temperature_map.get(xz) as f32
+            }
+            Stage::Humidity => {
+                let xz = [wx as f64, wz as f64];
+                self.humidity_map.get(xz) as f32
+            }
+            Stage::Desertness => {
+                self.column_data(wx, wz).desertness
+            }
+            Stage::Weirdness => {
+                let cfg = self.config.load();
+                let xz = [wx as f64, wz as f64];
+                (self.weirdness_noise.get(xz) as f32) * cfg.biomes.weirdness_amplitude
+            }
+            Stage::HPre => {
+                let cfg = self.config.load();
+                self.heightmap
+                    .h_pre(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density)
+            }
+            Stage::ValleyCarve => {
+                let coord = region::RegionCoord::containing(wx, wz);
+                let chunk_origin = ChunkCoord(glam::IVec3::new(
+                    coord.x * (FINE_REGION_SIZE / 32),
+                    0,
+                    coord.z * (FINE_REGION_SIZE / 32),
+                ));
+                let regions = self.gather_chunk_regions(chunk_origin);
+                regions.valley_carve(wx, wz, self.seed)
+            }
+            Stage::HTarget => {
+                self.column_data(wx, wz).height as f32
+            }
+            Stage::FlowAccum => {
+                let coord = region::RegionCoord::containing(wx, wz);
+                let fine_region = region::get_fine(&self.fine_cache, coord, || {
+                    self.build_fine_region(coord)
+                });
+                let (ox, oz) = coord.origin();
+                let lx = wx - ox;
+                let lz = wz - oz;
+                use crate::worldgen::tuning::FINE_CELL;
+                let ix = (lx / FINE_CELL).clamp(0, FINE_REGION_SIZE / FINE_CELL - 1);
+                let iz = (lz / FINE_CELL).clamp(0, FINE_REGION_SIZE / FINE_CELL - 1);
+                let idx = region::FineRegion::cell_index(ix, iz);
+                fine_region.flow_acc[idx] as f32
+            }
+            Stage::BiomeId => {
+                let biome = self.column_data(wx, wz).biome;
+                // Biome has no #[repr], so we use a hand-written mapping that
+                // is stable across all variants.
+                match biome {
+                    Biome::Tundra      => 0.0,
+                    Biome::SnowyForest => 1.0,
+                    Biome::Plains      => 2.0,
+                    Biome::Forest      => 3.0,
+                    Biome::Desert      => 4.0,
+                    Biome::Tropical    => 5.0,
+                }
+            }
+            Stage::AquiferY => {
+                let acell = self.aquifer.cell_for_column(wx, wz);
+                acell.y_top as f32
+            }
+            Stage::AquiferSubstance => {
+                let acell = self.aquifer.cell_for_column(wx, wz);
+                match acell.fluid {
+                    crate::voxel::block::Block::Lava => 1.0,
+                    _ => 0.0,
+                }
+            }
+        }
+    }
+
     /// Return the world seed this generator was constructed with.
     pub fn seed(&self) -> u64 {
         self.seed
