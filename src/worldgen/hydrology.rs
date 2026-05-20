@@ -107,6 +107,15 @@ struct Grid {
     /// Trunk injection (in fine-cell units) added to starting
     /// accumulation. Only the fine pass uses this.
     trunk_injection: Vec<u32>,
+    /// PR 1: per-cell inbound direction from a cached neighbour at
+    /// the corresponding window-edge cell. `DIR_NONE` (8) = no hint.
+    /// When set, `compute_flow` forbids picking the OPPOSITE direction
+    /// (which would form a 2-cycle across the seam).
+    inbound_dir: Vec<u8>,
+    /// PR 1: per-cell additional starting accumulation supplied by a
+    /// cached neighbour. Added to `compute_acc`'s `1 + trunk_injection`
+    /// initial value so a fat river keeps its magnitude across seams.
+    inbound_acc: Vec<u32>,
 }
 
 impl Grid {
@@ -203,9 +212,21 @@ impl Grid {
             for ix in 0..n {
                 let idx = self.idx(ix, iz);
                 let h_here = self.h_fill[idx];
+                // PR 1: if a neighbour stitch marked this cell with an
+                // inbound direction, forbid picking the opposite (would
+                // form a 2-cycle across the seam). Inbound dir `d` →
+                // forbidden self-dir is `(d + 4) & 7`.
+                let forbidden_dir = if self.inbound_dir[idx] != DIR_NONE {
+                    (self.inbound_dir[idx] + 4) & 7
+                } else {
+                    DIR_NONE
+                };
                 let mut best_slope = 0.0_f32;
                 let mut best_dir = DIR_NONE;
                 for d in 0..8 {
+                    if d as u8 == forbidden_dir {
+                        continue;
+                    }
                     let (dx, dz) = DIR_OFFSETS[d];
                     let nx = ix as i32 + dx;
                     let nz = iz as i32 + dz;
@@ -234,9 +255,13 @@ impl Grid {
     /// drainage that reaches `c` (in fine cells).
     fn compute_acc(&mut self) {
         let n = self.n;
-        // Initialise: each cell contributes 1 + injection.
+        // Initialise: each cell contributes 1 + injection + (PR 1)
+        // any inbound accumulation donated by a cached neighbour at
+        // a stitched boundary cell.
         for i in 0..(n * n) {
-            self.flow_acc[i] = 1 + self.trunk_injection[i];
+            self.flow_acc[i] = (1u32)
+                .saturating_add(self.trunk_injection[i])
+                .saturating_add(self.inbound_acc[i]);
         }
         // Process cells highest-first so a downstream donation
         // doesn't get stomped by a later upstream donation.
@@ -284,6 +309,8 @@ pub fn build_macro_region(
         flow_dir: vec![DIR_NONE; n * n],
         flow_acc: vec![0u32; n * n],
         trunk_injection: vec![0u32; n * n],
+        inbound_dir: vec![DIR_NONE; n * n],
+        inbound_acc: vec![0u32; n * n],
     };
 
     // Sample h_pre at the cell centers of the macro window.
@@ -397,8 +424,8 @@ pub fn build_fine_hydro(
     fine_cache: &crate::worldgen::region::FineCache,
     region: &mut FineRegion,
 ) {
-    // PR 1: gather neighbour edges. Task 3 consumes them.
-    let _neighbours = gather_neighbour_edges(coord, fine_cache);
+    // PR 1: gather neighbour edges (peek-only, no build).
+    let neighbours = gather_neighbour_edges(coord, fine_cache);
     let halo = FINE_HALO_REGIONS;
     let inner = FINE_CELLS_PER_REGION;
     let n = ((1 + 2 * halo) * inner) as usize;
@@ -412,6 +439,8 @@ pub fn build_fine_hydro(
         flow_dir: vec![DIR_NONE; n * n],
         flow_acc: vec![0u32; n * n],
         trunk_injection: vec![0u32; n * n],
+        inbound_dir: vec![DIR_NONE; n * n],
+        inbound_acc: vec![0u32; n * n],
     };
 
     // Sample h_pre at fine cell centers.
@@ -490,6 +519,77 @@ pub fn build_fine_hydro(
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // PR 1: stitch neighbour-edge inbound hints into this region's
+    // interior-boundary cells. Window-grid layout: this region's
+    // interior occupies indices in `[halo_cells, halo_cells + inner)`
+    // on both axes, where `halo_cells = halo * inner`. The neighbour
+    // regions' INTERIOR cells (size = inner * inner) are what we read.
+    {
+        let halo_cells = (halo * inner) as usize;
+        let inner_u = inner as usize;
+
+        // West neighbour: its east-most interior column flows into our
+        // west-most interior column when its flow_dir == 2 (east).
+        if let Some(west) = neighbours.west.as_ref() {
+            for iz in 0..inner_u {
+                let neigh_idx = iz * inner_u + (inner_u - 1);
+                if west.flow_dir[neigh_idx] != 2 {
+                    continue;
+                }
+                let grid_idx = (halo_cells + iz) * n + halo_cells;
+                grid.inbound_dir[grid_idx] = 2;
+                grid.inbound_acc[grid_idx] = grid
+                    .inbound_acc[grid_idx]
+                    .saturating_add(west.flow_acc[neigh_idx]);
+            }
+        }
+        // East neighbour: its west-most interior column flows into our
+        // east-most interior column when its flow_dir == 6 (west).
+        if let Some(east) = neighbours.east.as_ref() {
+            for iz in 0..inner_u {
+                let neigh_idx = iz * inner_u;
+                if east.flow_dir[neigh_idx] != 6 {
+                    continue;
+                }
+                let grid_idx = (halo_cells + iz) * n + (halo_cells + inner_u - 1);
+                grid.inbound_dir[grid_idx] = 6;
+                grid.inbound_acc[grid_idx] = grid
+                    .inbound_acc[grid_idx]
+                    .saturating_add(east.flow_acc[neigh_idx]);
+            }
+        }
+        // North neighbour: its south-most interior row flows into our
+        // north-most interior row when its flow_dir == 4 (south).
+        if let Some(north) = neighbours.north.as_ref() {
+            for ix in 0..inner_u {
+                let neigh_idx = (inner_u - 1) * inner_u + ix;
+                if north.flow_dir[neigh_idx] != 4 {
+                    continue;
+                }
+                let grid_idx = halo_cells * n + (halo_cells + ix);
+                grid.inbound_dir[grid_idx] = 4;
+                grid.inbound_acc[grid_idx] = grid
+                    .inbound_acc[grid_idx]
+                    .saturating_add(north.flow_acc[neigh_idx]);
+            }
+        }
+        // South neighbour: its north-most interior row flows into our
+        // south-most interior row when its flow_dir == 0 (north).
+        if let Some(south) = neighbours.south.as_ref() {
+            for ix in 0..inner_u {
+                let neigh_idx = ix;
+                if south.flow_dir[neigh_idx] != 0 {
+                    continue;
+                }
+                let grid_idx = (halo_cells + inner_u - 1) * n + (halo_cells + ix);
+                grid.inbound_dir[grid_idx] = 0;
+                grid.inbound_acc[grid_idx] = grid
+                    .inbound_acc[grid_idx]
+                    .saturating_add(south.flow_acc[neigh_idx]);
             }
         }
     }
@@ -706,6 +806,8 @@ mod tests {
             flow_dir: vec![DIR_NONE; n * n],
             flow_acc: vec![0u32; n * n],
             trunk_injection: vec![0u32; n * n],
+            inbound_dir: vec![DIR_NONE; n * n],
+            inbound_acc: vec![0u32; n * n],
             h,
         }
     }
