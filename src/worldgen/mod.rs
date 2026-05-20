@@ -292,7 +292,7 @@ impl Generator {
     /// the 3 × 3 region neighbourhood inline. Used by tests and by
     /// `tree_in_cell` (which is called from outside the chunk-fill
     /// hot loop).
-    fn column_data(&self, wx: i32, wz: i32) -> ColumnData {
+    pub fn column_data(&self, wx: i32, wz: i32) -> ColumnData {
         let coord = region::RegionCoord::containing(wx, wz);
         let chunk_origin =
             ChunkCoord(glam::IVec3::new(coord.x * (FINE_REGION_SIZE / 32), 0, coord.z * (FINE_REGION_SIZE / 32)));
@@ -720,26 +720,26 @@ impl Generator {
 /// Per-column biome + geometry summary used by both `fill_chunk` and
 /// `add_trees` so block selection and tree placement stay in sync.
 #[derive(Debug, Clone, Copy)]
-struct ColumnData {
+pub struct ColumnData {
     /// Surface height in world Y, post-carve, clamped.
-    height: i32,
+    pub height: i32,
     /// True if the column's `h_pre` slope exceeds `CLIFF_SLOPE_THRESH`
     /// AND its elevation is at/above `CLIFF_MIN_HEIGHT`. Cliff
     /// columns expose stone faces directly, skipping the dirt cap.
-    is_cliff: bool,
+    pub is_cliff: bool,
     /// Jitter-perturbed `desertness` noise value. Used by the
     /// sand/grass transition band: inside the band on the grass side
     /// of the desert boundary, the surface block is rolled
     /// stochastically.
-    desertness: f32,
+    pub desertness: f32,
     /// Discrete biome label derived from temperature, humidity, and
     /// the desert mask, with threshold perturbation applied.
-    biome: Biome,
+    pub biome: Biome,
     /// Lake water surface elevation at this column, if it sits inside
     /// (or adjacent to) a sink-filled basin. `None` outside lakes.
     /// Used by both the chunk-fill water flood and the tree placer
     /// (trees veto if the column is submerged in lake water).
-    lake_rim: Option<i32>,
+    pub lake_rim: Option<i32>,
 }
 
 /// Discrete biome label assigned to each column. The set is small on
@@ -747,7 +747,7 @@ struct ColumnData {
 /// surface block or noticeably different tree density), so the
 /// difference between biomes reads from a screenshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum Biome {
+pub enum Biome {
     /// Cold column. Snow on the surface; no trees grow here.
     Tundra,
     /// Cold *and* humid. Same Snow surface as Tundra but trees do

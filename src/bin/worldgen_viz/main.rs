@@ -1,5 +1,6 @@
 //! Worldgen tuning visualizer.
 
+mod cross;
 mod render;
 mod scene;
 mod ui;
@@ -22,6 +23,7 @@ struct App {
     dirty: bool,
     mouse_down: bool,
     last_cursor: Option<(f64, f64)>,
+    cross_texture: Option<egui::TextureHandle>,
 }
 
 impl App {
@@ -37,6 +39,7 @@ impl App {
             dirty: true,
             mouse_down: false,
             last_cursor: None,
+            cross_texture: None,
         }
     }
 }
@@ -109,6 +112,18 @@ impl ApplicationHandler for App {
                     self.camera.pitch,
                     self.camera.distance,
                 );
+                // Regenerate top-down texture before egui frame (so we
+                // have a TextureHandle to display).
+                if self.dirty || self.cross_texture.is_none() {
+                    let img = crate::cross::render_topdown(42, cfg);
+                    let tex = render.egui_ctx.load_texture(
+                        "cross_topdown",
+                        img,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    self.cross_texture = Some(tex);
+                }
+                let cross_tex = self.cross_texture.clone();
                 let full_output = render.egui_ctx.clone().run(raw_input, |ctx| {
                     egui::SidePanel::left("config_panel")
                         .resizable(true)
@@ -123,6 +138,16 @@ impl ApplicationHandler for App {
                                     dirty_local = true;
                                 }
                             });
+                        });
+                    egui::SidePanel::right("cross_panel")
+                        .resizable(true)
+                        .default_width(420.0)
+                        .show(ctx, |ui| {
+                            ui.heading("Top-down (h_target)");
+                            if let Some(tex) = cross_tex.as_ref() {
+                                ui.image((tex.id(), egui::vec2(400.0, 400.0)));
+                            }
+                            ui.label("256×256 px, 4 blocks/px → 1024 blocks/side");
                         });
                     egui::CentralPanel::default().show(ctx, |ui| {
                         ui.label(format!(
