@@ -348,7 +348,18 @@ impl Generator {
                 //     transition (so depth=0 is the topmost solid
                 //     block of an exposed surface).
                 let h_target = height as f32;
-                let mut depth_below_surface: Option<i32> = None;
+                // Seed `depth_below_surface` from the voxel one above
+                // the chunk's top: if the column continues solid into
+                // this chunk from above (i.e. we're deep underground),
+                // start with a depth large enough to skip the
+                // grass/dirt branches. Without this, every vertical
+                // chunk boundary reset the counter and produced a
+                // fresh grass-dirt-stone cycle every 32 blocks.
+                let above_chunk_top_wy = origin.y + CHUNK_DIM_U as i32;
+                let above_density =
+                    self.density.evaluate(h_target, wx, above_chunk_top_wy, wz);
+                let mut depth_below_surface: Option<i32> =
+                    if above_density > 0.0 { Some(4) } else { None };
                 for y in (0..CHUNK_DIM_U).rev() {
                     let wy = origin.y + y as i32;
                     let local = LocalPos(UVec3::new(x, y, z));
@@ -414,18 +425,23 @@ impl Generator {
                         }
                     } else {
                         // Solid — depth is "blocks below the air→solid
-                        // transition we just crossed".
+                        // transition we just crossed". `near_surface`
+                        // gates surface-block selection: every air
+                        // voxel still resets `depth`, but only the
+                        // first solid block within ±SURFACE_BAND of the
+                        // column's preliminary surface becomes a real
+                        // surface. Deep cave floors, chunk-boundary
+                        // resets, and 3D-noise overhangs above the
+                        // surface band all fall through to Stone.
                         let depth = depth_below_surface.map(|d| d + 1).unwrap_or(0);
                         depth_below_surface = Some(depth);
-                        if depth == 0 {
-                            // Surface block. Use the actual hit wy
-                            // (which can differ from h_target by up to
-                            // ±SURFACE_BAND blocks due to noise) for
-                            // the snow-line / beach / cold-biome
-                            // checks.
-                            if col.is_cliff {
-                                Block::Stone
-                            } else if wy >= SEA_LEVEL - 1
+                        let near_surface =
+                            (h_target - wy as f32).abs() <= SURFACE_BAND as f32;
+                        if col.is_cliff || !near_surface {
+                            Block::Stone
+                        } else if depth == 0 {
+                            // Topmost solid within the surface band.
+                            if wy >= SEA_LEVEL - 1
                                 && wy <= SEA_LEVEL + 2
                                 && !col.biome.snow_capped()
                             {
@@ -457,19 +473,10 @@ impl Generator {
                                     Block::Grass
                                 }
                             }
+                        } else if depth <= 3 {
+                            Block::Dirt
                         } else {
-                            // Subsurface. The 3D density makes the
-                            // surface fuzzy, so the v1 simple "3 dirt
-                            // then stone" rule no longer produces
-                            // ugly stone walls at coastlines. Cliffs
-                            // still skip the dirt cap.
-                            if col.is_cliff {
-                                Block::Stone
-                            } else if depth <= 3 {
-                                Block::Dirt
-                            } else {
-                                Block::Stone
-                            }
+                            Block::Stone
                         }
                     };
                     out.set(local, block);
@@ -1049,6 +1056,41 @@ mod tests {
             found_carved_chunk,
             "expected ≥1 chunk in 16×16 scan to overlap a cave feature; found none"
         );
+    }
+
+    /// Deep underground chunks must contain no surface blocks.
+    /// Symptom of the per-chunk depth-reset bug: the topmost solid
+    /// voxel of every chunk got rendered as a surface block, so
+    /// digging straight down showed grass-dirt-stone cycles every
+    /// 32 blocks vertically.
+    #[test]
+    fn deep_underground_has_no_surface_blocks() {
+        let g = Generator::new(42);
+        // Chunk-Y=-2 covers world Y -64..-33 — comfortably below
+        // any plausible surface across all biomes.
+        let mut grass = 0u32;
+        let mut dirt = 0u32;
+        let mut sand = 0u32;
+        let mut snow = 0u32;
+        for cx in -8..8 {
+            for cz in -8..8 {
+                let mut chunk = DenseChunk::empty();
+                g.fill_chunk(ChunkCoord(IVec3::new(cx, -2, cz)), &mut chunk);
+                for b in chunk.blocks.iter() {
+                    match b {
+                        Block::Grass => grass += 1,
+                        Block::Dirt => dirt += 1,
+                        Block::Sand => sand += 1,
+                        Block::Snow => snow += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert_eq!(grass, 0, "deep underground had {grass} grass blocks");
+        assert_eq!(dirt, 0, "deep underground had {dirt} dirt blocks");
+        assert_eq!(sand, 0, "deep underground had {sand} sand blocks");
+        assert_eq!(snow, 0, "deep underground had {snow} snow blocks");
     }
 
     /// Biome diversity: scanning a few thousand columns across a
