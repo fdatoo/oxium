@@ -105,22 +105,7 @@ fn fbm(p: vec2<f32>) -> f32 {
 // now outputs linear HDR into the Rgba16Float target; the sun disc
 // stays unclamped so composite's tonemap can preserve its warm core.
 
-fn underwater_tint(rgb: vec3<f32>, screen_xy: vec2<f32>, t: f32, factor: f32) -> vec3<f32> {
-    if (factor <= 0.0) {
-        return rgb;
-    }
-    let water_blue = vec3<f32>(0.10, 0.30, 0.45);
-    var tinted = mix(rgb, water_blue, factor * 0.65);
-    // No world-space hook on the sky pass (the sky is a full-screen
-    // triangle), so caustics piggyback on screen coordinates. Looks
-    // close to the world-space underwater grade because the
-    // half-second scroll rate dominates the visual cue anyway.
-    let a = value_noise(screen_xy * 6.0 + vec2<f32>( 0.18,  0.11) * t);
-    let b = value_noise(screen_xy * 4.5 + vec2<f32>(-0.13,  0.19) * t);
-    let caustic = pow(a * b, 2.0) * 0.6;
-    let caustic_color = vec3<f32>(0.65, 0.95, 1.0);
-    return tinted + caustic_color * caustic * factor;
-}
+// Underwater tint moved to composite.wgsl (PR 1 Task 6).
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
@@ -229,9 +214,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Mix the cloud over the sky-lit background; add the celestial
     // bodies + stars on top.
     sky_lit = mix(sky_lit, cloud_color, cloud_density);
-    var rgb = sky_lit + sun_visible + moon_visible + stars_rgb;
-    // Tonemap moved to composite (PR 1 Task 5). Underwater tint stays
-    // here until Task 6 moves it too. Output is linear HDR.
-    rgb = underwater_tint(rgb, in.ndc, camera.time, camera.underwater_factor);
+    let rgb = sky_lit + sun_visible + moon_visible + stars_rgb;
+    // Tonemap + underwater tint both live in composite.wgsl as of
+    // PR 1 Tasks 5/6. Output is linear HDR.
     return vec4<f32>(rgb, 1.0);
 }

@@ -905,6 +905,10 @@ impl Renderer {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&self.composite_pipe.sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.camera_buf.as_entire_binding(),
+                },
             ],
         });
         let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
