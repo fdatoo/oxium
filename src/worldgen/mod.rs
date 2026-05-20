@@ -371,6 +371,10 @@ impl Generator {
         // list rather than walking the full region's system list.
         let chunk_max = origin + glam::IVec3::splat(CHUNK_DIM_U as i32);
         let cave_systems = regions.cave_systems_intersecting(origin, chunk_max);
+        // Snapshot the hot-reloadable config once at the top of this
+        // chunk and reuse for every voxel — keeps each chunk
+        // deterministic even if a file watcher swaps mid-generation.
+        let cfg = self.config_snapshot();
         for z in 0..CHUNK_DIM_U {
             for x in 0..CHUNK_DIM_U {
                 let wx = origin.x + x as i32;
@@ -397,33 +401,29 @@ impl Generator {
                 // chunk boundary reset the counter and produced a
                 // fresh grass-dirt-stone cycle every 32 blocks.
                 let above_chunk_top_wy = origin.y + CHUNK_DIM_U as i32;
-                let above_density =
-                    self.density.evaluate(h_target, wx, above_chunk_top_wy, wz);
+                let above_density = self.density.evaluate_v2(
+                    h_target,
+                    wx,
+                    above_chunk_top_wy,
+                    wz,
+                    &cfg.density,
+                );
                 let mut depth_below_surface: Option<i32> =
                     if above_density > 0.0 { Some(4) } else { None };
                 for y in (0..CHUNK_DIM_U).rev() {
                     let wy = origin.y + y as i32;
                     let local = LocalPos(UVec3::new(x, y, z));
 
-                    // PR B: density evaluated for every voxel — no
-                    // surface-band short-circuit, so the 3D noise can
-                    // dig overhangs / floating spurs anywhere. Caves
-                    // contribute as a soft SDF subtracted from
-                    // density: chamber walls fade smoothly at the
-                    // density crossing instead of being pixel-sharp
-                    // ellipsoid boundaries.
-                    //
-                    // Deep underground the bias term (`h_target - wy)
-                    // / DENSITY_FALLOFF`) grows without bound, which
-                    // would otherwise prevent cave SDFs from carving
-                    // air at any depth. We cap the density at a
-                    // small positive value *for the cave-vs-density
-                    // comparison only* whenever a cave contribution
-                    // is in play — preserving the unbounded bias
-                    // for natural terrain while letting caves carve
-                    // at any depth.
+                    // PR 2: density uses the MC-style composition:
+                    // `4 * quarter_negative((depth + jagged) * factor)
+                    //   + base_3d_noise + slide(y)`
+                    // The asymmetric quarter_negative softening above
+                    // the surface keeps above-surface density values
+                    // small enough that any positive cave contribution
+                    // carves cleanly — no `min(2.0)` cap needed.
                     let approx_depth = height - wy;
-                    let raw_density = self.density.evaluate(h_target, wx, wy, wz);
+                    let raw_density =
+                        self.density.evaluate_v2(h_target, wx, wy, wz, &cfg.density);
 
                     let mut cave_contribution = 0.0_f32;
                     if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y {
@@ -441,16 +441,15 @@ impl Generator {
                         cave_contribution += CAVE_SDF_INTENSITY;
                     }
 
+                    // The new composition's quarter_negative softens
+                    // above the surface, but below the surface
+                    // density still saturates large (composition_scale
+                    // × factor × y_gradient_amplitude). Caves carve a
+                    // bounded ±CAVE_SDF_INTENSITY contribution, so we
+                    // still need the cap when cave subtraction is in
+                    // play. PR 5 will adopt MC's full squeeze+subtract
+                    // pattern that doesn't need an explicit cap.
                     let density_for_compare = if cave_contribution > 0.0 {
-                        // Cap at 1.0 (not 2.0) when cave contributions
-                        // are in play: with the soft SDF peaking at
-                        // CAVE_SDF_INTENSITY=4, the carve threshold of
-                        // `cap - cave_contribution > 0` puts the cave
-                        // wall at SDF = cap. cap=1 → wall at 25% of
-                        // peak intensity (ratio ≈ 0.75 of chamber
-                        // radius, 75% of tunnel radius). cap=2 only
-                        // carved the inner half, leaving tunnels
-                        // visibly narrow and chamber walls bumpy.
                         raw_density.min(1.0)
                     } else {
                         raw_density
@@ -625,6 +624,7 @@ impl Generator {
         // 3D density the surface can sit up to ±SURFACE_BAND from
         // `col.height`; use a top-down density walk so the tree's
         // trunk lands on the real surface, not the heightmap target.
+        let cfg = self.config_snapshot();
         let height = self
             .density
             .topmost_solid(
@@ -632,6 +632,7 @@ impl Generator {
                 wx,
                 wz,
                 col.height + SURFACE_BAND + 2,
+                &cfg.density,
             )
             .unwrap_or(col.height);
         let trunk_h = match kind {
@@ -1048,7 +1049,7 @@ mod tests {
         // SURFACE_BAND. The surface is now fuzz-jittered by 3D
         // relief noise instead of being column-quantised, so the
         // chevron-staircase artifact on moderate slopes is gone.
-        const GOLDEN_42_002: u64 = 0x886E_0C40_5650_12C7;
+        const GOLDEN_42_002: u64 = 0xF858_4012_97B9_85E0;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);

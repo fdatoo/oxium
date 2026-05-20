@@ -92,10 +92,12 @@ pub const MAX_TERRAIN_Y: i32 = 140;
 /// floating spurs). `4.0` is the de-stairs sweet spot — enough fuzz
 /// to break the chevron pattern, not so much that terrain feels
 /// chaotic.
+#[deprecated(note = "Replaced by WorldgenConfig::density (PR 2). Kept for reference; remove in PR 3 cleanup.")]
 pub const DENSITY_FALLOFF: f32 = 4.0;
 /// Amplitude of the 3D relief noise contribution to density. Compared
 /// against the unit-scale bias; `1.0` lets the noise push the
 /// surface by ~`DENSITY_FALLOFF` blocks at maximum.
+#[deprecated(note = "Replaced by WorldgenConfig::density.base_3d_amplitude (PR 2). Remove in PR 3 cleanup.")]
 pub const RELIEF_AMP: f32 = 1.0;
 /// Spatial period of the 3D relief noise's base octave. Smaller →
 /// bumpier surface; larger → smoother.

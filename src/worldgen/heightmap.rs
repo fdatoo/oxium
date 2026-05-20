@@ -199,17 +199,7 @@ impl DensityNoise {
         Self { relief }
     }
 
-    /// Evaluate density at world-space voxel center `(wx, wy, wz)`
-    /// given the column's heightmap target `h_target`. Solid iff
-    /// return value > 0.
-    pub fn evaluate(&self, h_target: f32, wx: i32, wy: i32, wz: i32) -> f32 {
-        let bias = (h_target - wy as f32) / DENSITY_FALLOFF;
-        let noise =
-            self.relief.get([wx as f64, wy as f64, wz as f64]) as f32 * RELIEF_AMP;
-        bias + noise
-    }
-
-    /// New MC-style composition. Replaces `evaluate` once all call
+    /// New MC-style composition. Replaces the old `evaluate` once all call
     /// sites migrate (task 10). Until then, both coexist.
     ///
     /// Formula:
@@ -285,13 +275,20 @@ impl DensityNoise {
     /// below the target). Returns `None` if nothing solid found
     /// within the search range (shouldn't happen for normal
     /// terrain).
-    pub fn topmost_solid(&self, h_target: f32, wx: i32, wz: i32, search_top: i32) -> Option<i32> {
+    pub fn topmost_solid(
+        &self,
+        h_target: f32,
+        wx: i32,
+        wz: i32,
+        search_top: i32,
+        cfg: &crate::worldgen::config::DensityConfig,
+    ) -> Option<i32> {
         // Don't bother searching above `h_target + SURFACE_BAND`:
         // that region is unconditionally air.
         let top = search_top.min(h_target as i32 + SURFACE_BAND);
         let bottom = (h_target as i32 - SURFACE_BAND).max(CAVE_FLOOR_Y);
         for wy in (bottom..=top).rev() {
-            if self.evaluate(h_target, wx, wy, wz) > 0.0 {
+            if self.evaluate_v2(h_target, wx, wy, wz, cfg) > 0.0 {
                 return Some(wy);
             }
         }
@@ -414,17 +411,23 @@ mod tests_anisotropy {
 mod tests {
     use super::*;
 
+    fn test_cfg() -> crate::worldgen::config::WorldgenConfig {
+        crate::worldgen::config::WorldgenConfig::bundled_default().unwrap()
+    }
+
     #[test]
     fn density_is_pure_in_seed_and_coord() {
         let d = DensityNoise::new(42);
-        let a = d.evaluate(70.0, 100, 65, 200);
-        let b = d.evaluate(70.0, 100, 65, 200);
+        let cfg = test_cfg();
+        let a = d.evaluate_v2(70.0, 100, 65, 200, &cfg.density);
+        let b = d.evaluate_v2(70.0, 100, 65, 200, &cfg.density);
         assert_eq!(a, b);
     }
 
     #[test]
     fn density_below_target_mostly_solid() {
         let d = DensityNoise::new(42);
+        let cfg = test_cfg();
         let mut solid = 0;
         let mut total = 0;
         // Sample voxels 4 blocks below h_target = 70: should be
@@ -432,7 +435,7 @@ mod tests {
         for wx in (-200..200).step_by(7) {
             for wz in (-200..200).step_by(7) {
                 total += 1;
-                if d.evaluate(70.0, wx, 66, wz) > 0.0 {
+                if d.evaluate_v2(70.0, wx, 66, wz, &cfg.density) > 0.0 {
                     solid += 1;
                 }
             }
@@ -447,6 +450,7 @@ mod tests {
     #[test]
     fn density_above_target_mostly_air() {
         let d = DensityNoise::new(42);
+        let cfg = test_cfg();
         let mut air = 0;
         let mut total = 0;
         // Sample voxels 4 blocks above h_target = 70: should be
@@ -454,7 +458,7 @@ mod tests {
         for wx in (-200..200).step_by(7) {
             for wz in (-200..200).step_by(7) {
                 total += 1;
-                if d.evaluate(70.0, wx, 74, wz) <= 0.0 {
+                if d.evaluate_v2(70.0, wx, 74, wz, &cfg.density) <= 0.0 {
                     air += 1;
                 }
             }
@@ -469,12 +473,13 @@ mod tests {
     #[test]
     fn density_at_target_is_balanced() {
         let d = DensityNoise::new(42);
+        let cfg = test_cfg();
         let mut solid = 0;
         let mut total = 0;
         for wx in (-200..200).step_by(7) {
             for wz in (-200..200).step_by(7) {
                 total += 1;
-                if d.evaluate(70.0, wx, 70, wz) > 0.0 {
+                if d.evaluate_v2(70.0, wx, 70, wz, &cfg.density) > 0.0 {
                     solid += 1;
                 }
             }
@@ -491,11 +496,12 @@ mod tests {
     #[test]
     fn topmost_solid_within_band() {
         let d = DensityNoise::new(42);
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
         // For a few sample columns, the topmost solid should be
         // within ±SURFACE_BAND of h_target.
         for (wx, wz) in [(0, 0), (50, 100), (-200, 150), (300, -200)] {
             let h = 70.0;
-            let top = d.topmost_solid(h, wx, wz, 200).unwrap();
+            let top = d.topmost_solid(h, wx, wz, 200, &cfg.density).unwrap();
             assert!(
                 (h as i32 - SURFACE_BAND..=h as i32 + SURFACE_BAND).contains(&top),
                 "topmost solid at ({wx},{wz}) was y={top}, expected in [{}..{}]",
