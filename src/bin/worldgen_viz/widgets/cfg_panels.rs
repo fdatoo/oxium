@@ -79,6 +79,84 @@ pub fn density_panel(ui: &mut Ui, cfg: &mut DensityConfig) -> bool {
         || (cfg.slide_bottom_target - snapshot_bot_tgt).abs() > 1e-6
 }
 
+/// Stub panel for climate spline tuning. Returns true if changed.
+pub fn climate_panel(ui: &mut Ui, cfg: &mut oxium::worldgen::config::ClimateConfig) -> bool {
+    ui.heading("Climate");
+    ui.collapsing("Terrain shape noise", |ui| {
+        ui.add(
+            egui::Slider::new(&mut cfg.terrain_shape_period, 100.0..=4000.0)
+                .text("terrain_shape_period"),
+        );
+        ui.add(
+            egui::Slider::new(&mut cfg.terrain_shape_amplitude, 0.1..=4.0)
+                .text("terrain_shape_amplitude"),
+        );
+    });
+    ui.collapsing("Ridge noise", |ui| {
+        ui.add(
+            egui::Slider::new(&mut cfg.ridges_period, 50.0..=1000.0).text("ridges_period"),
+        );
+        ui.add(
+            egui::Slider::new(&mut cfg.ridges_amplitude, 0.1..=4.0).text("ridges_amplitude"),
+        );
+    });
+    // Stub: no dirty tracking for spline sub-fields yet.
+    false
+}
+
+/// Stub panel for cave configuration. Returns true if changed.
+pub fn caves_panel(ui: &mut Ui, _cfg: &mut WorldgenConfig) -> bool {
+    ui.heading("Caves");
+    ui.label("(Cave tuning — coming in PR 3)");
+    false
+}
+
+/// Stub panel for biome configuration. Returns true if changed.
+pub fn biomes_panel(ui: &mut Ui, cfg: &mut oxium::worldgen::config::BiomesConfig) -> bool {
+    ui.heading("Biomes");
+    ui.collapsing("Weirdness noise", |ui| {
+        ui.add(
+            egui::Slider::new(&mut cfg.weirdness_period, 50.0..=2000.0).text("weirdness_period"),
+        );
+        ui.add(
+            egui::Slider::new(&mut cfg.weirdness_amplitude, 0.0..=2.0).text("weirdness_amplitude"),
+        );
+    });
+    false
+}
+
+/// Stub panel for surface decoration. Returns true if changed.
+pub fn surface_panel(ui: &mut Ui, _cfg: &mut WorldgenConfig) -> bool {
+    ui.heading("Surface");
+    ui.label("(Surface decoration — coming in PR 3)");
+    false
+}
+
+/// Inline density graph: plots the density curve across the Y range.
+pub fn graph_panel(ui: &mut Ui, cfg: &oxium::worldgen::config::DensityConfig) {
+    ui.heading("Density graph");
+    let y_min = cfg.y_min as f32;
+    let y_max = cfg.y_max as f32;
+    let height = (y_max - y_min).max(1.0);
+    // Simple text preview — a proper egui_plot graph is for PR 2.
+    ui.label(format!(
+        "y [{:.0}, {:.0}]  gradient ±{:.2}  factor {:.2}",
+        y_min, y_max, cfg.y_gradient_amplitude, cfg.factor
+    ));
+    let steps = 8usize;
+    let mut line = String::new();
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let y = y_min + t * height;
+        let grad = cfg.y_gradient_amplitude * (1.0 - 2.0 * t);
+        let chars = ((grad + cfg.y_gradient_amplitude) / (2.0 * cfg.y_gradient_amplitude) * 10.0)
+            .round()
+            .clamp(0.0, 10.0) as usize;
+        line.push_str(&format!("  y{:.0}: {}\n", y, "#".repeat(chars)));
+    }
+    ui.monospace(&line);
+}
+
 /// Save / load preset buttons. Returns true if the config was
 /// replaced from disk (caller marks `dirty`).
 pub fn preset_panel(ui: &mut Ui, cfg: &mut WorldgenConfig) -> bool {
