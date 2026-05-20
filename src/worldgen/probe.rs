@@ -125,3 +125,30 @@ impl Stage {
         matches!(self, Stage::PlateId | Stage::BiomeId | Stage::AquiferSubstance)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::worldgen::Generator;
+
+    #[test]
+    fn probe_column_is_deterministic() {
+        let g = Generator::new(42);
+        let a = g.probe_column(100, 200);
+        let b = g.probe_column(100, 200);
+        assert_eq!(a.h_target, b.h_target);
+        assert_eq!(a.biome, b.biome);
+        assert!((a.continentalness - b.continentalness).abs() < 1e-6);
+        assert!((a.temperature - b.temperature).abs() < 1e-6);
+    }
+
+    #[test]
+    fn probe_column_height_matches_column_data() {
+        let g = Generator::new(42);
+        let p = g.probe_column(100, 200);
+        let c = g.column_data(100, 200);
+        assert_eq!(p.h_target, c.height);
+        assert_eq!(p.biome, c.biome);
+        assert_eq!(p.is_cliff, c.is_cliff);
+    }
+}

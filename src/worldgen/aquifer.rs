@@ -265,6 +265,16 @@ impl AquiferSystem {
         }
     }
 
+    /// Return the primary [`AquiferCell`] for a surface column at
+    /// `(wx, wz)`. Uses sea-level as the representative Y so the
+    /// returned cell is the one that governs the near-surface aquifer
+    /// at this column. Read-only; used by the visualizer probe panel.
+    pub fn cell_for_column(&self, wx: i32, wz: i32) -> AquiferCell {
+        let wy = self.cfg.sea_level;
+        let nearest = self.three_nearest(wx, wy, wz);
+        nearest[0]
+    }
+
     /// Walk the 27-cell neighbourhood and return the three cells
     /// whose jittered centers are closest to `(wx, wy, wz)`. Sorted
     /// by ascending squared distance.

@@ -411,6 +411,112 @@ impl Generator {
         }
     }
 
+    /// Snapshot every pipeline value computed for this column. Used by
+    /// the viz column probe. Read-only, byte-stable per `(seed, wx, wz)`.
+    pub fn probe_column(&self, wx: i32, wz: i32) -> probe::ColumnProbe {
+        let cfg = self.config.load();
+
+        // Reuse column_data for the values it already produces.
+        let col = self.column_data(wx, wz);
+
+        // Plate + continentalness.
+        let plate = crate::worldgen::plates::plate_at(self.seed, wx, wz);
+        let continentalness = crate::worldgen::heightmap::signed_continentalness(&plate);
+
+        // Pre-carve height.
+        let h_pre = self
+            .heightmap
+            .h_pre(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
+
+        // Slope.
+        let slope = self
+            .heightmap
+            .slope_at(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
+
+        // Valley carve: gather regions the same way column_data does, then
+        // call the ChunkRegions valley_carve.
+        let coord = region::RegionCoord::containing(wx, wz);
+        // Match the exact pattern from column_data: FINE_REGION_SIZE / 32
+        let chunk_origin = ChunkCoord(glam::IVec3::new(
+            coord.x * (FINE_REGION_SIZE / 32),
+            0,
+            coord.z * (FINE_REGION_SIZE / 32),
+        ));
+        let regions = self.gather_chunk_regions(chunk_origin);
+        let valley_carve = regions.valley_carve(wx, wz, self.seed);
+
+        // Climate noise at this column (no Voronoi jitter for probe — raw noise).
+        let xz = [wx as f64, wz as f64];
+        let temperature = self.temperature_map.get(xz) as f32;
+        let humidity = self.humidity_map.get(xz) as f32;
+        let weirdness = (self.weirdness_noise.get(xz) as f32) * cfg.biomes.weirdness_amplitude;
+
+        // Flow accumulation: look up the fine region and read the cell.
+        let fine_region = region::get_fine(&self.fine_cache, coord, || {
+            self.build_fine_region(coord)
+        });
+        let flow_accum = {
+            use crate::worldgen::tuning::FINE_CELL;
+            let (ox, oz) = coord.origin();
+            let lx = wx - ox;
+            let lz = wz - oz;
+            let ix = (lx / FINE_CELL).clamp(0, FINE_REGION_SIZE / FINE_CELL - 1);
+            let iz = (lz / FINE_CELL).clamp(0, FINE_REGION_SIZE / FINE_CELL - 1);
+            let idx = region::FineRegion::cell_index(ix, iz);
+            fine_region.flow_acc[idx]
+        };
+
+        // Aquifer: the nearest cell at sea-level for this column.
+        let acell = self.aquifer.cell_for_column(wx, wz);
+        // Substance: query the aquifer at a representative underground Y
+        // (sea-level minus 10) as if there were a cavity there.
+        let aquifer_substance = self
+            .aquifer
+            .substance(wx, crate::worldgen::tuning::SEA_LEVEL - 10, wz, -1.0);
+
+        // Cave systems intersecting this column's XZ coords across the
+        // 3×3 region neighbourhood.
+        let cave_systems_count = {
+            let mut n = 0usize;
+            for row in &regions.grid {
+                for slot in row {
+                    if let Some(r) = slot {
+                        for sys in &r.cave_systems {
+                            if sys.bb_min.x <= wx && wx <= sys.bb_max.x
+                                && sys.bb_min.z <= wz && wz <= sys.bb_max.z
+                            {
+                                n += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            n
+        };
+
+        probe::ColumnProbe {
+            wx,
+            wz,
+            plate,
+            continentalness,
+            h_pre,
+            valley_carve,
+            h_target: col.height,
+            is_cliff: col.is_cliff,
+            slope,
+            temperature,
+            humidity,
+            desertness: col.desertness,
+            weirdness,
+            biome: col.biome,
+            flow_accum,
+            lake_rim: col.lake_rim,
+            aquifer_y_top: acell.y_top,
+            aquifer_substance,
+            cave_systems_count,
+        }
+    }
+
     /// Return the world seed this generator was constructed with.
     pub fn seed(&self) -> u64 {
         self.seed
