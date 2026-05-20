@@ -176,21 +176,24 @@ impl ApplicationHandler for VizApp {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                // Wheel events over an egui panel (config sliders, map,
+                // probe) should scroll that panel, not dolly/zoom the
+                // camera. `wants_pointer_input()` is true whenever the
+                // cursor is inside any interactive egui area.
+                if render.egui_ctx.wants_pointer_input() {
+                    return;
+                }
                 let amt = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y * 4.0,
                     MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.5,
                 };
                 if matches!(self.state.session.cam_kind, CamKind::Orbit) {
-                    // Orbit cam: wheel zooms in/out.
                     self.state.session.orbit.distance =
                         (self.state.session.orbit.distance - amt).clamp(50.0, 768.0);
                 } else if self.keys.ctrl {
-                    // Ctrl+Wheel in fly mode: adjust speed (Unity/UE convention).
                     self.state.session.fly.speed =
                         (self.state.session.fly.speed + amt).clamp(2.0, 200.0);
                 } else {
-                    // Plain Wheel in fly mode: dolly along forward.
-                    // 2 blocks per scroll tick at speed=30.
                     let step = amt * self.state.session.fly.speed * 0.07;
                     self.state.session.fly.dolly(step);
                 }

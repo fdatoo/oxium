@@ -12,19 +12,42 @@
 //!     each knot's `val` is a sub-spline (typically Constant)
 //! ```
 //!
-//! The editor renders this as a recursive tree of CollapsingHeader
-//! widgets. At every Multipoint level it also draws a 1D curve plot
-//! of `spline.evaluate(x, 0, 0)` — the value the spline produces as
-//! its first axis varies with the deeper axes pinned to zero. Gives
-//! a sense of the function shape without requiring a 3D plotter.
+//! Editing is direct-manipulation on the curve plot:
+//! * Drag a knot → moves `loc` (horizontal) and shifts `val` by the
+//!   corresponding delta (vertical — Constant leaves move, sub-
+//!   Multipoint trees lift all leaves by the same amount).
+//! * Drag either tangent handle → sets the knot's `slope`. Both
+//!   handles share the slope so either gives the same result.
+//! * Shift+click a knot → resets `slope` to 0.
+//! * Click a knot → selects it. Below the curve, the selected knot
+//!   gets a panel with explicit `loc`/`slope` readouts, a delete
+//!   button, and a recursive sub-spline editor.
+//!
+//! The previous per-knot CollapsingHeader sections went away once
+//! tangent dragging covered the slope axis — they were the last
+//! thing the curve couldn't already express.
 
 use egui::{Color32, Pos2, Sense, Stroke, Ui};
 use oxium::worldgen::config::{NestedKnot, NestedSpline};
 
 const AXIS_NAMES: [&str; 3] = ["continentalness (c)", "terrain_shape (s)", "ridges_pv (r)"];
 const MAX_DEPTH: usize = AXIS_NAMES.len();
-const VALUE_RANGE: (f32, f32) = (-2.0, 2.0);
-const INPUT_RANGE: (f32, f32) = (-1.5, 1.5);
+const VALUE_RANGE: (f32, f32) = (-1.5, 1.5);
+const INPUT_RANGE: (f32, f32) = (-1.1, 1.1);
+const PLOT_SIZE: (f32, f32) = (380.0, 160.0);
+const KNOT_RADIUS_PX: f32 = 5.0;
+const TANGENT_HANDLE_PX: f32 = 28.0;
+const KNOT_HIT_RADIUS_PX: f32 = 8.0;
+const HANDLE_HIT_RADIUS_PX: f32 = 6.0;
+const CURVE_SAMPLES: usize = 120;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DragTarget {
+    /// Dragging the knot itself — affects loc + val.
+    Knot(usize),
+    /// Dragging one of the tangent handles — affects slope.
+    Tangent(usize),
+}
 
 /// Show + edit a NestedSpline. `depth` is the level in the tree
 /// (0 = outermost, varying continentalness). Returns true if the user
@@ -32,10 +55,6 @@ const INPUT_RANGE: (f32, f32) = (-1.5, 1.5);
 pub fn show(ui: &mut Ui, spline: &mut NestedSpline, depth: usize) -> bool {
     let mut dirty = false;
     let axis = AXIS_NAMES.get(depth).copied().unwrap_or("(beyond inputs)");
-
-    if matches!(spline, NestedSpline::Multipoint(_)) {
-        dirty |= draw_and_drag_curve(ui, spline);
-    }
 
     match spline {
         NestedSpline::Constant(v) => {
@@ -48,9 +67,6 @@ pub fn show(ui: &mut Ui, spline: &mut NestedSpline, depth: usize) -> bool {
                 .add(egui::Slider::new(v, VALUE_RANGE.0..=VALUE_RANGE.1).text("value"))
                 .on_hover_text("Sets this branch of the spline to a single value across all inputs.")
                 .changed();
-            // Only offer "convert to Multipoint" when there's a deeper
-            // input axis to vary on. Beyond depth 2 (r), additional
-            // knots evaluate against a default-0 input — pointless.
             if depth < MAX_DEPTH
                 && ui
                     .button("→ convert to Multipoint")
@@ -65,45 +81,58 @@ pub fn show(ui: &mut Ui, spline: &mut NestedSpline, depth: usize) -> bool {
                 dirty = true;
             }
         }
-        NestedSpline::Multipoint(knots) => {
+        NestedSpline::Multipoint(_) => {
+            // Read knot count for the header before we hand the spline
+            // off to the curve editor (which needs &mut).
+            let knot_count = if let NestedSpline::Multipoint(k) = &*spline { k.len() } else { 0 };
             ui.label(
-                egui::RichText::new(format!("Multipoint over {} — {} knots", axis, knots.len()))
+                egui::RichText::new(format!("Multipoint over {} — {} knots", axis, knot_count))
                     .small()
                     .weak(),
             );
 
-            let mut to_remove: Option<usize> = None;
-            for (i, knot) in knots.iter_mut().enumerate() {
-                let header = format!("Knot {i}: loc={:+.2}", knot.loc);
-                let resp = egui::CollapsingHeader::new(header)
-                    .id_source(("nested_knot", depth, i))
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            dirty |= ui
-                                .add(
-                                    egui::Slider::new(
-                                        &mut knot.loc,
-                                        INPUT_RANGE.0..=INPUT_RANGE.1,
-                                    )
-                                    .text("loc"),
-                                )
-                                .on_hover_text(format!(
-                                    "Position of this knot on the {axis} axis.",
-                                ))
-                                .changed();
-                            dirty |= ui
-                                .add(egui::Slider::new(&mut knot.slope, -3.0..=3.0).text("slope"))
-                                .on_hover_text("Tangent at this knot — controls curvature into adjacent segments.")
-                                .changed();
-                            if ui
-                                .small_button("✖")
-                                .on_hover_text("Delete this knot")
-                                .clicked()
-                            {
-                                to_remove = Some(i);
-                            }
-                        });
+            let (curve_dirty, selected_idx) = draw_and_edit_curve(ui, spline);
+            dirty |= curve_dirty;
+
+            // Selected-knot panel: explicit readouts + delete + recursive sub-editor.
+            if let (Some(idx), NestedSpline::Multipoint(knots)) = (selected_idx, &mut *spline) {
+                if idx < knots.len() {
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Selected knot {idx}: loc={:+.3}, slope={:+.3}, val={:.3}",
+                            knots[idx].loc,
+                            knots[idx].slope,
+                            knots[idx].val.evaluate(0.0, 0.0, 0.0),
+                        ))
+                        .small(),
+                    );
+                    let mut delete_requested = false;
+                    ui.horizontal(|ui| {
+                        if ui
+                            .small_button("✖ Delete knot")
+                            .on_hover_text("Remove this knot from the spline.")
+                            .clicked()
+                        {
+                            delete_requested = true;
+                        }
+                        if ui
+                            .small_button("⟲ Reset slope")
+                            .on_hover_text("Set this knot's slope to 0 (flat tangent).")
+                            .clicked()
+                        {
+                            knots[idx].slope = 0.0;
+                            dirty = true;
+                        }
+                    });
+                    if delete_requested {
+                        knots.remove(idx);
+                        if knots.is_empty() {
+                            *spline = NestedSpline::Constant(0.0);
+                        }
+                        dirty = true;
+                        // Avoid recursing into a freed knot below.
+                    } else {
                         if depth + 1 < MAX_DEPTH {
                             ui.label(
                                 egui::RichText::new(format!(
@@ -114,18 +143,15 @@ pub fn show(ui: &mut Ui, spline: &mut NestedSpline, depth: usize) -> bool {
                                 .weak(),
                             );
                         }
-                        dirty |= show(ui, &mut knot.val, depth + 1);
-                    });
-                let _ = resp;
-            }
-
-            if let Some(i) = to_remove {
-                knots.remove(i);
-                if knots.is_empty() {
-                    // Empty Multipoint would panic in evaluate_inner.
-                    *spline = NestedSpline::Constant(0.0);
+                        dirty |= show(ui, &mut knots[idx].val, depth + 1);
+                    }
                 }
-                dirty = true;
+            } else if selected_idx.is_none() {
+                ui.label(
+                    egui::RichText::new("Click a knot to edit its sub-spline.")
+                        .small()
+                        .weak(),
+                );
             }
 
             ui.horizontal(|ui| {
@@ -167,140 +193,244 @@ pub fn show(ui: &mut Ui, spline: &mut NestedSpline, depth: usize) -> bool {
     dirty
 }
 
-/// Draw the 1D curve plot AND let the user drag the knot markers.
-/// Returns true if a drag mutated the spline this frame.
-///
-/// Horizontal drag → `knot.loc`. Vertical drag → shifts `knot.val` by
-/// the implied delta: if the sub-spline is a Constant, the constant
-/// moves; if it's a sub-Multipoint, every inner Constant moves by the
-/// same delta, preserving the relative shape of the sub-curve. That's
-/// the only sensible interpretation of "drag this region up by 0.3"
-/// when the knot's value isn't a scalar.
-fn draw_and_drag_curve(ui: &mut Ui, spline: &mut NestedSpline) -> bool {
-    let width = ui.available_width().min(280.0);
+/// Draw the curve plot AND handle all direct-manipulation gestures
+/// on it: knot drag, tangent drag, click-to-select, shift+click to
+/// reset slope. Returns `(dirty, selected_knot_idx)`. Selection is
+/// stashed in egui memory keyed on the response id so each recursive
+/// level tracks its own selection.
+fn draw_and_edit_curve(ui: &mut Ui, spline: &mut NestedSpline) -> (bool, Option<usize>) {
+    let width = ui.available_width().min(PLOT_SIZE.0);
     let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(width, 64.0),
+        egui::vec2(width, PLOT_SIZE.1),
         Sense::click_and_drag(),
     );
     let painter = ui.painter_at(rect);
 
+    // Background + 5 horizontal grid lines — same styling as the
+    // original `widgets::spline::SplineEditor` so all the spline
+    // controls in the panel feel like one widget family.
     painter.rect_filled(rect, 4.0, Color32::from_rgb(20, 20, 26));
+    for i in 0..=4 {
+        let t = i as f32 / 4.0;
+        let y = rect.min.y + t * rect.height();
+        painter.line_segment(
+            [Pos2::new(rect.min.x, y), Pos2::new(rect.max.x, y)],
+            Stroke::new(0.5, Color32::from_gray(60)),
+        );
+    }
 
-    let y0 = rect.min.y + 0.5 * rect.height();
-    painter.line_segment(
-        [Pos2::new(rect.min.x, y0), Pos2::new(rect.max.x, y0)],
-        Stroke::new(0.5, Color32::from_gray(60)),
-    );
+    let pixel_per_input = rect.width() / (INPUT_RANGE.1 - INPUT_RANGE.0);
+    let pixel_per_value = rect.height() / (VALUE_RANGE.1 - VALUE_RANGE.0);
 
-    let value_to_y = |v: f32| -> f32 {
-        let t = (v - VALUE_RANGE.0) / (VALUE_RANGE.1 - VALUE_RANGE.0);
-        rect.max.y - t.clamp(0.0, 1.0) * rect.height()
-    };
     let input_to_x = |x: f32| -> f32 {
-        let t = (x - INPUT_RANGE.0) / (INPUT_RANGE.1 - INPUT_RANGE.0);
-        rect.min.x + t * rect.width()
+        rect.min.x + (x - INPUT_RANGE.0) * pixel_per_input
+    };
+    let value_to_y = |v: f32| -> f32 {
+        rect.max.y - (v - VALUE_RANGE.0) * pixel_per_value
     };
     let x_to_input = |px: f32| -> f32 {
-        let t = (px - rect.min.x) / rect.width();
-        INPUT_RANGE.0 + t * (INPUT_RANGE.1 - INPUT_RANGE.0)
+        INPUT_RANGE.0 + (px - rect.min.x) / pixel_per_input
     };
     let y_to_value = |py: f32| -> f32 {
-        let t = (rect.max.y - py) / rect.height();
-        VALUE_RANGE.0 + t * (VALUE_RANGE.1 - VALUE_RANGE.0)
+        VALUE_RANGE.0 + (rect.max.y - py) / pixel_per_value
     };
 
-    // Curve trace.
-    let n = 80;
+    // Curve trace — 120 samples, same blue stroke as the original
+    // CubicSpline editor.
     let mut prev: Option<Pos2> = None;
-    for i in 0..=n {
-        let t = i as f32 / n as f32;
+    for i in 0..=CURVE_SAMPLES {
+        let t = i as f32 / CURVE_SAMPLES as f32;
         let x = INPUT_RANGE.0 + t * (INPUT_RANGE.1 - INPUT_RANGE.0);
         let y = spline.evaluate(x, 0.0, 0.0);
-        let p = Pos2::new(input_to_x(x), value_to_y(y));
+        let p = Pos2::new(input_to_x(x), value_to_y(y).clamp(rect.min.y, rect.max.y));
         if let Some(pp) = prev {
             painter.line_segment([pp, p], Stroke::new(1.5, Color32::from_rgb(100, 200, 255)));
         }
         prev = Some(p);
     }
 
-    // Drag interaction — only meaningful for Multipoint.
     let mut dirty = false;
-    let drag_id = response.id;
+    let widget_id = response.id;
+
+    // Memory keys.
+    let sel_id = widget_id.with("selected_knot");
+    let drag_id = widget_id.with("drag_target");
+
+    let mut selected: Option<usize> = ui.ctx().memory(|m| m.data.get_temp(sel_id));
+    let mut drag_target: Option<DragTarget> = ui.ctx().memory(|m| m.data.get_temp(drag_id));
+
+    // --- Hit testing + gestures (Multipoint only) ---
     if let NestedSpline::Multipoint(knots) = spline {
-        // Find the knot closest to the pointer (within 12 px).
-        let hovered_idx = response.hover_pos().and_then(|hp| {
-            let mut best: Option<(usize, f32)> = None;
-            for (i, knot) in knots.iter().enumerate() {
-                let x = input_to_x(knot.loc.clamp(INPUT_RANGE.0, INPUT_RANGE.1));
-                let y = value_to_y(knot.val.evaluate(0.0, 0.0, 0.0));
-                let d = (hp - Pos2::new(x, y)).length();
-                if d <= 12.0 && best.map_or(true, |(_, bd)| d < bd) {
-                    best = Some((i, d));
-                }
-            }
-            best.map(|(i, _)| i)
-        });
-
-        // Start drag → stash the knot index in egui memory.
-        if response.drag_started() {
-            if let Some(i) = hovered_idx {
-                ui.ctx().memory_mut(|m| m.data.insert_temp(drag_id, i));
-            }
-        }
-
-        // During drag → update loc + shift val.
-        if response.dragged() {
-            let stashed: Option<usize> =
-                ui.ctx().memory(|m| m.data.get_temp::<usize>(drag_id));
-            if let (Some(idx), Some(pos)) = (stashed, response.interact_pointer_pos()) {
-                if idx < knots.len() {
-                    let new_loc = x_to_input(pos.x).clamp(INPUT_RANGE.0, INPUT_RANGE.1);
-                    let new_val = y_to_value(pos.y).clamp(VALUE_RANGE.0, VALUE_RANGE.1);
-                    let current_val = knots[idx].val.evaluate(0.0, 0.0, 0.0);
-                    let delta = new_val - current_val;
-                    if (knots[idx].loc - new_loc).abs() > 1e-6 || delta.abs() > 1e-6 {
-                        knots[idx].loc = new_loc;
-                        offset_nested(&mut knots[idx].val, delta);
-                        dirty = true;
-                    }
-                }
-            }
-        }
-
-        // End drag → resort by loc so the spline stays well-ordered;
-        // clear the stashed index.
-        if response.drag_stopped() {
-            knots.sort_by(|a, b| a.loc.partial_cmp(&b.loc).unwrap_or(std::cmp::Ordering::Equal));
-            ui.ctx().memory_mut(|m| m.data.remove::<usize>(drag_id));
-        }
-
-        // Knot markers — bright hover, even brighter while dragging.
-        let dragging_idx: Option<usize> = if response.dragged() {
-            ui.ctx().memory(|m| m.data.get_temp::<usize>(drag_id))
-        } else {
-            None
-        };
-        for (i, knot) in knots.iter().enumerate() {
+        // Compute pixel positions for each knot + tangent handle.
+        let mut knot_px: Vec<Pos2> = Vec::with_capacity(knots.len());
+        let mut left_handle_px: Vec<Pos2> = Vec::with_capacity(knots.len());
+        let mut right_handle_px: Vec<Pos2> = Vec::with_capacity(knots.len());
+        for knot in knots.iter() {
             let x = input_to_x(knot.loc.clamp(INPUT_RANGE.0, INPUT_RANGE.1));
             let y = value_to_y(knot.val.evaluate(0.0, 0.0, 0.0));
             let p = Pos2::new(x, y);
-            let (fill, ring, radius) = if dragging_idx == Some(i) {
-                (Color32::from_rgb(255, 255, 120), Color32::from_rgb(200, 160, 30), 5.0)
-            } else if hovered_idx == Some(i) {
-                (Color32::from_rgb(255, 240, 100), Color32::from_rgb(160, 130, 40), 4.5)
+            // Tangent vector in pixel space: 1 input unit, `slope` value units.
+            // y-axis is flipped in screen space, hence the negative.
+            let tdx = pixel_per_input;
+            let tdy = -knot.slope * pixel_per_value;
+            let mag = (tdx * tdx + tdy * tdy).sqrt().max(1e-6);
+            let dir = egui::vec2(tdx / mag, tdy / mag);
+            knot_px.push(p);
+            left_handle_px.push(p - dir * TANGENT_HANDLE_PX);
+            right_handle_px.push(p + dir * TANGENT_HANDLE_PX);
+        }
+
+        // What's under the pointer right now?
+        let hovered_target: Option<DragTarget> = response.hover_pos().and_then(|hp| {
+            // Knots take priority over handles (they sit on top).
+            let mut best: Option<(DragTarget, f32)> = None;
+            for (i, &p) in knot_px.iter().enumerate() {
+                let d = (hp - p).length();
+                if d <= KNOT_HIT_RADIUS_PX && best.map_or(true, |(_, bd)| d < bd) {
+                    best = Some((DragTarget::Knot(i), d));
+                }
+            }
+            if best.is_none() {
+                for (i, &p) in left_handle_px.iter().enumerate().chain(right_handle_px.iter().enumerate()) {
+                    let d = (hp - p).length();
+                    if d <= HANDLE_HIT_RADIUS_PX && best.map_or(true, |(_, bd)| d < bd) {
+                        best = Some((DragTarget::Tangent(i), d));
+                    }
+                }
+            }
+            best.map(|(t, _)| t)
+        });
+
+        let shift_held = ui.input(|i| i.modifiers.shift);
+
+        // Click on a knot: shift+click → reset slope; plain click → select.
+        if response.clicked() {
+            match hovered_target {
+                Some(DragTarget::Knot(i)) if shift_held => {
+                    if i < knots.len() {
+                        knots[i].slope = 0.0;
+                        dirty = true;
+                    }
+                }
+                Some(DragTarget::Knot(i)) => {
+                    selected = Some(i);
+                }
+                Some(DragTarget::Tangent(i)) if shift_held => {
+                    if i < knots.len() {
+                        knots[i].slope = 0.0;
+                        dirty = true;
+                    }
+                }
+                _ => {
+                    selected = None;
+                }
+            }
+        }
+
+        // Drag start → stash what we're dragging.
+        if response.drag_started() {
+            drag_target = hovered_target;
+            if let Some(DragTarget::Knot(i)) = drag_target {
+                selected = Some(i);
+            }
+        }
+
+        // During drag → mutate.
+        if response.dragged() {
+            if let (Some(target), Some(pos)) = (drag_target, response.interact_pointer_pos()) {
+                match target {
+                    DragTarget::Knot(idx) if idx < knots.len() => {
+                        let new_loc = x_to_input(pos.x).clamp(INPUT_RANGE.0, INPUT_RANGE.1);
+                        let new_val = y_to_value(pos.y).clamp(VALUE_RANGE.0, VALUE_RANGE.1);
+                        let current_val = knots[idx].val.evaluate(0.0, 0.0, 0.0);
+                        let delta = new_val - current_val;
+                        if (knots[idx].loc - new_loc).abs() > 1e-6 || delta.abs() > 1e-6 {
+                            knots[idx].loc = new_loc;
+                            offset_nested(&mut knots[idx].val, delta);
+                            dirty = true;
+                        }
+                    }
+                    DragTarget::Tangent(idx) if idx < knots.len() => {
+                        // Pixel vector from knot to drag pos → slope.
+                        let kp = knot_px[idx];
+                        let dx_px = pos.x - kp.x;
+                        let dy_px = pos.y - kp.y;
+                        if dx_px.abs() > 1.0 {
+                            let input_dx = dx_px / pixel_per_input;
+                            let value_dy = -dy_px / pixel_per_value;
+                            let new_slope = (value_dy / input_dx).clamp(-8.0, 8.0);
+                            if (knots[idx].slope - new_slope).abs() > 1e-4 {
+                                knots[idx].slope = new_slope;
+                                dirty = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Drag end → resort by loc if we moved a knot, clear drag stash.
+        if response.drag_stopped() {
+            if matches!(drag_target, Some(DragTarget::Knot(_))) {
+                knots.sort_by(|a, b| a.loc.partial_cmp(&b.loc).unwrap_or(std::cmp::Ordering::Equal));
+            }
+            drag_target = None;
+        }
+
+        // Tangent lines + handles (draw first so knots sit on top).
+        // Tangent line uses a darker shade of the knot colour so it
+        // reads as "part of the knot" rather than a separate widget.
+        for i in 0..knots.len() {
+            let lp = left_handle_px[i];
+            let rp = right_handle_px[i];
+            let is_active = matches!(drag_target, Some(DragTarget::Tangent(j)) if j == i)
+                || matches!(hovered_target, Some(DragTarget::Tangent(j)) if j == i);
+            let tangent_color = if is_active {
+                Color32::YELLOW
             } else {
-                (Color32::from_rgb(255, 220, 70), Color32::from_rgb(120, 100, 30), 3.5)
+                Color32::from_rgba_premultiplied(160, 130, 40, 220)
             };
-            painter.circle_filled(p, radius, fill);
-            painter.circle_stroke(p, radius, Stroke::new(1.0, ring));
+            painter.line_segment([lp, rp], Stroke::new(1.0, tangent_color));
+            painter.circle_filled(lp, 2.5, tangent_color);
+            painter.circle_filled(rp, 2.5, tangent_color);
+        }
+
+        // Knots — same colours as the original CubicSpline editor:
+        // amber (220, 180, 80) at rest, bright YELLOW when hovered or
+        // dragging. Selection gets a thin white ring so you can tell
+        // which knot the inline panel is editing.
+        for (i, &p) in knot_px.iter().enumerate() {
+            let is_selected = selected == Some(i);
+            let is_hot = matches!(hovered_target, Some(DragTarget::Knot(j)) if j == i)
+                || matches!(drag_target, Some(DragTarget::Knot(j)) if j == i);
+            let fill = if is_hot { Color32::YELLOW } else { Color32::from_rgb(220, 180, 80) };
+            painter.circle_filled(p, KNOT_RADIUS_PX, fill);
+            if is_selected {
+                painter.circle_stroke(p, KNOT_RADIUS_PX + 1.0, Stroke::new(1.5, Color32::WHITE));
+            }
+        }
+
+        if response.hovered() && !response.dragged() {
+            response
+                .clone()
+                .on_hover_text("Drag knots to move them. Drag tangent endpoints to shape the slope. Shift+click resets slope to 0. Click empty space to deselect.");
         }
     }
 
-    if response.hovered() && !response.dragged() {
-        response.clone().on_hover_text("Drag a yellow knot to move it on (loc, val).");
-    }
+    // Persist selection + drag target.
+    ui.ctx().memory_mut(|m| {
+        match selected {
+            Some(i) => m.data.insert_temp(sel_id, i),
+            None => m.data.remove::<usize>(sel_id),
+        }
+        match drag_target {
+            Some(t) => m.data.insert_temp(drag_id, t),
+            None => m.data.remove::<DragTarget>(drag_id),
+        }
+    });
 
-    dirty
+    (dirty, selected)
 }
 
 /// Recursively offset every leaf Constant in `spline` by `delta`.
