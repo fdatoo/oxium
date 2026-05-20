@@ -189,43 +189,17 @@ pub fn climate_panel(ui: &mut Ui, cfg: &mut oxium::worldgen::config::ClimateConf
     dirty
 }
 
-/// Minimal editor for `NestedSpline`. Full nested editing (three-axis
-/// graph) needs its own widget; for now we expose a value slider when
-/// the spline is `Constant`, and a "Reset to Constant(N)" button for
-/// the `Multipoint` case. Lets the user disable or anchor any branch
-/// without leaving the viz.
+/// Editor for a NestedSpline. Delegates to the recursive widget in
+/// `widgets::nested_spline`, which handles the three-level tree
+/// (continentalness → terrain_shape → ridges_pv) with a curve preview
+/// at each Multipoint level.
 fn nested_spline_panel(
     ui: &mut Ui,
     spline: &mut oxium::worldgen::config::NestedSpline,
     tooltip: &str,
 ) -> bool {
-    use oxium::worldgen::config::NestedSpline;
-    let mut dirty = false;
     ui.label(egui::RichText::new(tooltip).small().weak());
-    match spline {
-        NestedSpline::Constant(v) => {
-            dirty |= ui
-                .add(egui::Slider::new(v, -2.0..=2.0).text("constant value"))
-                .on_hover_text("Sets this branch to a single value across all (c, s, r) inputs.")
-                .changed();
-        }
-        NestedSpline::Multipoint(knots) => {
-            ui.label(format!("Multipoint with {} outer knots (c-axis)", knots.len()));
-            ui.label(egui::RichText::new(
-                "(Full nested editing not yet supported in-viz — edit the RON file directly \
-                 or reset to Constant.)",
-            ).small().weak());
-            if ui
-                .button("Reset to Constant(0.0)")
-                .on_hover_text("Replace the whole nested spline with a single constant.")
-                .clicked()
-            {
-                *spline = NestedSpline::Constant(0.0);
-                dirty = true;
-            }
-        }
-    }
-    dirty
+    crate::widgets::nested_spline::show(ui, spline, 0)
 }
 
 pub fn caves_panel(ui: &mut Ui, _cfg: &mut WorldgenConfig) -> bool {
