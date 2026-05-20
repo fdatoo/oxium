@@ -111,8 +111,9 @@ pub struct BlockInfo {
     /// True if light cannot pass through. Used by the BFS flood fill and
     /// by the mesher's face-culling test.
     pub opaque: bool,
-    /// Block-light emission, 0..15. Non-zero values seed the block-light BFS.
-    pub emission: u8,
+    /// Per-channel block-light emission, 0..15 each (R, G, B). Non-zero
+    /// channels seed that channel of the block-light BFS.
+    pub emission: [u8; 3],
     /// Side-face RGBA colour. Stored as f32 to keep arithmetic clean;
     /// converted to bytes when emitting vertex data.
     ///
@@ -163,7 +164,7 @@ impl BlockRegistry {
         let mut infos = [BlockInfo {
             solid: true,
             opaque: true,
-            emission: 0,
+            emission: [0, 0, 0],
             color: [1.0, 0.0, 1.0, 1.0],
             top_color: None,
             tile_side: None,
@@ -174,7 +175,7 @@ impl BlockRegistry {
         infos[Air as usize] = BlockInfo {
             solid: false,
             opaque: false,
-            emission: 0,
+            emission: [0, 0, 0],
             color: [0.0; 4],
             top_color: None,
             tile_side: None,
@@ -184,7 +185,7 @@ impl BlockRegistry {
         infos[Stone as usize] = BlockInfo {
             solid: true,
             opaque: true,
-            emission: 0,
+            emission: [0, 0, 0],
             // Stone texture is already coloured — neutral white tint
             // leaves it unmodified.
             color: [1.0, 1.0, 1.0, 1.0],
@@ -196,7 +197,7 @@ impl BlockRegistry {
         infos[Dirt as usize] = BlockInfo {
             solid: true,
             opaque: true,
-            emission: 0,
+            emission: [0, 0, 0],
             color: [1.0, 1.0, 1.0, 1.0],
             top_color: None,
             tile_side: Some(Tile::Dirt),
@@ -206,7 +207,7 @@ impl BlockRegistry {
         infos[Grass as usize] = BlockInfo {
             solid: true,
             opaque: true,
-            emission: 0,
+            emission: [0, 0, 0],
             // Sides and bottom use neutral white tint over the
             // pre-coloured dirt / grass_side textures…
             color: [1.0, 1.0, 1.0, 1.0],
@@ -226,7 +227,7 @@ impl BlockRegistry {
         infos[Sand as usize] = BlockInfo {
             solid: true,
             opaque: true,
-            emission: 0,
+            emission: [0, 0, 0],
             color: [1.0, 1.0, 1.0, 1.0],
             top_color: None,
             tile_side: Some(Tile::Sand),
@@ -238,7 +239,7 @@ impl BlockRegistry {
             // passes, with extra falloff cost handled by the lighting BFS).
             solid: false,
             opaque: false,
-            emission: 0,
+            emission: [0, 0, 0],
             // Blue tint over the grayscale ripple texture; alpha < 1
             // keeps the shader's water-shimmer code path active.
             color: [0.38, 0.62, 0.95, 0.78],
@@ -250,7 +251,7 @@ impl BlockRegistry {
         infos[Wood as usize] = BlockInfo {
             solid: true,
             opaque: true,
-            emission: 0,
+            emission: [0, 0, 0],
             color: [1.0, 1.0, 1.0, 1.0],
             top_color: None,
             // Bark on the sides, concentric rings on top + bottom.
@@ -262,7 +263,7 @@ impl BlockRegistry {
             // Leaves block movement but not light — light filters through.
             solid: true,
             opaque: false,
-            emission: 0,
+            emission: [0, 0, 0],
             // Grayscale leaves texture tinted to a leafy green.
             color: [0.40, 0.72, 0.30, 1.0],
             top_color: None,
@@ -274,7 +275,7 @@ impl BlockRegistry {
             // Bright emitter, non-solid (you walk through them, M-style).
             solid: false,
             opaque: false,
-            emission: 13,
+            emission: [13, 13, 13],
             color: [1.0, 0.80, 0.30, 1.0],
             top_color: None,
             tile_side: None,
@@ -287,7 +288,7 @@ impl BlockRegistry {
             // pools and aquifer rooms light themselves.
             solid: false,
             opaque: false,
-            emission: 15,
+            emission: [15, 15, 15],
             // Neutral white tint — the lava_still.png is already
             // pre-coloured fiery orange. Alpha < 1 keeps it in the
             // translucent pipeline like water (so the shader can pick
@@ -308,7 +309,7 @@ impl BlockRegistry {
             // as medium gray instead of snow.
             solid: true,
             opaque: true,
-            emission: 0,
+            emission: [0, 0, 0],
             color: [1.0, 1.0, 1.0, 1.0],
             top_color: None,
             tile_side: Some(Tile::Snow),
@@ -348,7 +349,8 @@ mod tests {
     #[test]
     fn torch_emits_light() {
         let r = BlockRegistry::new();
-        assert!(r.info(Block::Torch).emission > 0);
+        let e = r.info(Block::Torch).emission;
+        assert!(e[0] > 0 || e[1] > 0 || e[2] > 0);
     }
 
     #[test]

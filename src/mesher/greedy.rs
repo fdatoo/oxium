@@ -97,7 +97,8 @@ pub fn mesh_greedy(
         let in_range = x >= 0 && y >= 0 && z >= 0 && x < dim && y < dim && z < dim;
         if in_range {
             let idx = LocalPos(UVec3::new(x as u32, y as u32, z as u32)).to_index();
-            return (chunk.sky_light[idx] & 0x0F) << 4 | (chunk.block_light[idx] & 0x0F);
+            let brightness = crate::voxel::chunk::rgb_brightness(chunk.block_rgb[idx]);
+            return (chunk.sky_light[idx] & 0x0F) << 4 | (brightness & 0x0F);
         }
         let out_x = (x < 0) as i32 + (x >= dim) as i32;
         let out_y = (y < 0) as i32 + (y >= dim) as i32;
@@ -124,7 +125,8 @@ pub fn mesh_greedy(
         };
         if let Some(n) = neighbors[face_idx] {
             let idx = LocalPos(UVec3::new(lx, ly, lz)).to_index();
-            return (n.sky_light[idx] & 0x0F) << 4 | (n.block_light[idx] & 0x0F);
+            let brightness = crate::voxel::chunk::rgb_brightness(n.block_rgb[idx]);
+            return (n.sky_light[idx] & 0x0F) << 4 | (brightness & 0x0F);
         }
         // Truly no neighbour data (chunk not loaded yet). Pick a
         // direction-specific default:

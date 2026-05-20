@@ -13,7 +13,7 @@ use glam::IVec3;
 use oxium::lighting;
 use oxium::mesher::greedy::mesh_greedy;
 use oxium::voxel::block::BlockRegistry;
-use oxium::voxel::chunk::{DenseChunk, Neighbors, PalettedChunk};
+use oxium::voxel::chunk::{rgb_brightness, DenseChunk, Neighbors, PalettedChunk};
 use oxium::voxel::coords::ChunkCoord;
 use oxium::voxel::world::{ChunkSlot, World};
 use oxium::worldgen::Generator;
@@ -52,7 +52,8 @@ fn generate_light_mesh_round_trip() {
             for &v in d.sky_light.iter() {
                 assert!(v <= 15, "sky light out of range: {v}");
             }
-            for &v in d.block_light.iter() {
+            for &cell in d.block_rgb.iter() {
+                let v = rgb_brightness(cell);
                 assert!(v <= 15, "block light out of range: {v}");
             }
         }

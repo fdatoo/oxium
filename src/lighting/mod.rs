@@ -12,7 +12,7 @@
 //! spec's "Why recompute over incremental" table.
 
 use crate::voxel::block::{Block, BlockRegistry};
-use crate::voxel::chunk::{DenseChunk, Neighbors};
+use crate::voxel::chunk::{pack_rgb, unpack_rgb, DenseChunk, Neighbors};
 use crate::voxel::coords::{LocalPos, CHUNK_DIM_U};
 use glam::UVec3;
 use std::collections::VecDeque;
@@ -29,7 +29,7 @@ const D: i32 = CHUNK_DIM_U as i32;
 /// `light_dirty` and queues another recompute.
 pub fn recompute_chunk(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegistry) {
     sky_light(chunk, neighbors, reg);
-    block_light(chunk, neighbors, reg);
+    block_rgb(chunk, neighbors, reg);
 }
 
 /// Compute sky light: each column drops `15` straight down until it hits an
@@ -79,7 +79,7 @@ fn sky_light(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegis
     // without it, the next chunk along the tunnel starts the BFS with
     // no seeds and stays uniformly dark. We skip +Y because the
     // vertical column drop above already consumed it.
-    seed_from_neighbors(chunk, neighbors, /* is_sky */ true);
+    seed_from_neighbors(chunk, neighbors, BfsChannel::Sky);
 
     // BFS: seed every cell currently >= 2 (anything lower will be reached
     // by spreading from a higher cell, so no need to enqueue it now).
@@ -94,7 +94,13 @@ fn sky_light(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegis
             }
         }
     }
-    bfs_spread(&mut q, chunk, reg, /* is_sky */ true);
+    bfs_spread_sky(&mut q, chunk, reg);
+}
+
+#[derive(Copy, Clone)]
+enum BfsChannel {
+    Sky,
+    BlockRgb,
 }
 
 /// Seed the chunk's boundary cells from each face neighbour's mirror
@@ -108,7 +114,7 @@ fn sky_light(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegis
 /// neighbour was just regenerated and has high light at its boundary
 /// (e.g., the lit end of a tunnel), this seeds *our* boundary cells
 /// so the BFS continues the gradient from there.
-fn seed_from_neighbors(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, is_sky: bool) {
+fn seed_from_neighbors(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, channel: BfsChannel) {
     use crate::mesher::Face;
     for face in Face::all() {
         // Sky light: +Y inflow is handled by the column drop above; the
@@ -117,7 +123,7 @@ fn seed_from_neighbors(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, is_sky
         // is solid stone) — overwriting the vertical pass's correct
         // value with 0 isn't a problem because we take `max`, but skip
         // for clarity.
-        if is_sky && face == Face::PosY {
+        if matches!(channel, BfsChannel::Sky) && face == Face::PosY {
             continue;
         }
         let Some(n) = neighbors.chunks[face as usize] else {
@@ -128,19 +134,23 @@ fn seed_from_neighbors(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, is_sky
                 let (our_lp, their_lp) = mirror_boundary(face, u, v);
                 let our_idx = our_lp.to_index();
                 let their_idx = their_lp.to_index();
-                let their_light = if is_sky {
-                    n.sky_light[their_idx]
-                } else {
-                    n.block_light[their_idx]
-                };
-                let seeded = their_light.saturating_sub(1);
-                let our = if is_sky {
-                    &mut chunk.sky_light[our_idx]
-                } else {
-                    &mut chunk.block_light[our_idx]
-                };
-                if seeded > *our {
-                    *our = seeded;
+                match channel {
+                    BfsChannel::Sky => {
+                        let seeded = n.sky_light[their_idx].saturating_sub(1);
+                        if seeded > chunk.sky_light[our_idx] {
+                            chunk.sky_light[our_idx] = seeded;
+                        }
+                    }
+                    BfsChannel::BlockRgb => {
+                        let (tr, tg, tb) = unpack_rgb(n.block_rgb[their_idx]);
+                        let (or, og, ob) = unpack_rgb(chunk.block_rgb[our_idx]);
+                        let new_r = or.max(tr.saturating_sub(1));
+                        let new_g = og.max(tg.saturating_sub(1));
+                        let new_b = ob.max(tb.saturating_sub(1));
+                        if new_r != or || new_g != og || new_b != ob {
+                            chunk.block_rgb[our_idx] = pack_rgb(new_r, new_g, new_b);
+                        }
+                    }
                 }
             }
         }
@@ -148,15 +158,15 @@ fn seed_from_neighbors(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, is_sky
 }
 
 /// Snapshot the chunk's per-face boundary lighting (`sky_light` and
-/// `block_light` interleaved) into one `Vec<u8>` per face, ordered by
+/// `block_rgb` channels) into one `Vec<u8>` per face, ordered by
 /// [`crate::mesher::Face`] discriminant. Used by the relight worker
 /// to detect which faces' boundary values actually changed after the
 /// BFS — the Relit handler then cascades `dirty.light` only to the
 /// neighbours that would consume the changed values.
 ///
-/// Each face's `Vec` is `D² × 2` bytes: alternating sky / block
-/// light, walked in the same `(u, v)` order as `mirror_boundary`. The
-/// per-byte comparison is cheap (~6 KB total per chunk) and exact —
+/// Each face's `Vec` is `D² × 4` bytes: sky, R, G, B per cell,
+/// walked in the same `(u, v)` order as `mirror_boundary`. The
+/// per-byte comparison is cheap (~12 KB total per chunk) and exact —
 /// no hash collisions to worry about.
 pub fn snapshot_face_boundaries(chunk: &crate::voxel::chunk::DenseChunk) -> [Vec<u8>; 6] {
     use crate::mesher::Face;
@@ -170,13 +180,16 @@ pub fn snapshot_face_boundaries(chunk: &crate::voxel::chunk::DenseChunk) -> [Vec
             5 => Face::NegZ,
             _ => unreachable!(),
         };
-        let mut out = Vec::with_capacity((D * D * 2) as usize);
+        let mut out = Vec::with_capacity((D * D * 4) as usize);
         for v in 0..D {
             for u in 0..D {
                 let (our_lp, _) = mirror_boundary(face, u, v);
                 let idx = our_lp.to_index();
+                let (r, g, b) = unpack_rgb(chunk.block_rgb[idx]);
                 out.push(chunk.sky_light[idx]);
-                out.push(chunk.block_light[idx]);
+                out.push(r);
+                out.push(g);
+                out.push(b);
             }
         }
         out
@@ -221,53 +234,59 @@ fn mirror_boundary(face: crate::mesher::Face, u: i32, v: i32) -> (LocalPos, Loca
     (LocalPos(ours), LocalPos(theirs))
 }
 
-/// Compute block light: seed with every emissive block and BFS outward.
-/// Also seeds boundary cells from neighbour chunks so torches in one
-/// chunk continue to glow through the adjacent chunks rather than
-/// hard-cutting at the chunk seam.
-fn block_light(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegistry) {
-    chunk.block_light.iter_mut().for_each(|v| *v = 0);
+/// Compute RGB block light: seed each emissive block with its three-channel
+/// emission, BFS outward, per-channel attenuation by 1 per air step (cost-1
+/// extra in water). Boundary cells are also seeded from neighbour chunks so
+/// colored sources continue to glow into adjacent chunks rather than
+/// hard-cutting at the seam.
+fn block_rgb(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegistry) {
+    chunk.block_rgb.iter_mut().for_each(|v| *v = 0);
 
-    let mut q: VecDeque<(i32, i32, i32, u8)> = VecDeque::new();
+    // Queue entry: (x, y, z, packed u16). Channels propagate together so
+    // the BFS visits each cell once for all three.
+    let mut q: VecDeque<(i32, i32, i32, u16)> = VecDeque::new();
     for z in 0..D {
         for y in 0..D {
             for x in 0..D {
                 let idx = LocalPos(UVec3::new(x as u32, y as u32, z as u32)).to_index();
-                let info = reg.info(chunk.blocks[idx]);
-                if info.emission > 0 {
-                    chunk.block_light[idx] = info.emission;
-                    q.push_back((x, y, z, info.emission));
+                let [er, eg, eb] = reg.info(chunk.blocks[idx]).emission;
+                if er > 0 || eg > 0 || eb > 0 {
+                    let cell = pack_rgb(er, eg, eb);
+                    chunk.block_rgb[idx] = cell;
+                    q.push_back((x, y, z, cell));
                 }
             }
         }
     }
-    seed_from_neighbors(chunk, neighbors, /* is_sky */ false);
-    // Re-enqueue every boundary cell whose value the seed bumped to
-    // >= 2 so the BFS picks them up. (Interior cells are already in
-    // the queue from the emission scan; boundary cells may have been
-    // seeded *after* the scan.)
+    seed_from_neighbors(chunk, neighbors, BfsChannel::BlockRgb);
+    // Re-enqueue any boundary cell the seed-pass bumped to non-zero so
+    // the BFS picks them up.
     for z in 0..D {
         for y in 0..D {
             for x in 0..D {
                 let idx = LocalPos(UVec3::new(x as u32, y as u32, z as u32)).to_index();
                 let on_boundary = x == 0 || y == 0 || z == 0
                     || x == D - 1 || y == D - 1 || z == D - 1;
-                if on_boundary && chunk.block_light[idx] >= 2 {
-                    q.push_back((x, y, z, chunk.block_light[idx]));
+                let cell = chunk.block_rgb[idx];
+                if on_boundary && cell != 0 {
+                    let (r, g, b) = unpack_rgb(cell);
+                    // Only enqueue if any channel can still propagate (>= 2).
+                    if r >= 2 || g >= 2 || b >= 2 {
+                        q.push_back((x, y, z, cell));
+                    }
                 }
             }
         }
     }
-    bfs_spread(&mut q, chunk, reg, /* is_sky */ false);
+    bfs_spread_rgb(&mut q, chunk, reg);
 }
 
-/// Generic BFS step. Spreads the front to neighbours within this chunk
-/// only — cross-chunk spread is the streaming system's responsibility.
-fn bfs_spread(
+/// Sky BFS step. Spreads sky light to neighbours within this chunk only;
+/// cross-chunk spread is the streaming system's responsibility.
+fn bfs_spread_sky(
     q: &mut VecDeque<(i32, i32, i32, u8)>,
     chunk: &mut DenseChunk,
     reg: &BlockRegistry,
-    is_sky: bool,
 ) {
     use crate::mesher::Face;
     while let Some((x, y, z, level)) = q.pop_front() {
@@ -291,18 +310,52 @@ fn bfs_spread(
             // cost 1 like the BFS default.
             let cost: u8 = if chunk.blocks[idx] == Block::Water { 3 } else { 1 };
             let prop = next.saturating_sub(cost.saturating_sub(1));
-            let prev = if is_sky {
-                chunk.sky_light[idx]
-            } else {
-                chunk.block_light[idx]
-            };
-            if prop > prev {
-                if is_sky {
-                    chunk.sky_light[idx] = prop;
-                } else {
-                    chunk.block_light[idx] = prop;
-                }
+            if prop > chunk.sky_light[idx] {
+                chunk.sky_light[idx] = prop;
                 q.push_back((nx, ny, nz, prop));
+            }
+        }
+    }
+}
+
+/// RGB BFS step. Spreads all three channels simultaneously to neighbours
+/// within this chunk only; cross-chunk spread is the streaming system's
+/// responsibility (via `light_dirty` cascade).
+fn bfs_spread_rgb(
+    q: &mut VecDeque<(i32, i32, i32, u16)>,
+    chunk: &mut DenseChunk,
+    reg: &BlockRegistry,
+) {
+    use crate::mesher::Face;
+    while let Some((x, y, z, cell)) = q.pop_front() {
+        let (lr, lg, lb) = unpack_rgb(cell);
+        if lr <= 1 && lg <= 1 && lb <= 1 {
+            continue;
+        }
+        for face in Face::all() {
+            let [dx, dy, dz] = face.normal();
+            let (nx, ny, nz) = (x + dx, y + dy, z + dz);
+            if nx < 0 || ny < 0 || nz < 0 || nx >= D || ny >= D || nz >= D {
+                continue;
+            }
+            let idx = LocalPos(UVec3::new(nx as u32, ny as u32, nz as u32)).to_index();
+            let info = reg.info(chunk.blocks[idx]);
+            if info.opaque {
+                continue;
+            }
+            let cost: u8 = if chunk.blocks[idx] == Block::Water { 3 } else { 1 };
+            let attenuation = cost.saturating_sub(1);
+            // Per-channel propagation: each channel attenuates independently.
+            let prop_r = lr.saturating_sub(1).saturating_sub(attenuation);
+            let prop_g = lg.saturating_sub(1).saturating_sub(attenuation);
+            let prop_b = lb.saturating_sub(1).saturating_sub(attenuation);
+            let (cur_r, cur_g, cur_b) = unpack_rgb(chunk.block_rgb[idx]);
+            let new_r = cur_r.max(prop_r);
+            let new_g = cur_g.max(prop_g);
+            let new_b = cur_b.max(prop_b);
+            if new_r != cur_r || new_g != cur_g || new_b != cur_b {
+                chunk.block_rgb[idx] = pack_rgb(new_r, new_g, new_b);
+                q.push_back((nx, ny, nz, chunk.block_rgb[idx]));
             }
         }
     }
@@ -340,16 +393,20 @@ mod tests {
         let r = BlockRegistry::new();
         recompute_chunk(&mut c, &empty_neighbors(), &r);
         let center = LocalPos(UVec3::new(16, 16, 16)).to_index();
-        let adj = LocalPos(UVec3::new(17, 16, 16)).to_index();
-        let far = LocalPos(UVec3::new(20, 16, 16)).to_index();
-        assert_eq!(c.block_light[center], 13);
-        // 1-step falloff = emission - 1 = 12.
-        assert!(
-            c.block_light[adj] >= 11,
-            "adj light too low: {}",
-            c.block_light[adj]
-        );
-        assert!(c.block_light[far] < c.block_light[adj]);
+        let adj    = LocalPos(UVec3::new(17, 16, 16)).to_index();
+        let far    = LocalPos(UVec3::new(20, 16, 16)).to_index();
+        let (cr, cg, cb) = unpack_rgb(c.block_rgb[center]);
+        let (ar, ag, ab) = unpack_rgb(c.block_rgb[adj]);
+        let (fr, fg, fb) = unpack_rgb(c.block_rgb[far]);
+        assert_eq!(cr, 13);
+        assert_eq!(cg, 13);
+        assert_eq!(cb, 13);
+        assert!(ar >= 11, "adj R too low: {}", ar);
+        assert_eq!(ag, ar, "G should match R for a uniformly-emissive torch");
+        assert_eq!(ab, ar, "B should match R for a uniformly-emissive torch");
+        assert!(fr < ar);
+        assert_eq!(fg, fr);
+        assert_eq!(fb, fr);
     }
 
     #[test]

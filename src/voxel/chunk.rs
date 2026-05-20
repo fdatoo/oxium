@@ -19,8 +19,33 @@ use serde::{Deserialize, Serialize};
 /// Number of voxels in one chunk: 32 × 32 × 32 = 32 768.
 pub const CHUNK_VOL: usize = 32 * 32 * 32;
 
-/// Fully-expanded view of one chunk. ~128 KB:
-/// 64 KB blocks + 32 KB sky-light + 32 KB block-light.
+/// Pack `(R, G, B)` channels (each 0..=15) into the u16 layout used
+/// by `DenseChunk::block_rgb`. Out-of-range inputs are masked to 4 bits.
+#[inline]
+pub fn pack_rgb(r: u8, g: u8, b: u8) -> u16 {
+    debug_assert!(r < 16 && g < 16 && b < 16, "pack_rgb: channel out of range (max 15)");
+    ((r as u16 & 0x0F) << 8) | ((g as u16 & 0x0F) << 4) | (b as u16 & 0x0F)
+}
+
+/// Inverse of `pack_rgb`: extract R/G/B (each 0..=15) from a packed cell.
+#[inline]
+pub fn unpack_rgb(cell: u16) -> (u8, u8, u8) {
+    let r = ((cell >> 8) & 0x0F) as u8;
+    let g = ((cell >> 4) & 0x0F) as u8;
+    let b = (cell & 0x0F) as u8;
+    (r, g, b)
+}
+
+/// Scalar brightness for a packed cell, used by the mesher/legacy shader
+/// path until PR 3 swaps to a 3D light volume.
+#[inline]
+pub fn rgb_brightness(cell: u16) -> u8 {
+    let (r, g, b) = unpack_rgb(cell);
+    r.max(g).max(b)
+}
+
+/// Fully-expanded view of one chunk. ~160 KB:
+/// 64 KB blocks + 32 KB sky-light + 64 KB block-rgb.
 ///
 /// The light arrays only use the bottom 4 bits per byte (range `0..=15`);
 /// they sit unpacked here for fast random access during the BFS, then get
@@ -30,8 +55,10 @@ pub struct DenseChunk {
     pub blocks: Box<[Block; CHUNK_VOL]>,
     /// Sky-light values 0..=15, populated by the sky-light BFS.
     pub sky_light: Box<[u8; CHUNK_VOL]>,
-    /// Block-light values 0..=15, populated by the block-light BFS.
-    pub block_light: Box<[u8; CHUNK_VOL]>,
+    /// Per-voxel packed block-light: `(R << 8) | (G << 4) | B`,
+    /// each channel 4 bits (0..=15). Top 4 bits unused. Populated by
+    /// the colored block-light BFS in `lighting::recompute_chunk`.
+    pub block_rgb: Box<[u16; CHUNK_VOL]>,
 }
 
 impl DenseChunk {
@@ -40,7 +67,7 @@ impl DenseChunk {
         Self {
             blocks: Box::new([block; CHUNK_VOL]),
             sky_light: Box::new([0u8; CHUNK_VOL]),
-            block_light: Box::new([0u8; CHUNK_VOL]),
+            block_rgb: Box::new([0u16; CHUNK_VOL]),
         }
     }
 
@@ -83,8 +110,12 @@ pub struct PalettedChunk {
     pub indices: Packed4Bit,
     /// Sky-light values, 0..=15.
     pub sky_light: Packed4Bit,
-    /// Block-light values, 0..=15.
-    pub block_light: Packed4Bit,
+    /// Red channel of per-voxel block light (0..=15).
+    pub block_red: Packed4Bit,
+    /// Green channel of per-voxel block light (0..=15).
+    pub block_green: Packed4Bit,
+    /// Blue channel of per-voxel block light (0..=15).
+    pub block_blue: Packed4Bit,
 }
 
 impl PalettedChunk {
@@ -95,7 +126,9 @@ impl PalettedChunk {
             palette: vec![Block::Air],
             indices: Packed4Bit::zeros(CHUNK_VOL),
             sky_light: Packed4Bit::zeros(CHUNK_VOL),
-            block_light: Packed4Bit::zeros(CHUNK_VOL),
+            block_red: Packed4Bit::zeros(CHUNK_VOL),
+            block_green: Packed4Bit::zeros(CHUNK_VOL),
+            block_blue: Packed4Bit::zeros(CHUNK_VOL),
         }
     }
 
@@ -127,17 +160,24 @@ impl PalettedChunk {
         }
 
         let mut sky = Packed4Bit::zeros(CHUNK_VOL);
-        let mut blk = Packed4Bit::zeros(CHUNK_VOL);
+        let mut r = Packed4Bit::zeros(CHUNK_VOL);
+        let mut g = Packed4Bit::zeros(CHUNK_VOL);
+        let mut b = Packed4Bit::zeros(CHUNK_VOL);
         for i in 0..CHUNK_VOL {
             sky.set(i, dense.sky_light[i] & 0x0F);
-            blk.set(i, dense.block_light[i] & 0x0F);
+            let (rr, gg, bb) = unpack_rgb(dense.block_rgb[i]);
+            r.set(i, rr);
+            g.set(i, gg);
+            b.set(i, bb);
         }
 
         Self {
             palette,
             indices,
             sky_light: sky,
-            block_light: blk,
+            block_red: r,
+            block_green: g,
+            block_blue: b,
         }
     }
 
@@ -151,15 +191,19 @@ impl PalettedChunk {
             blocks[i] = self.palette[palette_idx];
         }
         let mut sky = Box::new([0u8; CHUNK_VOL]);
-        let mut blk = Box::new([0u8; CHUNK_VOL]);
+        let mut block_rgb = Box::new([0u16; CHUNK_VOL]);
         for i in 0..CHUNK_VOL {
             sky[i] = self.sky_light.get(i);
-            blk[i] = self.block_light.get(i);
+            block_rgb[i] = pack_rgb(
+                self.block_red.get(i),
+                self.block_green.get(i),
+                self.block_blue.get(i),
+            );
         }
         DenseChunk {
             blocks,
             sky_light: sky,
-            block_light: blk,
+            block_rgb,
         }
     }
 
@@ -229,6 +273,32 @@ pub struct ChunkMeta {
     pub mesh_version: u64,
 }
 
+/// Legacy v1 paletted-chunk layout used by region files written before
+/// the colored-block-light upgrade. Only deserialized — never written.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PalettedChunkV1 {
+    pub palette: Vec<Block>,
+    pub indices: Packed4Bit,
+    pub sky_light: Packed4Bit,
+    pub block_light: Packed4Bit,
+}
+
+impl From<PalettedChunkV1> for PalettedChunk {
+    /// Convert v1 (single-channel) to v2 (RGB) by mirroring the brightness
+    /// into all three channels. Old saves render the same as today
+    /// (max(R,G,B) = old block_light) until chunks are re-relit.
+    fn from(v1: PalettedChunkV1) -> Self {
+        Self {
+            palette: v1.palette,
+            indices: v1.indices,
+            sky_light: v1.sky_light,
+            block_red: v1.block_light.clone(),
+            block_green: v1.block_light.clone(),
+            block_blue: v1.block_light,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,7 +345,7 @@ mod tests {
         d.set(LocalPos(UVec3::new(31, 31, 31)), Block::Grass);
         d.set(LocalPos(UVec3::new(5, 10, 20)), Block::Water);
         d.sky_light[100] = 0xA;
-        d.block_light[200] = 0x7;
+        d.block_rgb[200] = pack_rgb(0x7, 0x0, 0x0);
 
         let p = PalettedChunk::compress(&d);
         let d2 = p.decompress();
@@ -293,7 +363,7 @@ mod tests {
             Block::Water
         );
         assert_eq!(d2.sky_light[100], 0xA);
-        assert_eq!(d2.block_light[200], 0x7);
+        assert_eq!(d2.block_rgb[200], pack_rgb(0x7, 0x0, 0x0));
     }
 
     #[test]
