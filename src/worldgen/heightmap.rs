@@ -311,6 +311,10 @@ impl DensityNoise {
     /// modification. Above the surface (negative `depth`), the
     /// `quarter_negative` softening reduces the magnitude so the 3D
     /// noise can carve overhangs without piercing solid ground.
+    /// Single-voxel density evaluation. Used by [`Self::topmost_solid`]
+    /// for tree placement; the chunk-fill hot path uses
+    /// [`crate::worldgen::density_graph::CellEvaluator`] which
+    /// samples a 9×9×9 corner lattice and trilerps.
     pub fn evaluate(
         &self,
         wx: i32,
@@ -321,30 +325,9 @@ impl DensityNoise {
         jagged: f32,
         density: &DensityConfig,
     ) -> f32 {
-        self.evaluate_with_noise_clamp(wx, wy, wz, offset, factor, jagged, density, false)
-    }
-
-    /// Same as [`Self::evaluate`] but, when `clamp_positive_noise` is
-    /// true, zeroes any positive base-3D-noise contribution. Used by
-    /// `fill_chunk` in the 4-block band immediately above rivers and
-    /// lakes so 3D-noise peaks can't create solid overhang ceilings
-    /// that close those bodies into tunnels.
-    pub fn evaluate_with_noise_clamp(
-        &self,
-        wx: i32,
-        wy: i32,
-        wz: i32,
-        offset: f32,
-        factor: f32,
-        jagged: f32,
-        density: &DensityConfig,
-        clamp_positive_noise: bool,
-    ) -> f32 {
         let t = (wy - density.y_min) as f32 / (density.y_max - density.y_min) as f32;
         let y_gradient = density.y_gradient_amplitude * (1.0 - 2.0 * t);
         let depth = y_gradient + offset;
-        // `J_noise`: high-frequency rider. Reuse base 3D noise — the
-        // amplitude `jagged` is what gates whether it contributes.
         let j_noise = if jagged.abs() > 1e-6 {
             self.evaluate_base_3d(wx, wy, wz, density)
         } else {
@@ -356,10 +339,7 @@ impl DensityNoise {
         } else {
             shaped_raw * density.above_surface_softening
         };
-        let mut base_3d = self.evaluate_base_3d(wx, wy, wz, density);
-        if clamp_positive_noise && base_3d > 0.0 {
-            base_3d = 0.0;
-        }
+        let base_3d = self.evaluate_base_3d(wx, wy, wz, density);
         let pre_slide = density.composition_scale * shaped + base_3d;
         slide(pre_slide, wy, density)
     }

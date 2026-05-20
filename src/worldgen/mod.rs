@@ -70,6 +70,7 @@ use noise::{Fbm, MultiFractal, NoiseFn, Simplex};
 pub mod caves;
 pub mod climate;
 pub mod config;
+pub mod density_graph;
 pub mod flat_cache;
 pub mod hash;
 pub mod heightmap;
@@ -405,6 +406,28 @@ impl Generator {
         // chunk and reuse for every voxel — keeps each chunk
         // deterministic even if a file watcher swaps mid-generation.
         let cfg = self.config_snapshot();
+
+        // PR 5: cell-grid evaluator. Builds a 9x9x9 corner lattice
+        // of pre-slide density values for this chunk; per-voxel
+        // density is the trilerp of the 8 surrounding corners. ~730
+        // expensive density evaluations per chunk instead of 32768
+        // (≈45× speedup on the per-voxel hot path).
+        let graph = density_graph::build_default_tree(&cfg.climate, &cfg.density);
+        let evaluator = density_graph::CellEvaluator::new(
+            &graph,
+            &self.density,
+            &cfg.density,
+            (origin.x, origin.y, origin.z),
+            |wx, wz| {
+                let (c, s, pv, _) =
+                    self.heightmap.climate(self.seed, wx as f32, wz as f32, &cfg.climate);
+                density_graph::ColumnClimate {
+                    continentalness: c,
+                    terrain_shape: s,
+                    ridges_pv: pv,
+                }
+            },
+        );
         for z in 0..CHUNK_DIM_U {
             for x in 0..CHUNK_DIM_U {
                 let wx = origin.x + x as i32;
@@ -423,66 +446,47 @@ impl Generator {
                 //     transition (so depth=0 is the topmost solid
                 //     block of an exposed surface).
                 let h_target = height as f32;
-                // PR 3: sample climate triple once per column and
-                // resolve the three splines. These outputs drive the
-                // entire y-loop's density composition.
-                let (c, s, r, _) =
-                    self.heightmap
-                        .climate(self.seed, wx as f32, wz as f32, &cfg.climate);
-                let offset = cfg.climate.offset_spline.evaluate(c, s, r);
-                let factor = cfg.climate.factor_spline.evaluate(c, s, r);
-                let jagged = cfg.climate.jaggedness_spline.evaluate(c, s, r);
-                // Seed `depth_below_surface` from the voxel one above
-                // the chunk's top: if the column continues solid into
-                // this chunk from above (i.e. we're deep underground),
-                // start with a depth large enough to skip the
-                // grass/dirt branches.
+                // PR 5: seed `depth_below_surface` from the voxel one
+                // above the chunk's top via the cell evaluator's
+                // *non-interpolated* boundary corner. The chunk
+                // boundary itself is a corner so we evaluate the
+                // graph directly there (the trilerp would otherwise
+                // need an extra corner row outside the chunk).
                 let above_chunk_top_wy = origin.y + CHUNK_DIM_U as i32;
-                let above_density = self.density.evaluate(
+                let above_climate = {
+                    let (c, s, pv, _) =
+                        self.heightmap
+                            .climate(self.seed, wx as f32, wz as f32, &cfg.climate);
+                    density_graph::ColumnClimate {
+                        continentalness: c,
+                        terrain_shape: s,
+                        ridges_pv: pv,
+                    }
+                };
+                let above_density_pre_slide = graph.evaluate(
                     wx,
                     above_chunk_top_wy,
                     wz,
-                    offset,
-                    factor,
-                    jagged,
+                    above_climate,
+                    &self.density,
                     &cfg.density,
                 );
+                let above_density =
+                    heightmap::slide(above_density_pre_slide, above_chunk_top_wy, &cfg.density);
                 let mut depth_below_surface: Option<i32> =
                     if above_density > 0.0 { Some(4) } else { None };
                 for y in (0..CHUNK_DIM_U).rev() {
                     let wy = origin.y + y as i32;
                     let local = LocalPos(UVec3::new(x, y, z));
 
-                    // PR 2: density uses the MC-style composition:
-                    // `4 * quarter_negative((depth + jagged) * factor)
-                    //   + base_3d_noise + slide(y)`
-                    // The asymmetric quarter_negative softening above
-                    // the surface keeps above-surface density values
-                    // small enough that any positive cave contribution
-                    // carves cleanly — no `min(2.0)` cap needed.
                     let approx_depth = height - wy;
-                    // PR 3 above-water 3D-noise clamp: in the
-                    // 4-block band immediately above any water
-                    // surface (lake_rim or ocean sea-level), zero
-                    // positive 3D-noise contribution so noise peaks
-                    // can't form solid overhang ceilings that close
-                    // the water body into a tunnel.
-                    let water_y_for_clamp: Option<i32> = lake_rim
-                        .or(if height <= SEA_LEVEL { Some(SEA_LEVEL) } else { None });
-                    let clamp_noise = match water_y_for_clamp {
-                        Some(wy_water) => wy > wy_water && wy <= wy_water + 4,
-                        None => false,
-                    };
-                    let raw_density = self.density.evaluate_with_noise_clamp(
-                        wx,
-                        wy,
-                        wz,
-                        offset,
-                        factor,
-                        jagged,
-                        &cfg.density,
-                        clamp_noise,
-                    );
+                    // PR 5: density via cell-grid corner sampling +
+                    // trilerp. Slide is post-interp (it's cheap and
+                    // varies per-voxel-y; baking it into corners
+                    // would interact poorly with the trilerp at the
+                    // slide boundary).
+                    let raw_density =
+                        heightmap::slide(evaluator.evaluate(wx, wy, wz), wy, &cfg.density);
 
                     let mut cave_contribution = 0.0_f32;
                     if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y {
@@ -1105,7 +1109,7 @@ mod tests {
         // SURFACE_BAND. The surface is now fuzz-jittered by 3D
         // relief noise instead of being column-quantised, so the
         // chevron-staircase artifact on moderate slopes is gone.
-        const GOLDEN_42_002: u64 = 0xBE99_03A1_9BAF_D8E0;
+        const GOLDEN_42_002: u64 = 0xEECE_DFF7_DEC7_EB0A;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);
