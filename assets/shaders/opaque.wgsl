@@ -199,63 +199,8 @@ fn biome_tint_shift(world_xz: vec2<f32>) -> vec3<f32> {
     );
 }
 
-// ACES filmic tone mapping — the cinematographer's go-to curve. Compresses
-// highlights into a soft roll-off (no clip to pure white on bright
-// surfaces) and adds a touch of crispness in the shadows. Operates on
-// linear-space RGB; the output is also linear and gets converted to
-// sRGB by the render-target format. Fitted approximation by Krzysztof
-// Narkowicz — same five constants every modern engine reaches for.
-fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
-    let a = 2.51;
-    let b = 0.03;
-    let c = 2.43;
-    let d = 0.59;
-    let e = 0.14;
-    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
-}
-
-// Cheap 2D hash matching the sky/water shaders so the underwater
-// caustic pattern stays coherent across pipelines.
-fn uw_hash(p: vec2<f32>) -> f32 {
-    let h = sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453;
-    return fract(h);
-}
-fn uw_noise(p: vec2<f32>) -> f32 {
-    let i = floor(p);
-    let f = fract(p);
-    let u = f * f * (3.0 - 2.0 * f);
-    let a = uw_hash(i);
-    let b = uw_hash(i + vec2<f32>(1.0, 0.0));
-    let c = uw_hash(i + vec2<f32>(0.0, 1.0));
-    let d = uw_hash(i + vec2<f32>(1.0, 1.0));
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
-
-// Apply the underwater colour grade. Two terms:
-//   1. Pull every channel toward a deep teal tint by `factor`.
-//   2. Overlay an animated caustic-like noise pattern keyed off the
-//      fragment's world position + time. The caustics simulate light
-//      filtering through ripples above and breaking into shifting
-//      bright bands across the underwater scene.
-// Composed *after* tonemapping so neither term gets curve-compressed.
-fn underwater_tint(rgb: vec3<f32>, world: vec3<f32>, t: f32, factor: f32) -> vec3<f32> {
-    if (factor <= 0.0) {
-        return rgb;
-    }
-    let water_blue = vec3<f32>(0.10, 0.30, 0.45);
-    var tinted = mix(rgb, water_blue, factor * 0.65);
-    // Two scrolling noise layers; their product produces tight
-    // caustic-like ridges where both layers are bright at the same
-    // place.
-    let a = uw_noise(world.xz * 0.35 + vec2<f32>( 0.18,  0.11) * t);
-    let b = uw_noise(world.xz * 0.27 + vec2<f32>(-0.13,  0.19) * t);
-    let caustic = pow(a * b, 2.0) * 0.6;
-    // Tint the caustic pale-aqua so it reads as light from above
-    // rather than just a brightness modulation.
-    let caustic_color = vec3<f32>(0.65, 0.95, 1.0);
-    tinted = tinted + caustic_color * caustic * factor;
-    return tinted;
-}
+// Underwater tint moved to composite.wgsl (PR 1 Task 6) — the caustic
+// pattern is now driven by screen-space UV rather than world position.
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
@@ -348,11 +293,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let fog_col = mix(cave_fog, sky_fog, max(in.v_light, 0.05));
     var out_rgb = mix(lit_rgb, fog_col, fog_t);
 
-    // ── Post: tonemap before the underwater tint so the tint stays
-    // a pure pulled colour instead of being compressed by the
-    // filmic curve into something muddier.
-    out_rgb = aces_tonemap(out_rgb);
-    out_rgb = underwater_tint(out_rgb, in.v_world, camera.time, camera.underwater_factor);
-
+    // Tonemap + underwater tint both live in composite.wgsl as of
+    // PR 1 Tasks 5/6. Output is linear HDR.
     return vec4<f32>(out_rgb, 1.0);
 }

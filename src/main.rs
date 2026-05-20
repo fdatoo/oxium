@@ -196,6 +196,13 @@ struct App {
     state: Option<AppState>,
     cli: CliOptions,
     frames_drawn: u32,
+    /// Last-observed chunk mesh count, used by the screenshot path to
+    /// detect when streaming has quiesced. The harness waits for the
+    /// count to stop growing for `SCREENSHOT_QUIESCE_FRAMES` consecutive
+    /// frames before capturing — without this, runs differ by ~8% pixels
+    /// because chunks load in non-deterministic order.
+    screenshot_last_chunk_count: usize,
+    screenshot_stable_frames: u32,
     /// Frame pacing target: the instant at which the next redraw is
     /// allowed to fire. Initialised on the first frame and advanced
     /// by [`Self::frame_budget`] each frame. Ignored when
@@ -209,7 +216,13 @@ const FRAME_BUDGET_60_FPS: Duration = Duration::from_nanos(16_666_667);
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let attrs = WindowAttributes::default().with_title("oxium");
+        // Hide the window in screenshot mode so the renderer runs truly
+        // headless — no surface flash on macOS, no focus-stealing while
+        // capturing a baseline. The window still exists (wgpu's Surface
+        // needs a winit window on every platform), it's just never shown.
+        let attrs = WindowAttributes::default()
+            .with_title("oxium")
+            .with_visible(self.cli.screenshot_path.is_none());
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
         // Pick spawn: explicit --spawn wins, else --find-water locates
         // a known wet column, else the default mid-air spawn.
@@ -362,8 +375,24 @@ impl ApplicationHandler for App {
                     return;
                 }
 
+                // Screenshot quiesce: hold capture until chunk streaming
+                // settles. Without this, two runs at the same warmup
+                // count produce ~8% pixel difference because rayon's
+                // work-stealing order changes which chunks finish first.
+                const SCREENSHOT_QUIESCE_FRAMES: u32 = 60;
+                if self.cli.screenshot_path.is_some() {
+                    let count = state.renderer.chunk_mesh_count();
+                    if count > self.screenshot_last_chunk_count {
+                        self.screenshot_last_chunk_count = count;
+                        self.screenshot_stable_frames = 0;
+                    } else {
+                        self.screenshot_stable_frames =
+                            self.screenshot_stable_frames.saturating_add(1);
+                    }
+                }
                 if let Some(path) = self.cli.screenshot_path.clone()
                     && self.frames_drawn > self.cli.warmup_frames
+                    && self.screenshot_stable_frames >= SCREENSHOT_QUIESCE_FRAMES
                 {
                     let (eye, mut yaw, mut pitch) = camera_from_ecs(&state.ecs);
                     if let Some((y, p)) = self.cli.look {
@@ -372,7 +401,11 @@ impl ApplicationHandler for App {
                     }
                     let (sun_dir, sun_intensity) =
                         ecs::systems::time_of_day::sun_state(&state.ecs);
-                    let time = state.start_time.elapsed().as_secs_f32();
+                    // Screenshot mode zeros the shader animation clock so
+                    // captures are deterministic. Without this, runs
+                    // differ because cloud/water/caustic animation phases
+                    // depend on wall-clock warmup time.
+                    let time = 0.0_f32;
                     match capture_offscreen(
                         &state.renderer,
                         &path,
@@ -571,6 +604,8 @@ fn main() {
         state: None,
         cli,
         frames_drawn: 0,
+        screenshot_last_chunk_count: 0,
+        screenshot_stable_frames: 0,
         next_frame_target: None,
     };
     event_loop.run_app(&mut app).unwrap();
