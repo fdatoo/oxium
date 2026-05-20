@@ -326,6 +326,13 @@ impl BlockRegistry {
     pub fn info(&self, b: Block) -> &BlockInfo {
         &self.infos[b as usize]
     }
+
+    /// Test-only: override one block's emission. Used by integration
+    /// tests for colored block light without introducing new block kinds.
+    #[doc(hidden)]
+    pub fn set_emission_for_tests(&mut self, b: Block, e: [u8; 3]) {
+        self.infos[b as usize].emission = e;
+    }
 }
 
 impl Default for BlockRegistry {
