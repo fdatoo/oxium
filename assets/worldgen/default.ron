@@ -378,32 +378,36 @@
         // can meander up to 8 blocks above/below a Y-driven base.
         spaghetti_elevation_min: -8.0,
         spaghetti_elevation_max: 8.0,
-        // Gradient placement matters: tubes form where
-        // abs(elev + ygrad) is small, and elev ∈ [-8, 8] so tubes
-        // can exist only where ygrad is in [-8, 8] too. The
-        // DENSITY of tubes at a given Y depends on what `elev`
-        // value is needed there: when `ygrad ≈ 0`, tubes form for
-        // `elev ≈ 0` (the most common noise value), so tube
-        // density peaks. When ygrad is near its extremes, tubes
-        // need extreme elev values (rare) → low density.
+        // Tube density profile: tubes form where
+        //   abs(elev + ygrad) < |thickness_offset|
+        // and the per-Y density depends on what `elev` value is
+        // needed at that Y. Tube DENSITY peaks where ygrad ≈ 0
+        // (then elev ≈ 0 satisfies, which is the most common
+        // noise value); tube DENSITY tapers toward zero as
+        // |ygrad| approaches `elev_max`.
         //
-        // To get tubes that organically reach the surface,
-        // straddle ygrad=0 around the typical heightmap range
-        // (Y ≈ 0 to 80). At the world top (+140) ygrad ≈ +8
-        // (suppressed, no tubes above the world); at the floor
-        // (-120) ygrad ≈ -8 (also suppressed at the bedrock
-        // slide). Mid-band where ygrad crosses zero has the
-        // highest tube density — and that mid-band now overlaps
-        // the heightmap, so surface entrances appear naturally.
-        spaghetti_gradient_from_y: 140,
+        // Asymmetric gradient: full suppression at the world top
+        // (no sky tubes), gentle ygrad ≈ 0 around Y ≈ -50 where
+        // tubes are densest, mild suppression at the floor. The
+        // gradient gently lets tubes "leak" up to the surface
+        // (Y ≈ 62) at about 5% density — rare but present, so
+        // entrances appear without flooding the surface.
+        spaghetti_gradient_from_y: 80,
         spaghetti_gradient_from_value: 8.0,
         spaghetti_gradient_to_y: -120,
-        spaghetti_gradient_to_value: -8.0,
+        spaghetti_gradient_to_value: -2.0,
         // Negative offset on the thickness_mod biases the cube
-        // term so tube interiors actually go negative. The slope
-        // adds per-region width variation.
-        spaghetti_thickness_offset: -0.95,
-        spaghetti_thickness_slope: -0.35,
+        // term so tube interiors actually go negative; |offset|
+        // is the half-width of the cube term's negative range,
+        // which is *also* the maximum tube radius in (elev, ygrad)
+        // space. Smaller |offset| → thinner tubes → less likely
+        // to merge into bowls when adjacent tubes overlap.
+        //
+        // -0.5 gives tubes around ~8 blocks across horizontally
+        // (vs ~15 at -0.95). Combined with the asymmetric
+        // gradient above, tubes stay tube-shaped.
+        spaghetti_thickness_offset: -0.5,
+        spaghetti_thickness_slope: -0.2,
         spaghetti_clamp_min: -1.0,
         spaghetti_clamp_max: 1.0,
         spaghetti_cave_noise_offset: 0.083,
