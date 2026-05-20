@@ -37,6 +37,11 @@ pub enum JobResult {
         lod: u8,
         mesh: ChunkMesh,
         version: u64,
+        /// Light volume blob (33³ × 4 bytes), populated by LOD-0 mesher
+        /// only — LODs 1 and 2 share the LOD-0 volume so they always set
+        /// `None`. `None` on LOD-0 means the chunk's light wasn't ready
+        /// yet (rare race; the next Relit will catch up).
+        light_volume: Option<Box<[u8; 33 * 33 * 33 * 4]>>,
     },
     /// A chunk Load job finished — the persisted chunk has been read
     /// from disk on the worker pool (rather than the single-threaded
@@ -63,6 +68,9 @@ pub enum JobResult {
         coord: ChunkCoord,
         data: PalettedChunk,
         changed_faces: [bool; 6],
+        /// Always present — the relight worker built it from the same
+        /// DenseChunk it just relit.
+        light_volume: Box<[u8; 33 * 33 * 33 * 4]>,
     },
 }
 
@@ -210,15 +218,17 @@ impl Jobs {
                 crate::lighting::recompute_chunk(&mut dense, &ns, &registry);
                 let post = crate::lighting::snapshot_face_boundaries(&dense);
                 let changed_faces: [bool; 6] = std::array::from_fn(|i| pre[i] != post[i]);
+                let light_volume = crate::voxel::chunk::build_light_volume_blob(&dense, &ns);
                 let data = PalettedChunk::compress(&dense);
-                (data, changed_faces)
+                (data, changed_faces, light_volume)
             }));
             match result {
-                Ok((data, changed_faces)) => {
+                Ok((data, changed_faces, light_volume)) => {
                     let _ = tx.send(JobResult::Relit {
                         coord,
                         data,
                         changed_faces,
+                        light_volume,
                     });
                 }
                 Err(payload) => {
@@ -255,6 +265,7 @@ impl Jobs {
                 lod,
                 mesh,
                 version,
+                light_volume: None,
             });
         });
     }
@@ -294,15 +305,19 @@ impl Jobs {
                 ];
                 // Greedy mesher (M4): same visual output as the naive
                 // mesher but typically 5-10x fewer vertices per chunk.
-                crate::mesher::greedy::mesh_greedy(&dense, &n_refs, &registry)
+                let mesh = crate::mesher::greedy::mesh_greedy(&dense, &n_refs, &registry);
+                let ns = crate::voxel::chunk::Neighbors { chunks: n_refs };
+                let light_volume = Some(crate::voxel::chunk::build_light_volume_blob(&dense, &ns));
+                (mesh, light_volume)
             }));
             match result {
-                Ok(mesh) => {
+                Ok((mesh, light_volume)) => {
                     let _ = tx.send(JobResult::Meshed {
                         coord,
                         lod: 0,
                         mesh,
                         version,
+                        light_volume,
                     });
                 }
                 Err(payload) => {
