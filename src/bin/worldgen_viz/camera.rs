@@ -97,9 +97,12 @@ impl FlyCamera {
     /// seconds. Uses `self.speed` as units per second, boosted if `boost`.
     pub fn translate(&mut self, forward_back: f32, strafe: f32, vertical: f32, boost: bool, dt: f32) {
         let mul = if boost { 4.0 } else { 1.0 };
-        let v = self.forward() * forward_back
-            + self.right() * strafe
-            + Vec3::Y * vertical;
+        // W/S walk along the yaw-only horizontal direction — pitch
+        // controls where you're looking, Q/E controls elevation.
+        // Mixing pitch into W/S means tilting the camera up also
+        // climbs the camera, which fights the dedicated Q/E.
+        let fwd_flat = Vec3::new(self.yaw.cos(), 0.0, self.yaw.sin()).normalize();
+        let v = fwd_flat * forward_back + self.right() * strafe + Vec3::Y * vertical;
         if v.length_squared() > 0.0 {
             self.position += v.normalize() * self.speed * mul * dt;
         }
