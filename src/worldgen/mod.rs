@@ -74,6 +74,7 @@ pub mod heightmap;
 pub mod hydrology;
 pub mod plates;
 pub mod region;
+pub mod spline;
 pub mod surface;
 pub mod trees;
 pub mod tuning;
