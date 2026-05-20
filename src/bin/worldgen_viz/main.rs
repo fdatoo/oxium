@@ -249,18 +249,24 @@ impl ApplicationHandler for VizApp {
 
                 // Cutaway sweep: when looping is on and the cutaway is
                 // active (max_y < the 1e9 "off" sentinel), advance the
-                // plane upward by dt * speed and wrap back to the
-                // bottom. Gives a "grow upward" reveal of the terrain
-                // stack. When the user drags the slider mid-loop, we
-                // pick up from wherever they dropped it.
+                // plane upward by dt * speed and wrap from the upper
+                // clamp back to the lower clamp. Gives a "grow upward"
+                // reveal of the terrain stack between the user-set
+                // bounds. If the live value is outside the band (just
+                // moved a handle, or just enabled the loop), snap it
+                // to the lower clamp so the next cycle starts fresh.
                 if self.state.cutaway_loop && self.state.cutaway_max_y < 1e6 {
-                    use crate::app::{CUTAWAY_MAX_Y, CUTAWAY_MIN_Y};
-                    let span = CUTAWAY_MAX_Y - CUTAWAY_MIN_Y;
+                    let lo = self.state.cutaway_clamp_lo;
+                    let hi = self.state.cutaway_clamp_hi;
+                    let span = (hi - lo).max(1e-3);
                     let advanced =
                         self.state.cutaway_max_y + dt * self.state.cutaway_loop_speed;
-                    let wrapped =
-                        CUTAWAY_MIN_Y + (advanced - CUTAWAY_MIN_Y).rem_euclid(span);
-                    self.state.cutaway_max_y = wrapped;
+                    let y = if advanced < lo || advanced > hi {
+                        lo + (advanced - lo).rem_euclid(span)
+                    } else {
+                        advanced
+                    };
+                    self.state.cutaway_max_y = y;
                 }
 
                 // Camera input (fly cam only).

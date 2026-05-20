@@ -73,8 +73,10 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
 
             ui.separator();
 
-            // Cutaway max-Y — shaves the top off the world so caves
-            // become visible without flying inside them. 1e9 = off.
+            // Cutaway: one checkbox + a two-handle range widget. The
+            // upper handle is the cutaway position when not looping;
+            // when Loop is on, both handles bound the sweep and a
+            // playhead inside the widget shows the live cutaway Y.
             ui.label("Cutaway:");
             let mut cutaway_on = app.cutaway_max_y < 1e6;
             if ui
@@ -84,25 +86,35 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
                 )
                 .changed()
             {
-                app.cutaway_max_y = if cutaway_on { 60.0 } else { 1e9 };
+                if cutaway_on {
+                    // Re-enable from the saved upper clamp so the
+                    // user's previous position is preserved across
+                    // off/on toggles.
+                    app.cutaway_max_y = app.cutaway_clamp_hi;
+                } else {
+                    app.cutaway_max_y = 1e9;
+                }
             }
             if cutaway_on {
-                let mut y = app.cutaway_max_y;
-                if ui
-                    .add(
-                        egui::Slider::new(
-                            &mut y,
-                            crate::app::CUTAWAY_MIN_Y..=crate::app::CUTAWAY_MAX_Y,
-                        )
-                        .text("max y"),
-                    )
-                    .on_hover_text("World Y above which fragments are discarded.")
-                    .changed()
-                {
-                    app.cutaway_max_y = y;
-                    // Manual drag overrides the loop's current position
-                    // for this frame; the loop will continue advancing
-                    // from wherever the user dropped it.
+                let playhead = if app.cutaway_loop {
+                    Some(app.cutaway_max_y)
+                } else {
+                    None
+                };
+                let r = crate::widgets::cutaway_range::cutaway_range(
+                    ui,
+                    &mut app.cutaway_clamp_lo,
+                    &mut app.cutaway_clamp_hi,
+                    playhead,
+                    crate::app::CUTAWAY_MIN_Y..=crate::app::CUTAWAY_MAX_Y,
+                );
+                r.response.on_hover_text(
+                    "Drag handles to set the cutaway range. Upper handle is the cutaway height when Loop is off; with Loop on, the playhead sweeps between handles.",
+                );
+                // When loop is off, the upper clamp IS the cutaway
+                // position — pin the live value to it every frame.
+                if !app.cutaway_loop {
+                    app.cutaway_max_y = app.cutaway_clamp_hi;
                 }
                 ui.checkbox(&mut app.cutaway_loop, "Loop")
                     .on_hover_text(

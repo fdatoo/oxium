@@ -42,20 +42,27 @@ pub struct AppState {
     /// Chunks that passed frustum culling last frame.
     pub scene_chunks_visible: usize,
     pub presets: PresetUi,
-    /// World-Y above which the fragment shader discards. A very
-    /// large default disables the cutaway. Lower to shave off the
-    /// surface and expose caves underneath.
+    /// World-Y above which the fragment shader discards. Always the
+    /// live value sent to the GPU. When looping is off it tracks
+    /// `cutaway_clamp_hi` (the upper clamp doubles as the cutaway
+    /// position); when looping it sweeps between the two clamps.
+    /// A very large value disables the cutaway entirely.
     pub cutaway_max_y: f32,
+    /// Lower clamp — the bottom of the sweep range when looping.
+    pub cutaway_clamp_lo: f32,
+    /// Upper clamp — also the cutaway position when not looping.
+    pub cutaway_clamp_hi: f32,
     /// When true, the main loop advances `cutaway_max_y` upward each
-    /// frame and wraps it back to the slider minimum — gives a
-    /// "grow upward" reveal of the terrain stack.
+    /// frame and wraps from `cutaway_clamp_hi` back to
+    /// `cutaway_clamp_lo` — gives a "grow upward" reveal of the
+    /// terrain stack.
     pub cutaway_loop: bool,
     /// Sweep speed for the cutaway loop, in world-Y units per second.
     pub cutaway_loop_speed: f32,
 }
 
-/// Slider/sweep range for the cutaway. Both the toolbar slider and
-/// the loop animation read from this so they stay in sync.
+/// Visible range of the cutaway clamp widget. Sweep math is bounded
+/// by the user-set clamps inside this, not by these absolute limits.
 pub const CUTAWAY_MIN_Y: f32 = -64.0;
 pub const CUTAWAY_MAX_Y: f32 = 192.0;
 
@@ -74,6 +81,8 @@ impl AppState {
             right_tab: RightTab::default(),
             presets: PresetUi::new(),
             cutaway_max_y: 1e9,
+            cutaway_clamp_lo: -32.0,
+            cutaway_clamp_hi: 80.0,
             cutaway_loop: false,
             cutaway_loop_speed: 30.0,
         }
