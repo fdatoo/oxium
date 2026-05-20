@@ -3,6 +3,7 @@
 mod render;
 mod scene;
 mod ui;
+mod worldgen_bridge;
 
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
@@ -134,6 +135,23 @@ impl ApplicationHandler for App {
                 render
                     .egui_state
                     .handle_platform_output(window, full_output.platform_output.clone());
+
+                // Regen mesh if config is dirty.
+                if self.dirty {
+                    let t0 = std::time::Instant::now();
+                    let (verts, idxs) =
+                        worldgen_bridge::regen_region_mesh(42, &self.config);
+                    if let Some(scene) = self.scene.as_mut() {
+                        scene.upload_mesh(&render.device, &verts, &idxs);
+                    }
+                    eprintln!(
+                        "viz regen: {:.1} ms ({} verts, {} idxs)",
+                        t0.elapsed().as_secs_f32() * 1000.0,
+                        verts.len(),
+                        idxs.len()
+                    );
+                    self.dirty = false;
+                }
 
                 let scene_ref = self.scene.as_ref().expect("scene");
                 let aspect = render.surface_config.width as f32
