@@ -1,0 +1,41 @@
+// Oxium worldgen default configuration.
+// Hot-reloaded by the file watcher (always on, including release builds).
+// On parse failure, the engine logs and keeps using the previous config.
+
+(
+    density: (
+        // World Y range — controls the y_gradient that biases density
+        // toward solid below and air above the surface.
+        y_min: -120,
+        y_max: 140,
+        y_gradient_amplitude: 1.5,
+
+        // MC's formula: 4 * quarter_negative((depth + jagged) * factor)
+        composition_scale: 4.0,
+        above_surface_softening: 0.25,
+
+        // PR 2: constant factor. PR 3 will swap this for a spline of
+        // (continentalness, erosion, ridges). Higher → sharper surface,
+        // lower → softer / flatter terrain.
+        factor: 4.0,
+
+        // Base 3D noise (anisotropic — y wavelength is half the xz).
+        base_3d_period: 32.0,
+        base_3d_amplitude: 1.0,
+        base_3d_y_scale: 0.5,
+
+        // Top slide: within 16 blocks of y_max, lerp density toward -0.078
+        // (pull to air) so the world has a clean sky ceiling.
+        slide_top_blocks: 16,
+        slide_top_target: -0.078125,
+
+        // Bottom slide: within 24 blocks of y_min, lerp density toward
+        // +0.117 (pull to solid) so caves can't punch through to the void.
+        slide_bottom_blocks: 24,
+        slide_bottom_target: 0.1171875,
+
+        // PR 2 placeholder: constant 0 offset. PR 3 makes this a spline
+        // of continentalness with mountain/plain/ocean knots.
+        offset_spline: Constant(0.0),
+    ),
+)
