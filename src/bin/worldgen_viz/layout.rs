@@ -103,24 +103,69 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
             });
         });
 
-    // Right panel: overlay map + probe (PR 2).
+    // Right panel: tabbed visualisations (Map / Cross-section) over a
+    // persistent Probe inspector below. Tabs share the same input
+    // (pinned column) and the same revision counter — switching tabs
+    // is a zero-cost UI swap; the tab not currently shown still
+    // holds its cached texture, no regen on switch-back.
     let generator = app.session.generator.clone();
+    let revision = app.session.invalidator.revision();
+    let pin_for_cross = app
+        .session
+        .probe
+        .snapshot
+        .as_ref()
+        .map(|s| (s.wx, s.h_target, s.wz));
+
     egui::SidePanel::right("probe_panel")
         .resizable(true)
         .default_width(360.0)
         .show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                // Map section
-                ui.heading("Overlay map");
-                let revision = app.session.invalidator.revision();
-                let pinned = app.session.probe.pinned;
-                let clicked = app.session.map.show(ui, &generator, revision, pinned);
-                if let Some((wx, wz)) = clicked {
-                    app.session.probe.pin(&generator, wx, wz);
+                // Tab strip.
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(app.right_tab == crate::app::RightTab::Map, "🗺 Map")
+                        .on_hover_text("2D top-down map with selectable pipeline stage overlay.")
+                        .clicked()
+                    {
+                        app.right_tab = crate::app::RightTab::Map;
+                    }
+                    if ui
+                        .selectable_label(
+                            app.right_tab == crate::app::RightTab::CrossSection,
+                            "✂ Cross-section",
+                        )
+                        .on_hover_text("Cut-plane heatmap through the pinned column.")
+                        .clicked()
+                    {
+                        app.right_tab = crate::app::RightTab::CrossSection;
+                    }
+                });
+                ui.separator();
+
+                // Active tab body.
+                match app.right_tab {
+                    crate::app::RightTab::Map => {
+                        let pinned = app.session.probe.pinned;
+                        let clicked = app
+                            .session
+                            .map
+                            .show(ui, &generator, revision, pinned);
+                        if let Some((wx, wz)) = clicked {
+                            app.session.probe.pin(&generator, wx, wz);
+                        }
+                    }
+                    crate::app::RightTab::CrossSection => {
+                        app.session
+                            .cross
+                            .show(ui, &generator, revision, pin_for_cross);
+                    }
                 }
                 ui.separator();
 
-                // Probe section
+                // Probe inspector — persistent across tabs because it's
+                // the canonical "details about the pinned column" view.
                 ui.heading("Probe");
                 if let Some(snap) = app.session.probe.snapshot.clone() {
                     ui.horizontal(|ui| {
@@ -141,28 +186,8 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
                         app.session.probe.probe_y,
                     );
                 } else {
-                    ui.label("Click the map to pin a column.");
+                    ui.label("Click the map (or a column in the 3D view) to pin one.");
                 }
-                ui.separator();
-
-                // Cross-section panel — collapsed by default so it
-                // doesn't dominate the right column for users who
-                // aren't actively probing density. Threads the
-                // pinned column through so the slice auto-focuses on
-                // it whenever the user clicks a new one.
-                let pin_for_cross = app
-                    .session
-                    .probe
-                    .snapshot
-                    .as_ref()
-                    .map(|s| (s.wx, s.h_target, s.wz));
-                egui::CollapsingHeader::new("Cross-section")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        app.session
-                            .cross
-                            .show(ui, &generator, revision, pin_for_cross);
-                    });
             });
         });
 

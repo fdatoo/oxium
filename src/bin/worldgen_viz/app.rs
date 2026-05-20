@@ -5,6 +5,21 @@ use crate::world::stream::StreamRadius;
 use oxium::worldgen::config::WorldgenConfig;
 use std::time::Instant;
 
+/// Which visualisation tab is active in the right-panel header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RightTab {
+    /// 2D top-down map with stage-selector + legend.
+    Map,
+    /// Cut-plane cross-section.
+    CrossSection,
+}
+
+impl Default for RightTab {
+    fn default() -> Self {
+        RightTab::Map
+    }
+}
+
 pub struct AppState {
     pub session: Session,
     /// Right-mouse button held — drives look (fly cam) / orbit (orbit cam).
@@ -14,6 +29,7 @@ pub struct AppState {
     pub last_cursor: Option<(f64, f64)>,
     pub last_frame: Instant,
     pub last_regen_ms: Option<f32>,
+    pub right_tab: RightTab,
     /// Process-start clock anchor. Used by the shader's pinned-chunk
     /// pulse animation so it ticks against monotonic time, not frame
     /// dt, and stays smooth across pauses.
@@ -38,6 +54,7 @@ impl AppState {
             start_time: Instant::now(),
             scene_chunks_total: 0,
             scene_chunks_visible: 0,
+            right_tab: RightTab::default(),
         }
     }
 
