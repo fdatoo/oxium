@@ -69,6 +69,7 @@ use noise::{Fbm, MultiFractal, NoiseFn, Simplex};
 //   * `region`  — LRU caches + region data structs.
 pub mod caves;
 pub mod climate;
+pub mod flat_cache;
 pub mod hash;
 pub mod heightmap;
 pub mod hydrology;
