@@ -137,16 +137,51 @@ pub struct Generator {
     /// LRU cache of macro regions feeding the trunk-river injection
     /// into fine flow accumulation.
     macro_cache: region::MacroCache,
+    /// Hot-reloadable worldgen config (RON-backed). Read once per
+    /// chunk via [`Self::config_snapshot`] to keep chunk gen
+    /// deterministic even if the file watcher swaps mid-generation.
+    config: config::ConfigHolder,
 }
 
 impl Generator {
-    /// Build a `Generator` with the given world seed.
+    /// Build a `Generator` with the given world seed and the bundled
+    /// default config. Equivalent to [`Self::with_config`] passing a
+    /// freshly-constructed `ConfigHolder` from
+    /// [`config::WorldgenConfig::bundled_default`].
+    pub fn new(seed: u64) -> Self {
+        let cfg = config::WorldgenConfig::bundled_default()
+            .expect("bundled default.ron must parse");
+        let holder = config::ConfigHolder::new(cfg);
+        Self::with_config(seed, holder)
+    }
+
+    /// Build a `Generator` with the given world seed and an externally
+    /// owned `ConfigHolder`. The application typically owns the holder
+    /// (and the file watcher); the Generator reads from it via
+    /// [`Self::config_snapshot`].
+    pub fn with_config(seed: u64, config: config::ConfigHolder) -> Self {
+        let mut g = Self::new_internal(seed);
+        g.config = config;
+        g
+    }
+
+    /// Cheap atomic read of the current config. Holds an
+    /// `Arc<WorldgenConfig>` snapshot — call once per chunk and reuse
+    /// across the chunk's lifetime to avoid mid-chunk drift if a
+    /// hot-reload races chunk gen.
+    pub fn config_snapshot(&self) -> std::sync::Arc<config::WorldgenConfig> {
+        self.config.load()
+    }
+
+    /// Internal constructor. Builds all the noise fields but leaves
+    /// `config` set to the bundled default; [`Self::with_config`]
+    /// overwrites it.
     ///
     /// Each noise field is seeded with a different per-axis salt so they
     /// don't produce correlated patterns (mountain-noise lining up with
     /// height-noise would just amplify existing hills instead of adding
     /// new geographic features).
-    pub fn new(seed: u64) -> Self {
+    fn new_internal(seed: u64) -> Self {
         // Heightmap noise: 4 octaves, ~96-block period at octave 0.
         // PR 2: the plate-driven heightmap owns its own FBM + warp
         // noise fields. The old `height_noise`, `mountain_noise`, and
@@ -179,6 +214,8 @@ impl Generator {
             .set_octaves(2)
             .set_frequency(1.0 / BIOME_JITTER_PERIOD as f64)
             .set_persistence(0.5);
+        let default_cfg = config::WorldgenConfig::bundled_default()
+            .expect("bundled default.ron must parse");
         Self {
             heightmap,
             density,
@@ -190,6 +227,7 @@ impl Generator {
             seed,
             fine_cache: region::fresh_fine_cache(),
             macro_cache: region::fresh_macro_cache(),
+            config: config::ConfigHolder::new(default_cfg),
         }
     }
 
@@ -1145,6 +1183,22 @@ mod tests {
         assert_eq!(dirt, 0, "deep underground had {dirt} dirt blocks");
         assert_eq!(sand, 0, "deep underground had {sand} sand blocks");
         assert_eq!(snow, 0, "deep underground had {snow} snow blocks");
+    }
+
+    /// Generator::with_config holds the ConfigHolder, and
+    /// `config_snapshot()` reflects swaps.
+    #[test]
+    fn generator_holds_config_and_reads_from_holder() {
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let holder = crate::worldgen::config::ConfigHolder::new(cfg);
+        let g = Generator::with_config(42, holder.clone());
+        // Initial snapshot has bundled default factor (4.0).
+        assert!((g.config_snapshot().density.factor - 4.0).abs() < 1e-5);
+        // Swap a new config; the Generator's snapshot should reflect it.
+        let mut new_cfg = (*holder.load()).clone();
+        new_cfg.density.factor = 1.0;
+        holder.swap(new_cfg);
+        assert!((g.config_snapshot().density.factor - 1.0).abs() < 1e-5);
     }
 
     /// Biome diversity: scanning a few thousand columns across a
