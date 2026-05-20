@@ -315,37 +315,54 @@
         Block(Stone),
     ]),
 
-    // ── Noise carvers (PR 8): cheese / spaghetti / pillars ───────────
+    // ── Noise carvers: cheese / spaghetti / pillars ─────────────────
     //
-    // Supplements the graph-based cave systems and wormholes with
-    // MC-style ambient cave density. Each channel mirrors MC's
-    // data/.../worldgen/noise/<name>.json. Topology stays in Rust;
-    // only values are file-driven.
+    // Ambient noise-driven cave density that runs alongside the
+    // graph cave systems and wormholes. Topology (which noise
+    // channels exist, how they compose) stays in Rust; only the
+    // numeric values are hot-reloadable from this file.
     cave: (
-        // ── Cheese caves: single 3D noise, threshold carves.
+        // ── Cheese: signed-density carver.
+        //   cheese = clamp(offset + cheese_noise, -1, 1)
+        //            + clamp(supp_offset + supp_slope * raw_density,
+        //                    supp_min, supp_max)
+        // Voxels carve where the result goes negative. The
+        // suppression term pushes things solid near the surface
+        // (raw_density ≈ 0) and dies off at depth, so cheese only
+        // carves deep underground.
         cheese: (
             first_octave: -8,
             amplitudes: [0.5, 1.0, 2.0, 1.0, 2.0, 1.0, 0.0, 2.0, 0.0],
         ),
         cheese_xz_scale: 0.6666667,
-        // +0.40: only the top ~10% of FBM values trigger cheese,
-        // making the carved chambers sparse and well-separated.
-        cheese_threshold: 0.40,
-        cheese_y_min: -30,
-        cheese_y_max: 10,
-        cheese_fade_blocks: 8,
-        // 0.8 with smoothstep soft-edge. Higher intensity (1.5)
-        // made cheese carve overlapping bowl chambers; lower
-        // produces sparse pockets that don't merge.
-        cheese_intensity: 0.8,
+        cheese_offset: 0.27,
+        cheese_suppression_offset: 1.5,
+        cheese_suppression_slope: -0.64,
+        cheese_suppression_min: 0.0,
+        cheese_suppression_max: 0.5,
 
-        // ── Spaghetti tubes: two noises gated by rarity + Y-gradient.
+        // ── Spaghetti: signed-density tube carver.
+        //   sloped_spag  = abs(elevation_mapped + y_gradient)
+        //   layer_ridged = (sloped_spag + thickness_mod)^3
+        //   cave_noise   = weird_scaled(modulator, sp2d)
+        //                  + cave_noise_offset * thickness_mod
+        //   result       = clamp(max(cave_noise, layer_ridged),
+        //                        clamp_min, clamp_max)
+        // The cube on layer_ridged makes most of the world solid
+        // (huge positive); caves form only along the thin curve
+        // where sloped_spag goes near zero — i.e., where the
+        // elevation noise crosses `-y_gradient`. That curve is the
+        // tube; the cave_noise term gates per-region.
         spaghetti_2d: (
             first_octave: -7,
             amplitudes: [1.0],
         ),
         spaghetti_2d_modulator: (
             first_octave: -11,
+            amplitudes: [1.0],
+        ),
+        spaghetti_2d_elevation: (
+            first_octave: -8,
             amplitudes: [1.0],
         ),
         spaghetti_2d_thickness: (
@@ -356,27 +373,29 @@
             first_octave: -5,
             amplitudes: [1.0],
         ),
-        // -0.2: only ~25% of underground regions get spaghetti
-        // tubes. The modulator's wavelength is 2048 blocks, so this
-        // is "occasional tube networks" — not "tubes everywhere".
-        spaghetti_rarity_threshold: -0.2,
-        // 0.05: ~3-4 block-diameter tubes. 0.08 made tubes merge
-        // into bowl-shaped voids in regions where many overlapped.
-        spaghetti_thickness_offset: 0.05,
-        // Gradient sign convention here: "top_y" refers to the
-        // shallower world Y (we want suppression there), "bottom_y"
-        // is deep (we want carving). The gradient value is added to
-        // `abs(field)` before the half-width test, so a positive
-        // value pushes tube_distance up → less carving. Deep voxels
-        // get -40, shallow voxels +8, matching MC's tube band but
-        // with Oxium's compressed Y range.
-        spaghetti_gradient_top_y: 140,
-        spaghetti_gradient_top_value: 8.0,
-        spaghetti_gradient_bottom_y: -120,
-        spaghetti_gradient_bottom_value: -40.0,
-        spaghetti_intensity: 1.2,
+        // Elevation noise maps to [-8, 8]: this is the amplitude of
+        // the "where is the tube centerline" wobble. ±8 means tubes
+        // can meander up to 8 blocks above/below a Y-driven base.
+        spaghetti_elevation_min: -8.0,
+        spaghetti_elevation_max: 8.0,
+        // Gradient: at the world floor we want +8 (suppress tubes
+        // near the bottom slide), at the world top we want -40
+        // (allow tubes generously through the underground band).
+        spaghetti_gradient_from_y: -120,
+        spaghetti_gradient_from_value: 8.0,
+        spaghetti_gradient_to_y: 140,
+        spaghetti_gradient_to_value: -40.0,
+        // Negative offset on the thickness_mod biases the cube
+        // term so tube interiors actually go negative. The slope
+        // adds per-region width variation.
+        spaghetti_thickness_offset: -0.95,
+        spaghetti_thickness_slope: -0.35,
+        spaghetti_clamp_min: -1.0,
+        spaghetti_clamp_max: 1.0,
+        spaghetti_cave_noise_offset: 0.083,
 
-        // ── Pillars: positive-density blobs that ADD stone back.
+        // ── Pillars: positive-density blobs that get max()'d
+        //     after cave subtraction so they refill carved voxels.
         pillar: (
             first_octave: -7,
             amplitudes: [1.0, 1.0],
@@ -393,6 +412,13 @@
         pillar_y_scale: 0.3,
         pillar_cutoff: 0.03,
         pillar_intensity: 4.0,
+
+        // Density threshold separating "surface zone" from
+        // "underground zone". Below this raw density, only the
+        // graph cave system's entrances carve, so the surface
+        // band stays mostly intact. Above it, all noise carvers
+        // run.
+        underground_density_threshold: 1.5625,
     ),
 
     // ── Aquifer system (PR 7) ────────────────────────────────────────

@@ -21,16 +21,10 @@ pub struct WorldgenConfig {
     pub cave: CaveConfig,
 }
 
-/// One MC-style noise channel descriptor. Mirrors the JSON shape in
-/// `data/minecraft/worldgen/noise/<name>.json`:
-///
-/// ```json
-/// { "firstOctave": -8, "amplitudes": [1.0, 1.0] }
-/// ```
-///
-/// `first_octave` sets the lowest-frequency octave's wavelength
-/// (`2^-first_octave` ≈ ~the wavelength in blocks). `amplitudes`
-/// weights successive octaves; a zero entry skips that octave.
+/// Noise channel descriptor. `first_octave` sets the lowest-
+/// frequency octave's wavelength (`2^-first_octave` ≈ the wavelength
+/// in blocks). `amplitudes` weights successive octaves; a zero entry
+/// skips that octave entirely.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelParams {
     pub first_octave: i32,
@@ -53,29 +47,57 @@ impl ChannelParams {
 /// spaghetti, pillars), not the graph cave systems.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CaveConfig {
-    // Cheese caves.
+    // Cheese: signed-density carver, see `cheese_contribution`.
     pub cheese: ChannelParams,
     pub cheese_xz_scale: f32,
-    pub cheese_threshold: f32,
-    pub cheese_y_min: i32,
-    pub cheese_y_max: i32,
-    pub cheese_fade_blocks: i32,
-    pub cheese_intensity: f32,
+    /// Constant added to the cheese noise sample. Positive = solid
+    /// bias; lowering it lets more voxels carve.
+    pub cheese_offset: f32,
+    /// Surface-suppression term, evaluated as
+    /// `clamp(supp_offset + supp_slope * raw_density, supp_min,
+    /// supp_max)`. At the surface (raw_density ≈ 0) the full
+    /// suppression applies, pushing cheese toward solid; deep
+    /// underground it dies off and cheese is free to carve.
+    pub cheese_suppression_offset: f32,
+    pub cheese_suppression_slope: f32,
+    pub cheese_suppression_min: f32,
+    pub cheese_suppression_max: f32,
 
-    // Spaghetti tubes.
+    // Spaghetti: signed-density tube carver, see `spaghetti_contribution`.
     pub spaghetti_2d: ChannelParams,
     pub spaghetti_2d_modulator: ChannelParams,
+    pub spaghetti_2d_elevation: ChannelParams,
     pub spaghetti_2d_thickness: ChannelParams,
     pub spaghetti_roughness: ChannelParams,
-    pub spaghetti_rarity_threshold: f32,
+    /// Linear remap range for the elevation modulator. The
+    /// elevation noise output is mapped to `[min, max]` and added
+    /// to the y-clamped gradient to find the tube centerline.
+    pub spaghetti_elevation_min: f32,
+    pub spaghetti_elevation_max: f32,
+    /// Y-clamped gradient endpoints. Added to the mapped
+    /// elevation noise before the abs() that defines the tube
+    /// distance. Larger positive values suppress tubes; negative
+    /// values let them carve.
+    pub spaghetti_gradient_from_y: i32,
+    pub spaghetti_gradient_from_value: f32,
+    pub spaghetti_gradient_to_y: i32,
+    pub spaghetti_gradient_to_value: f32,
+    /// Thickness modulator linear remap: `offset + slope *
+    /// thickness_noise`. A negative offset biases the cube term
+    /// (see `spaghetti_contribution`) so tube interiors go
+    /// negative; the noise-driven slope adds per-region width
+    /// variation.
     pub spaghetti_thickness_offset: f32,
-    pub spaghetti_gradient_top_y: i32,
-    pub spaghetti_gradient_top_value: f32,
-    pub spaghetti_gradient_bottom_y: i32,
-    pub spaghetti_gradient_bottom_value: f32,
-    pub spaghetti_intensity: f32,
+    pub spaghetti_thickness_slope: f32,
+    /// Final clamp range on the spaghetti density.
+    pub spaghetti_clamp_min: f32,
+    pub spaghetti_clamp_max: f32,
+    /// Coefficient on the thickness modulator inside the
+    /// region-modulated cave noise term.
+    pub spaghetti_cave_noise_offset: f32,
 
-    // Pillars (add density BACK inside carved volumes).
+    // Pillars: positive density that gets max()'d at the end so
+    // they refill carved voxels (stone columns inside open caves).
     pub pillar: ChannelParams,
     pub pillar_rareness: ChannelParams,
     pub pillar_thickness: ChannelParams,
@@ -83,6 +105,13 @@ pub struct CaveConfig {
     pub pillar_y_scale: f32,
     pub pillar_cutoff: f32,
     pub pillar_intensity: f32,
+
+    /// Raw-density threshold below which the noise carvers
+    /// (spaghetti + cheese) are silent. The graph cave system's
+    /// entrances still carve below this, providing the deliberate
+    /// surface openings. Above it (deeper underground), all
+    /// carvers operate.
+    pub underground_density_threshold: f32,
 }
 
 /// PR 4 biome lookup config. The 6 existing biomes (Tundra,

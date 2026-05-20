@@ -519,94 +519,93 @@ impl Generator {
                     let raw_density =
                         heightmap::slide(evaluator.evaluate(wx, wy, wz), wy, &cfg.density);
 
-                    // PR 8: combine all carvers via max() so multiple
-                    // sources at the same voxel don't stack to
-                    // absurd subtractions. The strongest contributor
-                    // wins. Behaviour for a single source is
-                    // unchanged.
-                    let mut cave_contribution = 0.0_f32;
+                    // Signed-density cave composition.
+                    //
+                    // Each cave layer returns a *signed* density —
+                    // negative values bias toward air, positive
+                    // toward solid. We start from `raw_density` (the
+                    // base terrain density) and pull it down via
+                    // `min(...)` whenever any cave layer goes
+                    // negative. A `max(..., pillars)` at the end
+                    // refills carved voxels where pillars apply.
+                    //
+                    // Layers, in order applied:
+                    //   1. Graph cave SDF        (negated → signed)
+                    //   2. Graph entrance SDF    (negated → signed)
+                    //   3. Wormhole carve         (negative const)
+                    //   4. Spaghetti + roughness (signed)
+                    //   5. Cheese                (signed, surface-suppressed)
+                    //
+                    // Spaghetti + cheese only run above the
+                    // `underground_density_threshold` — below that
+                    // (the surface band) only the graph layers
+                    // carve, preserving the heightmap cap except at
+                    // deliberate entrances.
+
+                    let mut composed = raw_density;
+
+                    // Graph carvers: SDF is positive in [0, intensity].
+                    // Negate and `min` so a positive SDF pulls density
+                    // toward (or below) zero.
                     if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y {
                         if approx_depth > CAVE_SURFACE_BUFFER {
-                            cave_contribution = cave_contribution
-                                .max(caves::cave_sdf(wx, wy, wz, &cave_systems));
+                            let sdf = caves::cave_sdf(wx, wy, wz, &cave_systems);
+                            if sdf > 0.0 {
+                                composed = composed.min(-sdf);
+                            }
                         }
-                        cave_contribution = cave_contribution
-                            .max(caves::entrance_sdf(wx, wy, wz, &cave_systems));
+                        let ent = caves::entrance_sdf(wx, wy, wz, &cave_systems);
+                        if ent > 0.0 {
+                            composed = composed.min(-ent);
+                        }
                     }
                     if approx_depth > CAVE_SURFACE_BUFFER
                         && wy > CAVE_FLOOR_Y
                         && self.wormhole_noise.carve(wx, wy, wz)
                     {
-                        cave_contribution = cave_contribution.max(CAVE_SDF_INTENSITY);
+                        composed = composed.min(-CAVE_SDF_INTENSITY);
                     }
-                    // PR 8 new: noise carver contributions. Gated by
-                    // the same surface buffer + cave floor as the
-                    // existing carvers so the surface cap stays
-                    // intact.
+
+                    // Noise carvers: only deeper than the underground
+                    // density threshold.
+                    if approx_depth > CAVE_SURFACE_BUFFER
+                        && wy > CAVE_FLOOR_Y
+                        && raw_density >= cfg.cave.underground_density_threshold
+                    {
+                        let cheese = caves::cheese_contribution(
+                            wx, wy, wz, raw_density,
+                            &self.noise_carvers, &cfg.cave,
+                        );
+                        composed = composed.min(cheese);
+
+                        let spag = caves::spaghetti_contribution(
+                            wx, wy, wz,
+                            &self.noise_carvers, &cfg.cave,
+                        );
+                        let roughness = caves::spaghetti_roughness(
+                            wx, wy, wz, &self.noise_carvers,
+                        );
+                        composed = composed.min(spag + roughness);
+                    }
+
+                    // Pillars: positive density component refilling
+                    // any carved voxel where pillars are present.
                     if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
-                        cave_contribution = cave_contribution.max(
-                            caves::cheese_contribution(
-                                wx,
-                                wy,
-                                wz,
-                                &self.noise_carvers,
-                                &cfg.cave,
-                            ),
+                        let pillar = caves::pillar_contribution(
+                            wx, wy, wz,
+                            &self.noise_carvers, &cfg.cave,
                         );
-                        cave_contribution = cave_contribution.max(
-                            caves::spaghetti_contribution(
-                                wx,
-                                wy,
-                                wz,
-                                &self.noise_carvers,
-                                &cfg.cave,
-                            ),
-                        );
+                        if pillar > 0.0 {
+                            composed = composed.max(pillar);
+                        }
                     }
-                    // Pillars ADD density back; computed only when
-                    // we're underground (surface buffer + cave floor
-                    // match the carver gating).
-                    let pillar = if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
-                        caves::pillar_contribution(
-                            wx,
-                            wy,
-                            wz,
-                            &self.noise_carvers,
-                            &cfg.cave,
-                        )
-                    } else {
-                        0.0
-                    };
 
-                    // Composition order:
-                    //   solid_density = density_for_compare
-                    //                   - cave_subtract + pillar_addback
-                    //
-                    // The min(1.0) cap is only applied when any
-                    // carver fires — raw_density at depth saturates
-                    // around +24 (composition_scale * factor *
-                    // y_gradient_amplitude), but carver intensities
-                    // are ~4, so without the cap no cave can ever
-                    // open up rock at depth. Pillars (also ≤4) then
-                    // add back into the capped frame, so the
-                    // "pillar refills carved void" math still works.
-                    let density_for_compare = if cave_contribution > 0.0 {
-                        raw_density.min(1.0)
-                    } else {
-                        raw_density
-                    };
-                    let solid =
-                        (density_for_compare - cave_contribution + pillar) > 0.0;
+                    let solid = composed > 0.0;
 
-                    // PR 7: aquifer can override both branches. When
-                    // `solid` is true but the aquifer pressure
-                    // beats the rock, the rock gets replaced by
-                    // fluid; when `solid` is false but we're inside
-                    // a fluid cell, the cave gets flooded. The
-                    // density passed in is the cave-subtracted one
-                    // (matches `solid` decision).
-                    let aquifer_density = density_for_compare - cave_contribution;
-                    let aq_substance = self.aquifer.substance(wx, wy, wz, aquifer_density);
+                    // Aquifer override. Receives the final composed
+                    // density so its solid/air decisions agree with
+                    // the cave composition above.
+                    let aq_substance = self.aquifer.substance(wx, wy, wz, composed);
 
                     let block = if let aquifer::Substance::Block(b) = aq_substance {
                         // Aquifer placed a fluid (Water or Lava).
@@ -1304,32 +1303,37 @@ mod tests {
         }
     }
 
-    /// PR 8 invariant: cheese caves must not carve outside their
-    /// configured Y window. With all other carvers (spaghetti,
-    /// pillars) zero'd and cheese on, a chunk well above the
-    /// cheese y_max should have an air count IDENTICAL to a chunk
-    /// with cheese also zero — i.e. cheese contributed nothing.
+    /// Noise carvers are gated by `underground_density_threshold` —
+    /// they only operate where the raw density is well above zero
+    /// (deep underground). The surface band should therefore look
+    /// identical whether the noise channels are nudged or left at
+    /// defaults: the gate keeps them silent.
+    ///
+    /// This catches a regression where the gate is dropped and
+    /// noise carvers start eating into surface terrain.
     #[test]
-    fn cheese_only_carves_in_its_y_window() {
+    fn noise_carvers_silent_above_underground_threshold() {
         let base = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
-        let mut cfg_cheese_only = base.clone();
-        cfg_cheese_only.cave.spaghetti_intensity = 0.0;
-        cfg_cheese_only.cave.pillar_intensity = 0.0;
-        let g_cheese = Generator::with_config(
+        // "Permissive cheese" config: drop the offset so cheese
+        // wants to carve much more aggressively.
+        let mut cfg_permissive = base.clone();
+        cfg_permissive.cave.cheese_offset = -1.0;
+        let g_permissive = Generator::with_config(
             42,
-            crate::worldgen::config::ConfigHolder::new(cfg_cheese_only.clone()),
+            crate::worldgen::config::ConfigHolder::new(cfg_permissive),
         );
-        let mut cfg_none = cfg_cheese_only.clone();
-        cfg_none.cave.cheese_intensity = 0.0;
-        let g_none =
-            Generator::with_config(42, crate::worldgen::config::ConfigHolder::new(cfg_none));
-
-        // Chunk Y=3 → world Y in [96, 127], well above cheese y_max=10.
+        let g_default = Generator::with_config(
+            42,
+            crate::worldgen::config::ConfigHolder::new(base),
+        );
+        // Chunk Y=3 → world Y in [96, 127], well above sea level,
+        // raw_density there is comfortably below the underground
+        // threshold so carvers should stay silent.
         let coord = ChunkCoord(IVec3::new(0, 3, 0));
-        let mut chunk_cheese = DenseChunk::empty();
-        let mut chunk_none = DenseChunk::empty();
-        g_cheese.fill_chunk(coord, &mut chunk_cheese);
-        g_none.fill_chunk(coord, &mut chunk_none);
+        let mut chunk_a = DenseChunk::empty();
+        let mut chunk_b = DenseChunk::empty();
+        g_permissive.fill_chunk(coord, &mut chunk_a);
+        g_default.fill_chunk(coord, &mut chunk_b);
         let air = |c: &DenseChunk| -> usize {
             c.blocks
                 .iter()
@@ -1337,9 +1341,9 @@ mod tests {
                 .count()
         };
         assert_eq!(
-            air(&chunk_cheese),
-            air(&chunk_none),
-            "cheese carving leaked outside its Y window (chunk Y=3)"
+            air(&chunk_a),
+            air(&chunk_b),
+            "noise carvers leaked above the underground density threshold"
         );
     }
 
