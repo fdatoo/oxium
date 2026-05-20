@@ -378,13 +378,20 @@
         // can meander up to 8 blocks above/below a Y-driven base.
         spaghetti_elevation_min: -8.0,
         spaghetti_elevation_max: 8.0,
-        // Gradient: at the world floor we want +8 (suppress tubes
-        // near the bottom slide), at the world top we want -40
-        // (allow tubes generously through the underground band).
-        spaghetti_gradient_from_y: -120,
+        // Gradient placement matters: tubes form where
+        // abs(elev + ygrad) is small, and elev is in
+        // [elev_min, elev_max] = [-8, 8]. So tubes can exist only
+        // where ygrad is roughly in [-8, 8] too.
+        //
+        // We want tubes to be densest *deep* and rare-but-possible
+        // near the surface — so the gradient peaks at +8 above the
+        // surface (no tubes high in the air) and tapers to 0 at
+        // the world floor (tubes are densest there, fading
+        // gradually upward through the depths).
+        spaghetti_gradient_from_y: 80,
         spaghetti_gradient_from_value: 8.0,
-        spaghetti_gradient_to_y: 140,
-        spaghetti_gradient_to_value: -40.0,
+        spaghetti_gradient_to_y: -120,
+        spaghetti_gradient_to_value: 0.0,
         // Negative offset on the thickness_mod biases the cube
         // term so tube interiors actually go negative. The slope
         // adds per-region width variation.
@@ -413,12 +420,13 @@
         pillar_cutoff: 0.03,
         pillar_intensity: 4.0,
 
-        // Density threshold separating "surface zone" from
-        // "underground zone". Below this raw density, only the
-        // graph cave system's entrances carve, so the surface
-        // band stays mostly intact. Above it, all noise carvers
-        // run.
-        underground_density_threshold: 1.5625,
+        // Density threshold for the noise carvers to operate.
+        // 0.0 means "any voxel that's nominally solid" — so
+        // spaghetti tubes can extend right up to the heightmap
+        // and form natural cave entrances where they reach it.
+        // Cheese's own surface-suppression term keeps cheese
+        // pockets from blooming through the surface.
+        underground_density_threshold: 0.0,
 
         // ── Surface entrance noise.
         //
@@ -443,14 +451,13 @@
         // about 30 shafts per 32×32 chunk patch on average.
         // Raise → fewer; lower → more.
         surface_entrance_threshold: 0.35,
-        // Intensity 3.0: strong enough to punch through the surface
-        // (raw_density near zero there) but mild enough that, with
-        // the linear depth taper applied in `surface_entrance_y_fade`,
-        // by the time the shaft is well underground the contribution
-        // is small. Any persistent solid rock below the cave layer
-        // overrides it, so shafts don't continue indefinitely into
-        // bedrock past the cave they connect to.
-        surface_entrance_intensity: 3.0,
+        // Disabled (intensity 0): the standalone 2D-shaft carver
+        // had no way of knowing where the underground cave
+        // network was, so it produced craters that dead-ended in
+        // bedrock. The new design relies on the spaghetti tubes
+        // themselves reaching the surface — entrances appear
+        // organically where a tube happens to surface.
+        surface_entrance_intensity: 0.0,
         // Active range extends down past the surface, well into
         // the depths where the spaghetti tube band operates
         // (typically Y in [-100, -10] for the configured gradient).
