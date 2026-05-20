@@ -279,9 +279,14 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
                         }
                     }
                     crate::app::RightTab::CrossSection => {
+                        let cutaway_y = if app.cutaway_max_y < 1e6 {
+                            Some(app.cutaway_max_y)
+                        } else {
+                            None
+                        };
                         app.session
                             .cross
-                            .show(ui, &generator, revision, pin_for_cross);
+                            .show(ui, &generator, revision, pin_for_cross, cutaway_y);
                     }
                 }
                 ui.separator();

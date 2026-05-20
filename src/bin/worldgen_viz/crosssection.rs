@@ -289,6 +289,7 @@ impl CrossSection {
         generator: &Arc<Generator>,
         revision: u64,
         pin: Option<(i32, i32, i32)>,
+        cutaway_y: Option<f32>,
     ) -> bool {
         // Auto-snap on pin change.
         if pin != self.last_seen_pin {
@@ -388,7 +389,28 @@ impl CrossSection {
             let panel_w = ui.available_width();
             let scale = (panel_w / w_px as f32).min(2.0);
             let size = egui::vec2(w_px as f32 * scale, h_px as f32 * scale);
-            ui.image((tex.id(), size));
+            let img_resp = ui.image((tex.id(), size));
+            // Cutaway indicator: on a vertical slice the b axis IS
+            // world-Y, so paint a horizontal line at the cutaway plane
+            // so the user can see at a glance which band of the cross
+            // section is the chunk of geometry currently visible in 3D.
+            if let Some(cy) = cutaway_y {
+                if matches!(self.orientation, Orientation::Xy | Orientation::Yz) {
+                    let bpp = self.blocks_per_pixel;
+                    // pixel_to_world inverse: b = center_b - (py - h/2) * bpp,
+                    // so py = h/2 - (b - center_b) / bpp.
+                    let py_image = h_px as f32 * 0.5 - (cy - self.center_b) / bpp;
+                    let rect = img_resp.rect;
+                    let y = rect.top() + py_image * scale;
+                    if y >= rect.top() && y <= rect.bottom() {
+                        ui.painter().hline(
+                            rect.left()..=rect.right(),
+                            y,
+                            egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 180, 60)),
+                        );
+                    }
+                }
+            }
         } else {
             // First-render placeholder — empty rect so the panel
             // doesn't reflow as soon as the texture arrives.
