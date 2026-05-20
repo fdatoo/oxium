@@ -48,9 +48,21 @@ pub fn density_panel(ui: &mut Ui, cfg: &mut DensityConfig) -> bool {
             egui::Slider::new(&mut cfg.slide_bottom_target, -1.0..=1.0).text("slide_bottom_target"),
         );
     });
-    ui.collapsing("Offset spline (PR 3)", |ui| {
-        ui.label(format!("{:?}", cfg.offset_spline));
-        ui.label("Spline editing widget lives in task 7.");
+    ui.collapsing("Offset spline", |ui| {
+        ui.add(crate::spline_widget::SplineEditor::new(&mut cfg.offset_spline));
+        if let oxium::worldgen::spline::CubicSpline::Multipoint(knots) = &cfg.offset_spline {
+            ui.label(format!("{} knots", knots.len()));
+        } else {
+            ui.label(format!("{:?}", cfg.offset_spline));
+        }
+        if ui.button("Convert to Multipoint with 4 knots").clicked() {
+            cfg.offset_spline = oxium::worldgen::spline::CubicSpline::Multipoint(vec![
+                oxium::worldgen::spline::Knot { loc: -1.0, val: -0.5, slope: 0.0 },
+                oxium::worldgen::spline::Knot { loc: -0.3, val: -0.2, slope: 0.0 },
+                oxium::worldgen::spline::Knot { loc: 0.2, val: 0.1, slope: 0.0 },
+                oxium::worldgen::spline::Knot { loc: 1.0, val: 0.4, slope: 0.0 },
+            ]);
+        }
     });
     cfg.y_min != snapshot_y_min
         || cfg.y_max != snapshot_y_max

@@ -3,6 +3,7 @@
 mod cross;
 mod render;
 mod scene;
+mod spline_widget;
 mod ui;
 mod worldgen_bridge;
 
