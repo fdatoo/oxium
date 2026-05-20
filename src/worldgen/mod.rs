@@ -401,24 +401,34 @@ impl Generator {
                     }
 
                     let density_for_compare = if cave_contribution > 0.0 {
-                        raw_density.min(2.0)
+                        // Cap at 1.0 (not 2.0) when cave contributions
+                        // are in play: with the soft SDF peaking at
+                        // CAVE_SDF_INTENSITY=4, the carve threshold of
+                        // `cap - cave_contribution > 0` puts the cave
+                        // wall at SDF = cap. cap=1 → wall at 25% of
+                        // peak intensity (ratio ≈ 0.75 of chamber
+                        // radius, 75% of tunnel radius). cap=2 only
+                        // carved the inner half, leaving tunnels
+                        // visibly narrow and chamber walls bumpy.
+                        raw_density.min(1.0)
                     } else {
                         raw_density
                     };
                     let solid = (density_for_compare - cave_contribution) > 0.0;
 
                     let block = if !solid {
-                        // Air — flood with water at/below the
-                        // effective water level (lake rim wins over
-                        // sea level when present).
+                        // Air — flood with water only where water
+                        // actually belongs: under a lake (below its
+                        // rim) or under the ocean (column height at
+                        // or below sea level). Caves under a land
+                        // column stay dry, since there's no hydraulic
+                        // connection to the ocean. This is a
+                        // primitive aquifer rule — temporary until
+                        // the real MC-style aquifer lands.
                         depth_below_surface = None;
-                        if let Some(rim) = lake_rim {
-                            if wy <= rim || wy <= SEA_LEVEL {
-                                Block::Water
-                            } else {
-                                Block::Air
-                            }
-                        } else if wy <= SEA_LEVEL {
+                        let in_lake = lake_rim.map_or(false, |rim| wy <= rim);
+                        let in_ocean = height <= SEA_LEVEL && wy <= SEA_LEVEL;
+                        if in_lake || in_ocean {
                             Block::Water
                         } else {
                             Block::Air
@@ -1055,6 +1065,47 @@ mod tests {
         assert!(
             found_carved_chunk,
             "expected ≥1 chunk in 16×16 scan to overlap a cave feature; found none"
+        );
+    }
+
+    /// Caves carved under a land column (column height well above
+    /// sea level, no lake above) must be dry — not flooded with
+    /// water from sea level. Sea-level water only belongs in ocean
+    /// columns; lake water only belongs under lakes.
+    #[test]
+    fn deep_caves_under_land_are_dry() {
+        let g = Generator::new(42);
+        // Find a chunk where every column is land AND none has a
+        // lake above it. Then check no Water in chunk-Y=-2 below it.
+        let mut found = None;
+        'outer: for cz in -8..8 {
+            for cx in -8..8 {
+                let mut ok = true;
+                'cols: for lz in 0..CHUNK_DIM_U {
+                    for lx in 0..CHUNK_DIM_U {
+                        let wx = cx * CHUNK_DIM_U as i32 + lx as i32;
+                        let wz = cz * CHUNK_DIM_U as i32 + lz as i32;
+                        let col = g.column_data(wx, wz);
+                        if col.height <= SEA_LEVEL + 5 || col.lake_rim.is_some() {
+                            ok = false;
+                            break 'cols;
+                        }
+                    }
+                }
+                if ok {
+                    found = Some((cx, cz));
+                    break 'outer;
+                }
+            }
+        }
+        let (cx, cz) = found.expect("expected a lake-free all-land chunk");
+        let mut chunk = DenseChunk::empty();
+        g.fill_chunk(ChunkCoord(IVec3::new(cx, -2, cz)), &mut chunk);
+        let water = chunk.blocks.iter().filter(|b| matches!(b, Block::Water)).count();
+        assert_eq!(
+            water, 0,
+            "lake-free land chunk ({cx}, -2, {cz}) had {water} water blocks — \
+             caves under land should be dry, not flooded"
         );
     }
 

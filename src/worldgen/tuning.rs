@@ -177,8 +177,10 @@ pub const POISSON_MIN_SPACING_MULT: f32 = 3.0;
 /// Inclusive range of extra MST edges (loops) to add beyond the
 /// minimum spanning tree.
 pub const MST_EXTRA_LOOPS: (u32, u32) = (1, 2);
-/// Tunnel cross-section radius, in blocks.
-pub const TUNNEL_RADIUS: (f32, f32) = (2.0, 3.0);
+/// Tunnel cross-section radius, in blocks. With the carve threshold
+/// at cap=1 / intensity=4, the effective carved tunnel radius is 75%
+/// of this — so (3.0, 4.5) gives navigable 4.5..7 block-wide tunnels.
+pub const TUNNEL_RADIUS: (f32, f32) = (3.0, 4.5);
 
 /// Probability a chamber in the Shallow band tries to expose to the
 /// surface (sinkhole / cliff mouth / skylight).
