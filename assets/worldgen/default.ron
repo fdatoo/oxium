@@ -336,10 +336,10 @@
         cheese_y_min: -30,
         cheese_y_max: 10,
         cheese_fade_blocks: 8,
-        // 0.6 ≈ CAVE_SDF_INTENSITY (4) / 7 — strong enough to
-        // perforate the chunk visibly but not enough to dominate
-        // graph chambers (intensity 4).
-        cheese_intensity: 0.6,
+        // 1.5: with smoothstep soft-edge, cheese now needs higher
+        // intensity to actually carve full-strength voxels at its
+        // center (depth=1 only at the top of the 0.10-wide band).
+        cheese_intensity: 1.5,
 
         // ── Spaghetti tubes: two noises gated by rarity + Y-gradient.
         spaghetti_2d: (
@@ -358,14 +358,13 @@
             first_octave: -5,
             amplitudes: [1.0],
         ),
-        // 0.0: spaghetti modulator < 0 ⇒ ~50% gate area, but the
-        // resulting per-voxel carve rate is still <10% because the
-        // |field| < half_width test inside the gate is also
-        // selective. Anything more permissive flooded entire deep
-        // chunks; -0.1 was too dry (just dust). Zero is the sweet
-        // spot.
-        spaghetti_rarity_threshold: 0.0,
-        spaghetti_thickness_offset: 0.04,
+        // Spaghetti is now the PRIMARY cave shape (graph caves are
+        // disabled). 0.4 ≈ ~70% of the FBM range passes the rarity
+        // gate, giving wide connected networks of tubes.
+        spaghetti_rarity_threshold: 0.4,
+        // Wider tubes — was 0.04 (≈2-3 block diameter). 0.08 gives
+        // 4-6 block tubes which read as actual passages.
+        spaghetti_thickness_offset: 0.08,
         // Gradient sign convention here: "top_y" refers to the
         // shallower world Y (we want suppression there), "bottom_y"
         // is deep (we want carving). The gradient value is added to

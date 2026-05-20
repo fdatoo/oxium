@@ -99,9 +99,13 @@ pub const MACRO_RIVER_THRESH: u32 = 500;
 // ── Caves ────────────────────────────────────────────────────────────
 
 /// Inclusive range of cave systems rolled per fine region.
-/// Down from (1,4) — the old number combined with big chambers
-/// produced 32-block-wide caverns everywhere underground.
-pub const CAVE_SYSTEMS_PER_REGION: (u32, u32) = (1, 2);
+/// Set to (0, 0) — graph chambers + tunnels structurally produce
+/// bowl-shaped caverns no matter how small we make them, because
+/// they carve spheres out of a smooth interpolated density. MC
+/// 1.18+ has no graph caves; underground shape comes entirely
+/// from noise carvers (cheese / spaghetti). The graph code is
+/// kept around for entrances + future use.
+pub const CAVE_SYSTEMS_PER_REGION: (u32, u32) = (0, 0);
 /// Vertical band (inclusive both ends) for Shallow systems.
 pub const CAVE_BAND_SHALLOW: (i32, i32) = (10, 50);
 /// Vertical band for Middle systems.

@@ -209,13 +209,12 @@ impl AquiferSystem {
         // rare because they would conflict with the surface lake /
         // ocean flood; deep aquifers are slightly more common.
         let dry_roll = hash::mix_unit(self.seed, &[cx, cy, cz, 5]);
-        let keep_chance = if center_y >= self.cfg.sea_level {
-            0.0 // never above sea level
-        } else if center_y >= LAVA_BAND_TOP_Y {
-            0.0 // shallow band: NO aquifers — caves stay dry
-        } else {
-            0.20 // deep band: occasional lava pools / deep aquifers
-        };
+        // All bands: no aquifers for now. Re-enable selectively
+        // (e.g. ~5% lava pools deep underground) once cave shaping
+        // is settled — currently the aquifer paired with the
+        // bowl-cave problem made it impossible to see what was
+        // wrong with cave shape.
+        let keep_chance: f32 = 0.0;
         if dry_roll >= keep_chance {
             return AquiferCell {
                 cx,
@@ -467,6 +466,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "all-cells-dry temp override; re-enable when aquifers are tuned back on"]
     fn deep_cells_can_be_lava() {
         // Stochastic, but over a strip of deep cells we should see
         // at least one lava cell.
@@ -538,6 +538,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "all-cells-dry temp override; re-enable when aquifers are tuned back on"]
     fn substance_below_table_in_cave_becomes_fluid() {
         // With sparse aquifers (most cells are dry), we have to
         // scan to find a wet cell whose y_top is above a candidate

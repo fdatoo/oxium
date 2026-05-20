@@ -772,11 +772,15 @@ pub fn cheese_contribution(
         wy as f64,
         wz as f64 * scale,
     ]) as f32;
-    if v > cfg.cheese_threshold {
-        cfg.cheese_intensity * fade
-    } else {
-        0.0
-    }
+    // Soft-edge the threshold instead of a hard cutoff. A hard
+    // cutoff produces terraced cave walls (each voxel either fully
+    // carved or untouched, walls follow the noise level set);
+    // smoothstep gives a 0.10-wide band where carve intensity ramps
+    // up, producing rounded chamber walls more like MC's underground.
+    let above = v - cfg.cheese_threshold;
+    let t = (above / 0.10).clamp(0.0, 1.0);
+    let depth = t * t * (3.0 - 2.0 * t); // smoothstep
+    cfg.cheese_intensity * depth * fade
 }
 
 /// Soft Y-edge fade for cheese caves. Returns 0 outside the band,
@@ -1026,6 +1030,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "graph caves disabled — CAVE_SYSTEMS_PER_REGION = (0, 0) for now"]
     fn cave_air_returns_true_inside_chamber_center() {
         let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
         let hm = HeightmapNoise::new(42, &cfg.climate);
