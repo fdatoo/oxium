@@ -34,14 +34,16 @@ struct Cli {
     /// Run one frame and exit (for CI smoke tests).
     #[arg(long, default_value_t = false)]
     check: bool,
-    /// Stream radius in chunks (XZ). Default 3 = 7×7 chunk grid ≈
-    /// 224 blocks visible horizontally. Larger = more world visible
-    /// but slower regen on every config edit.
+    /// Stream radius in chunks (XZ, camera-relative). Default 3 = 7×7
+    /// chunk grid ≈ 224 blocks visible horizontally. Larger = more
+    /// world visible but slower regen on every config edit.
     #[arg(long, default_value_t = 3)]
     radius_xz: i32,
-    /// Stream radius in chunks (Y). Default 2 = 5 vertical layers ≈
-    /// 160 blocks tall.
-    #[arg(long, default_value_t = 2)]
+    /// Stream Y half-range in chunks, world-anchored (NOT camera-
+    /// relative). Default 4 = chunks `cy ∈ -4..=4` ≈ blocks -128..=160,
+    /// which covers the full default Oxium world height regardless of
+    /// camera elevation.
+    #[arg(long, default_value_t = 4)]
     radius_y: i32,
 }
 
