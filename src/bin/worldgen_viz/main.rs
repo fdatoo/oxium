@@ -25,6 +25,8 @@ struct App {
     mouse_down: bool,
     last_cursor: Option<(f64, f64)>,
     cross_texture: Option<egui::TextureHandle>,
+    last_regen_ms: Option<f32>,
+    auto_regen: bool,
 }
 
 impl App {
@@ -41,6 +43,8 @@ impl App {
             mouse_down: false,
             last_cursor: None,
             cross_texture: None,
+            last_regen_ms: None,
+            auto_regen: true,
         }
     }
 }
@@ -104,6 +108,18 @@ impl ApplicationHandler for App {
                 };
                 self.camera.distance = (self.camera.distance - amt).clamp(8.0, 512.0);
             }
+            WindowEvent::KeyboardInput { event, .. } => {
+                use winit::keyboard::{KeyCode, PhysicalKey};
+                if event.state == winit::event::ElementState::Pressed {
+                    if let PhysicalKey::Code(code) = event.physical_key {
+                        match code {
+                            KeyCode::KeyR => self.dirty = true,
+                            KeyCode::Space => self.auto_regen = !self.auto_regen,
+                            _ => {}
+                        }
+                    }
+                }
+            }
             WindowEvent::RedrawRequested => {
                 let raw_input = render.egui_state.take_egui_input(window);
                 let mut dirty_local = self.dirty;
@@ -125,6 +141,9 @@ impl ApplicationHandler for App {
                     self.cross_texture = Some(tex);
                 }
                 let cross_tex = self.cross_texture.clone();
+                let last_regen_ms = self.last_regen_ms;
+                let mut auto_regen_local = self.auto_regen;
+                let mut force_regen = false;
                 let full_output = render.egui_ctx.clone().run(raw_input, |ctx| {
                     egui::SidePanel::left("config_panel")
                         .resizable(true)
@@ -150,6 +169,34 @@ impl ApplicationHandler for App {
                             }
                             ui.label("256×256 px, 4 blocks/px → 1024 blocks/side");
                         });
+                    egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(format!(
+                                "yaw {:.2} pitch {:.2} dist {:.0}",
+                                cam_info.0, cam_info.1, cam_info.2
+                            ));
+                            ui.separator();
+                            if let Some(ms) = last_regen_ms {
+                                ui.label(format!("last regen: {:.1} ms", ms));
+                            }
+                            ui.separator();
+                            ui.label(if auto_regen_local {
+                                "auto-regen: ON"
+                            } else {
+                                "auto-regen: OFF (press R to regen)"
+                            });
+                            ui.separator();
+                            if ui.button("[R] Regen").clicked() {
+                                force_regen = true;
+                            }
+                            if ui
+                                .button(if auto_regen_local { "Pause" } else { "Resume" })
+                                .clicked()
+                            {
+                                auto_regen_local = !auto_regen_local;
+                            }
+                        });
+                    });
                     egui::CentralPanel::default().show(ctx, |ui| {
                         ui.label(format!(
                             "yaw {:.2} pitch {:.2} dist {:.0} | dirty: {}",
@@ -157,22 +204,26 @@ impl ApplicationHandler for App {
                         ));
                     });
                 });
-                self.dirty = dirty_local;
+                self.dirty = dirty_local || force_regen;
+                self.auto_regen = auto_regen_local;
                 render
                     .egui_state
                     .handle_platform_output(window, full_output.platform_output.clone());
 
-                // Regen mesh if config is dirty.
-                if self.dirty {
+                // Regen mesh if config is dirty AND auto_regen is on
+                // (or the user just pressed [R] / clicked Regen).
+                if self.dirty && self.auto_regen {
                     let t0 = std::time::Instant::now();
                     let (verts, idxs) =
                         worldgen_bridge::regen_region_mesh(42, &self.config);
                     if let Some(scene) = self.scene.as_mut() {
                         scene.upload_mesh(&render.device, &verts, &idxs);
                     }
+                    let elapsed_ms = t0.elapsed().as_secs_f32() * 1000.0;
+                    self.last_regen_ms = Some(elapsed_ms);
                     eprintln!(
                         "viz regen: {:.1} ms ({} verts, {} idxs)",
-                        t0.elapsed().as_secs_f32() * 1000.0,
+                        elapsed_ms,
                         verts.len(),
                         idxs.len()
                     );
