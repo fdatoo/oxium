@@ -50,6 +50,8 @@ struct ChunkUniform {
     origin: vec4<f32>,   // xyz = chunk origin in world space; w unused
 };
 @group(1) @binding(0) var<uniform> chunk: ChunkUniform;
+@group(1) @binding(1) var light_volume:  texture_3d<f32>;
+@group(1) @binding(2) var light_sampler: sampler;
 
 @group(2) @binding(0) var atlas_tex: texture_2d<f32>;
 @group(2) @binding(1) var atlas_sampler: sampler;
