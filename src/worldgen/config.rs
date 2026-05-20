@@ -81,6 +81,35 @@ impl WorldgenConfig {
     }
 }
 
+use arc_swap::ArcSwap;
+use std::sync::Arc;
+
+/// Thread-safe holder for the current worldgen config. Readers use
+/// `holder.load()` to get a snapshot `Arc<WorldgenConfig>`; the file
+/// watcher swaps in a new value via `holder.swap(new)` without
+/// blocking readers.
+#[derive(Clone)]
+pub struct ConfigHolder(Arc<ArcSwap<WorldgenConfig>>);
+
+impl ConfigHolder {
+    pub fn new(initial: WorldgenConfig) -> Self {
+        Self(Arc::new(ArcSwap::new(Arc::new(initial))))
+    }
+
+    /// Cheap atomic read of the current config. Returns an
+    /// `Arc<WorldgenConfig>` snapshot — held references stay
+    /// valid even if the holder is swapped concurrently.
+    pub fn load(&self) -> Arc<WorldgenConfig> {
+        self.0.load_full()
+    }
+
+    /// Atomically replace the held config. Existing snapshots
+    /// returned by `load()` remain valid.
+    pub fn swap(&self, new: WorldgenConfig) {
+        self.0.store(Arc::new(new));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,5 +131,29 @@ mod tests {
         let parsed: WorldgenConfig = ron::from_str(&s).unwrap();
         assert_eq!(parsed.density.y_min, cfg.density.y_min);
         assert_eq!(parsed.density.factor, cfg.density.factor);
+    }
+
+    #[test]
+    fn holder_swap_visible_to_subsequent_load() {
+        let cfg = WorldgenConfig::bundled_default().unwrap();
+        let holder = ConfigHolder::new(cfg);
+        let initial_factor = holder.load().density.factor;
+        let mut new_cfg = (*holder.load()).clone();
+        new_cfg.density.factor = 99.0;
+        holder.swap(new_cfg);
+        assert!((initial_factor - 4.0).abs() < 1e-5);
+        assert!((holder.load().density.factor - 99.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn holder_load_returns_independent_snapshot() {
+        let cfg = WorldgenConfig::bundled_default().unwrap();
+        let holder = ConfigHolder::new(cfg);
+        let snapshot = holder.load();
+        let mut new_cfg = (*snapshot).clone();
+        new_cfg.density.factor = 42.0;
+        holder.swap(new_cfg);
+        // The previously-held snapshot must NOT see the new value.
+        assert!((snapshot.density.factor - 4.0).abs() < 1e-5);
     }
 }
