@@ -83,6 +83,13 @@ pub fn build_light_volume_blob(
 /// 0..=32. Indices 0..=31 read from this chunk; index 32 reads from the
 /// +X/+Y/+Z neighbor's index 0. If the neighbor isn't loaded, returns
 /// the local boundary cell (clamped to index 31).
+///
+/// Opaque cells get a "halo" fill: their stored value is the max of
+/// their 6 axial neighbors' values. The DenseChunk's BFS stores 0 in
+/// opaque cells (light doesn't penetrate them), but when the shader
+/// samples a face corner the trilinear filter pulls in the diagonally
+/// adjacent opaque cell — without the halo, that 0 darkens the corner
+/// even though the corner sits right next to a fully-lit air cell.
 fn sample_for_blob(
     dense: &DenseChunk,
     neighbors: &Neighbors,
@@ -90,8 +97,68 @@ fn sample_for_blob(
     y: usize,
     z: usize,
 ) -> (u8, u8, u8, u8) {
+    let (chunk_src, lx, ly, lz) = resolve_cell(dense, neighbors, x, y, z);
+    let idx = crate::voxel::coords::LocalPos(
+        glam::UVec3::new(lx as u32, ly as u32, lz as u32),
+    )
+    .to_index();
+    let block = chunk_src.blocks[idx];
+    let (mut r, mut g, mut b) = unpack_rgb(chunk_src.block_rgb[idx]);
+    let mut a = chunk_src.sky_light[idx] & 0x0F;
+
+    // Halo fill for opaque cells. Only Air propagates light through
+    // the BFS; Water and Leaves attenuate but still hold non-zero
+    // values. We treat anything other than Air as "doesn't naturally
+    // store usable light", and for those cells we look outward for a
+    // brighter neighbor. (Water/Leaves rarely matter for the corner
+    // artefact because their own stored light is already representative.)
+    if block != Block::Air {
+        // Walk the 6 axial neighbors in this chunk + neighbor borrow.
+        // The query handles the +X/+Y/+Z and 0-edge cases (it walks the
+        // 0..=32 grid, so an axis underflow / overflow reads -X/-Y/-Z
+        // neighbors when available).
+        for (dx, dy, dz) in [
+            ( 1, 0, 0), (-1, 0, 0),
+            ( 0, 1, 0), ( 0,-1, 0),
+            ( 0, 0, 1), ( 0, 0,-1),
+        ] {
+            let nx = x as isize + dx;
+            let ny = y as isize + dy;
+            let nz = z as isize + dz;
+            // Bounds: 0..=32 inclusive. Out-of-bounds → skip.
+            if nx < 0 || nx > 32 || ny < 0 || ny > 32 || nz < 0 || nz > 32 {
+                continue;
+            }
+            let (ns, nlx, nly, nlz) =
+                resolve_cell(dense, neighbors, nx as usize, ny as usize, nz as usize);
+            let nidx = crate::voxel::coords::LocalPos(
+                glam::UVec3::new(nlx as u32, nly as u32, nlz as u32),
+            )
+            .to_index();
+            let (nr, ng, nb) = unpack_rgb(ns.block_rgb[nidx]);
+            let na = ns.sky_light[nidx] & 0x0F;
+            r = r.max(nr);
+            g = g.max(ng);
+            b = b.max(nb);
+            a = a.max(na);
+        }
+    }
+    (r, g, b, a)
+}
+
+/// Resolve a 0..=32 query coord into the appropriate `DenseChunk` and
+/// local 0..=31 index. Index 32 on any axis crosses into the +X/+Y/+Z
+/// neighbor's index 0; missing neighbors clamp to the local boundary
+/// (index 31).
+fn resolve_cell<'a>(
+    dense: &'a DenseChunk,
+    neighbors: &'a Neighbors,
+    x: usize,
+    y: usize,
+    z: usize,
+) -> (&'a DenseChunk, usize, usize, usize) {
     use crate::mesher::Face;
-    let (chunk_src, lx, ly, lz): (&DenseChunk, usize, usize, usize) = if x == 32 {
+    if x == 32 {
         match neighbors.chunks[Face::PosX as usize] {
             Some(n) => (n, 0, y.min(31), z.min(31)),
             None    => (dense, 31, y.min(31), z.min(31)),
@@ -108,12 +175,7 @@ fn sample_for_blob(
         }
     } else {
         (dense, x, y, z)
-    };
-    let idx = crate::voxel::coords::LocalPos(glam::UVec3::new(lx as u32, ly as u32, lz as u32))
-        .to_index();
-    let (r, g, b) = unpack_rgb(chunk_src.block_rgb[idx]);
-    let a = chunk_src.sky_light[idx] & 0x0F;
-    (r, g, b, a)
+    }
 }
 
 /// Fully-expanded view of one chunk. ~160 KB:
