@@ -769,6 +769,12 @@ pub fn surface_entrance_contribution(
     carvers: &NoiseCarvers,
     cfg: &CaveConfig,
 ) -> f32 {
+    // Hard disable when intensity is non-positive — otherwise the
+    // `intensity * depth * fade` product is 0, and `min(composed,
+    // 0)` still flips any positive density to 0 (= not solid).
+    if cfg.surface_entrance_intensity <= 0.0 {
+        return 1.0;
+    }
     let fade = surface_entrance_y_fade(wy, cfg);
     if fade <= 0.0 {
         return 1.0; // sentinel positive (no cave)
