@@ -14,6 +14,7 @@ pub mod atlas;
 pub mod camera;
 pub mod font;
 pub mod gpu;
+pub mod hdr;
 pub mod hud;
 pub mod mesh;
 pub mod pipelines;
