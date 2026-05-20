@@ -107,7 +107,7 @@ pub fn drain_jobs(
                     }
                 }
             }
-            JobResult::Meshed { coord, lod, mesh, version } => {
+            JobResult::Meshed { coord, lod, mesh, version, light_volume } => {
                 // Drop the upload if the chunk has been re-edited since
                 // this mesh job was spawned. Without this check, a
                 // slow streaming mesh job can complete after a fast
@@ -120,9 +120,16 @@ pub fn drain_jobs(
                 };
                 if version >= current {
                     renderer.upload_chunk_mesh(coord, lod, &mesh);
+                    if let Some(blob) = light_volume {
+                        renderer.upload_chunk_light_volume(coord, blob.as_ref());
+                    }
                 }
             }
-            JobResult::Relit { coord, data, changed_faces } => {
+            JobResult::Relit { coord, data, changed_faces, light_volume } => {
+                // Push the light volume to the GPU FIRST so the chunk's bind
+                // group picks up the new lighting on the next draw — even if
+                // the mesh re-spawn lags.
+                renderer.upload_chunk_light_volume(coord, light_volume.as_ref());
                 // Swap the freshly-relit chunk into the World and reset
                 // its dirty flags. Re-mesh **all three** LOD levels so
                 // distant terrain reflects the new light values too —

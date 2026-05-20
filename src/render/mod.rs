@@ -16,6 +16,7 @@ pub mod font;
 pub mod gpu;
 pub mod hdr;
 pub mod hud;
+pub mod light_volume;
 pub mod mesh;
 pub mod pipelines;
 pub mod screenshot;
@@ -223,6 +224,17 @@ pub struct Renderer {
     /// on the chunk's distance to the camera, falling back to the
     /// nearest available LOD if a job hasn't finished yet.
     chunk_meshes: HashMap<ChunkCoord, [Option<ChunkGpu>; 3]>,
+    /// Per-chunk 3D light volume textures, keyed by world chunk coord.
+    /// One volume per chunk regardless of how many LOD slots are filled.
+    chunk_lights: HashMap<ChunkCoord, light_volume::ChunkLightVolume>,
+    /// Linear sampler used at chunk bind group entry 2 (light volume).
+    light_sampler: wgpu::Sampler,
+    /// Held alive so `placeholder_light_view` stays valid.
+    _placeholder_light_tex: wgpu::Texture,
+    /// 1×1×1 black light volume used when a chunk's real volume hasn't
+    /// uploaded yet (Meshed-before-Relit race). Keeps draw paths from
+    /// crashing on missing bind-group entries.
+    placeholder_light_view: wgpu::TextureView,
     /// Number of `draw_indexed` calls the last opaque pass issued.
     /// Updated by `encode_opaque_pass`, read by the perf HUD. `Cell`
     /// so the render path can stay `&self` while still recording.
@@ -235,13 +247,15 @@ pub struct Renderer {
     underwater_factor: f32,
 }
 
-/// Per-chunk GPU resources: the mesh buffers, the chunk-origin uniform, and
-/// the bind group that points the pipeline at that uniform.
+/// Per-chunk GPU resources: the mesh buffers and the chunk-origin uniform.
+/// The bind group referencing the uniform buffer is built at draw time so
+/// each draw can include the chunk's current light_volume view.
 struct ChunkGpu {
     mesh: GpuMesh,
-    /// Kept alive so the `bind_group` keeps a valid buffer reference.
-    _ubuf: wgpu::Buffer,
-    bg: wgpu::BindGroup,
+    /// Per-LOD chunk uniform (world-space origin). The bind group
+    /// referencing this buffer is built at draw time so each draw
+    /// can include the chunk's current light_volume view.
+    ubuf: wgpu::Buffer,
 }
 
 impl Renderer {
@@ -251,6 +265,44 @@ impl Renderer {
     /// reflects real throughput.
     pub fn new_with_present_mode(window: Arc<Window>, present_mode: wgpu::PresentMode) -> Self {
         let gpu = Gpu::new_with_present_mode(window, present_mode);
+        let light_sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("chunk-light-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        // 1×1×1 black 3D texture as the placeholder when a chunk's real
+        // light volume hasn't been uploaded yet.
+        let placeholder_light_tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("chunk-light-placeholder"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: light_volume::LIGHT_VOLUME_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        gpu.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &placeholder_light_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[0u8, 0, 0, 0],
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        let placeholder_light_view = placeholder_light_tex.create_view(&Default::default());
         let hdr_target =
             hdr::HdrTarget::new(&gpu.device, gpu.surface_cfg.width, gpu.surface_cfg.height);
         let (depth_texture, depth_view) =
@@ -547,6 +599,10 @@ impl Renderer {
             _hud_font_view: font_view,
             _hud_sampler: hud_sampler,
             chunk_meshes: HashMap::new(),
+            chunk_lights: HashMap::new(),
+            light_sampler,
+            _placeholder_light_tex: placeholder_light_tex,
+            placeholder_light_view,
             last_draw_calls: std::cell::Cell::new(0),
             underwater_factor: 0.0,
         }
@@ -674,22 +730,9 @@ impl Renderer {
                 }]),
                 usage: wgpu::BufferUsages::UNIFORM,
             });
-        let bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("chunk-bg"),
-            layout: &self.chunk_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &ubuf,
-                    offset: 0,
-                    size: std::num::NonZeroU64::new(16),
-                }),
-            }],
-        });
         slots[lod] = Some(ChunkGpu {
             mesh: gpu_mesh,
-            _ubuf: ubuf,
-            bg,
+            ubuf,
         });
     }
 
@@ -697,6 +740,31 @@ impl Renderer {
     /// chunk leaves the load radius.
     pub fn remove_chunk_mesh(&mut self, coord: ChunkCoord) {
         self.chunk_meshes.remove(&coord);
+        self.chunk_lights.remove(&coord);
+    }
+
+    /// Upload (or replace) the 3D light volume for chunk `coord`.
+    /// The blob must be exactly `LIGHT_VOLUME_BYTES` long.
+    pub fn upload_chunk_light_volume(&mut self, coord: ChunkCoord, blob: &[u8]) {
+        use std::collections::hash_map::Entry;
+        match self.chunk_lights.entry(coord) {
+            Entry::Occupied(e) => {
+                e.get().update(&self.gpu.queue, blob);
+            }
+            Entry::Vacant(e) => {
+                let vol = light_volume::ChunkLightVolume::new(
+                    &self.gpu.device,
+                    &self.gpu.queue,
+                    blob,
+                );
+                e.insert(vol);
+            }
+        }
+    }
+
+    /// Drop the per-chunk light volume (called when the chunk unloads).
+    pub fn remove_chunk_light_volume(&mut self, coord: ChunkCoord) {
+        self.chunk_lights.remove(&coord);
     }
 
     /// Number of chunk hashmap entries (one per coord, regardless of how
@@ -767,6 +835,8 @@ impl Renderer {
             bytemuck::cast_slice(&[CameraUniform {
                 view_proj: vp.to_cols_array_2d(),
                 sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.0],
+                sun_color: [1.00, 0.96, 0.90, 0.0],
+                sky_color: [0.55, 0.70, 0.95, 0.0],
                 sun_intensity,
                 time,
                 underwater_factor: self.underwater_factor,
@@ -828,6 +898,8 @@ impl Renderer {
                 // sun's image lands at the geometrically correct
                 // reflected position via the usual dot product.
                 sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.0],
+                sun_color: [1.00, 0.96, 0.90, 0.0],
+                sky_color: [0.55, 0.70, 0.95, 0.0],
                 sun_intensity,
                 time,
                 underwater_factor: 0.0, // reflections don't get the underwater grade
@@ -1105,7 +1177,32 @@ impl Renderer {
                 .as_ref()
                 .or_else(|| slots.iter().flatten().next());
             if let Some(cg) = chosen {
-                pass.set_bind_group(1, &cg.bg, &[0]);
+                let light_view = self.chunk_lights.get(coord)
+                    .map(|v| &v.view)
+                    .unwrap_or(&self.placeholder_light_view);
+                let chunk_bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("chunk-bg"),
+                    layout: &self.chunk_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: &cg.ubuf,
+                                offset: 0,
+                                size: std::num::NonZeroU64::new(16),
+                            }),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(light_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&self.light_sampler),
+                        },
+                    ],
+                });
+                pass.set_bind_group(1, &chunk_bg, &[0]);
                 pass.set_vertex_buffer(0, cg.mesh.vbuf.slice(..));
                 pass.set_index_buffer(cg.mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..cg.mesh.index_count, 0, 0..1);
@@ -1218,7 +1315,32 @@ impl Renderer {
                 .as_ref()
                 .or_else(|| slots.iter().flatten().next());
             if let Some(cg) = chosen {
-                pass.set_bind_group(1, &cg.bg, &[0]);
+                let light_view = self.chunk_lights.get(coord)
+                    .map(|v| &v.view)
+                    .unwrap_or(&self.placeholder_light_view);
+                let chunk_bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("chunk-bg"),
+                    layout: &self.chunk_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: &cg.ubuf,
+                                offset: 0,
+                                size: std::num::NonZeroU64::new(16),
+                            }),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(light_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&self.light_sampler),
+                        },
+                    ],
+                });
+                pass.set_bind_group(1, &chunk_bg, &[0]);
                 pass.set_vertex_buffer(0, cg.mesh.vbuf.slice(..));
                 pass.set_index_buffer(cg.mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..cg.mesh.index_count, 0, 0..1);
@@ -1312,7 +1434,32 @@ impl Renderer {
                 .as_ref()
                 .or_else(|| slots.iter().flatten().next());
             if let Some(cg) = chosen {
-                pass.set_bind_group(1, &cg.bg, &[0]);
+                let light_view = self.chunk_lights.get(coord)
+                    .map(|v| &v.view)
+                    .unwrap_or(&self.placeholder_light_view);
+                let chunk_bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("chunk-bg"),
+                    layout: &self.chunk_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: &cg.ubuf,
+                                offset: 0,
+                                size: std::num::NonZeroU64::new(16),
+                            }),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(light_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&self.light_sampler),
+                        },
+                    ],
+                });
+                pass.set_bind_group(1, &chunk_bg, &[0]);
                 pass.set_vertex_buffer(0, cg.mesh.vbuf.slice(..));
                 pass.set_index_buffer(cg.mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..cg.mesh.index_count, 0, 0..1);
@@ -1353,6 +1500,8 @@ impl Renderer {
             bytemuck::cast_slice(&[CameraUniform {
                 view_proj: vp.to_cols_array_2d(),
                 sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.0],
+                sun_color: [1.00, 0.96, 0.90, 0.0],
+                sky_color: [0.55, 0.70, 0.95, 0.0],
                 sun_intensity,
                 time,
                 underwater_factor: self.underwater_factor,

@@ -12,6 +12,8 @@
 struct CameraUniform {
     view_proj:         mat4x4<f32>,
     sun_dir:           vec4<f32>,
+    sun_color:         vec4<f32>,
+    sky_color:         vec4<f32>,
     sun_intensity:     f32,
     time:              f32,
     underwater_factor: f32,
