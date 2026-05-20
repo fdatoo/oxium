@@ -835,6 +835,8 @@ impl Renderer {
             bytemuck::cast_slice(&[CameraUniform {
                 view_proj: vp.to_cols_array_2d(),
                 sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.0],
+                sun_color: [1.00, 0.96, 0.90, 0.0],
+                sky_color: [0.55, 0.70, 0.95, 0.0],
                 sun_intensity,
                 time,
                 underwater_factor: self.underwater_factor,
@@ -896,6 +898,8 @@ impl Renderer {
                 // sun's image lands at the geometrically correct
                 // reflected position via the usual dot product.
                 sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.0],
+                sun_color: [1.00, 0.96, 0.90, 0.0],
+                sky_color: [0.55, 0.70, 0.95, 0.0],
                 sun_intensity,
                 time,
                 underwater_factor: 0.0, // reflections don't get the underwater grade
@@ -1496,6 +1500,8 @@ impl Renderer {
             bytemuck::cast_slice(&[CameraUniform {
                 view_proj: vp.to_cols_array_2d(),
                 sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.0],
+                sun_color: [1.00, 0.96, 0.90, 0.0],
+                sky_color: [0.55, 0.70, 0.95, 0.0],
                 sun_intensity,
                 time,
                 underwater_factor: self.underwater_factor,

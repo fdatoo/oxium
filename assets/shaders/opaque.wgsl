@@ -30,6 +30,8 @@
 struct CameraUniform {
     view_proj:         mat4x4<f32>,
     sun_dir:           vec4<f32>,
+    sun_color:         vec4<f32>,
+    sky_color:         vec4<f32>,
     sun_intensity:     f32,
     time:              f32,
     // 0 = camera in air, 1 = submerged. Every fragment colour-grades
@@ -78,6 +80,7 @@ struct VsOut {
     @location(3) v_world: vec3<f32>,   // world-space fragment pos for fog
     @location(4) v_uv:    vec2<f32>,   // corner UV in *tile units*
     @location(5) @interpolate(flat) v_tile_index: u32,
+    @location(6) @interpolate(flat) v_face_normal: vec3<f32>,
 };
 
 @vertex
@@ -89,16 +92,22 @@ fn vs_main(in: VsIn) -> VsOut {
     out.v_world = world_pos;
 
     let face = in.face_light.x;
-    var face_mul: f32 = 0.80;
-    if (face == 2u) { face_mul = 1.00; }       // +Y top
-    else if (face == 3u) { face_mul = 0.55; }  // -Y bottom
-    // face_mul applies to RGB only — leaving alpha untouched means the
-    // fragment shader can reliably identify water by `v_color.a < 0.95`
-    // (water is the only block with alpha != 1.0 at the vertex source).
-    // Otherwise face_mul=0.80 on opaque sides + face_mul=0.55 on
-    // opaque bottoms would falsely match the water threshold and
-    // trigger the water shimmer code path on leaves / stone undersides.
-    out.v_color = vec4<f32>(in.color.rgb * face_mul, in.color.a);
+    var face_normal: vec3<f32>;
+    switch (face) {
+        case 0u: { face_normal = vec3<f32>( 1.0,  0.0,  0.0); }  // PosX
+        case 1u: { face_normal = vec3<f32>(-1.0,  0.0,  0.0); }  // NegX
+        case 2u: { face_normal = vec3<f32>( 0.0,  1.0,  0.0); }  // PosY
+        case 3u: { face_normal = vec3<f32>( 0.0, -1.0,  0.0); }  // NegY
+        case 4u: { face_normal = vec3<f32>( 0.0,  0.0,  1.0); }  // PosZ
+        case 5u: { face_normal = vec3<f32>( 0.0,  0.0, -1.0); }  // NegZ
+        default: { face_normal = vec3<f32>( 0.0,  1.0,  0.0); }
+    }
+    out.v_face_normal = face_normal;
+    // Pass colour through without face_mul — the fragment shader now derives
+    // directional shading from the light volume + wrap-diffuse sun.
+    // Alpha is preserved so the fragment shader can still identify water by
+    // `v_color.a < 0.95`.
+    out.v_color = vec4<f32>(in.color.rgb, in.color.a);
     out.v_ao    = f32(in.pos_ao.w) / 3.0;
 
     // Light byte: high nibble = sky, low nibble = block. Scale each
@@ -253,9 +262,31 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
 
-    let ao = mix(0.45, 1.0, in.v_ao);
-    let lit = max(0.05, in.v_light);
-    let shade = ao * lit;
+    // ── Per-pixel light volume sample, air-side of the surface.
+    let sample_world = in.v_world + in.v_face_normal * 0.5;
+    let chunk_local  = sample_world - chunk.origin.xyz;
+    let uvw          = (chunk_local + vec3<f32>(0.5, 0.5, 0.5)) / 33.0;
+    let lvol         = textureSampleLevel(light_volume, light_sampler, uvw, 0.0);
+    let block_rgb    = lvol.rgb;        // 0..1 (R/G/B / 15)
+    let sky_level    = lvol.a;          // 0..1 (sky_light / 15)
+
+    // ── Wrap-diffuse directional sun with sky-channel occlusion.
+    let n_dot_l = max(dot(in.v_face_normal, -camera.sun_dir.xyz), 0.0);
+    let wrap    = (n_dot_l + 0.4) / 1.4;
+    // PR 5 introduces real cast shadows; until then `shadow = 1`.
+    let shadow  = 1.0;
+    let sun_lit = wrap * shadow * sky_level;
+
+    // ── Sky ambient — tinted, scaled by sky exposure.
+    let sky_amb = camera.sky_color.rgb * sky_level * 0.35;
+
+    // ── Combine.
+    let direct  = camera.sun_color.rgb * sun_lit * camera.sun_intensity;
+    let lit     = direct + sky_amb + block_rgb;
+
+    let ao_term = mix(0.45, 1.0, in.v_ao);
+    let MIN_SHADE = vec3<f32>(0.02, 0.02, 0.02);
+
     // Per-block brightness jitter: a small ±6% modulation keyed off
     // the world-space block coordinate. Neighbouring blocks (whole
     // integer steps in any axis) get a different jitter; cells
@@ -272,10 +303,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     //
     // Tile indices must stay in lockstep with `voxel::block::Tile`:
     //   2 = GrassTop, 4 = Sand
-    var lit_rgb = base_rgb * shade * variation;
+    var lit_rgb = base_rgb * (lit + MIN_SHADE) * ao_term * variation;
     let is_blendable = in.v_tile_index == 2u || in.v_tile_index == 4u;
     if (is_blendable) {
-        lit_rgb = lit_rgb + biome_tint_shift(in.v_world.xz) * shade;
+        lit_rgb = lit_rgb + biome_tint_shift(in.v_world.xz) * (lit + MIN_SHADE) * ao_term;
     }
 
     // Distance fog: linear ramp between FOG_START and FOG_END.

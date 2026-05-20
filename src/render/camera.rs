@@ -16,23 +16,31 @@ use glam::{Mat4, Vec3};
 
 /// View-projection + lighting context shared with every opaque/sky draw.
 ///
-/// Memory layout (std140-friendly, all members 16-byte aligned, total 176
+/// Memory layout (std140-friendly, all members 16-byte aligned, total 208
 /// bytes — a multiple of 16):
 ///
 /// | Offset | Size | Field           |
 /// |-------:|-----:|-----------------|
 /// |     0  |  64  | `view_proj`     |
 /// |    64  |  16  | `sun_dir`       |
-/// |    80  |   4  | `sun_intensity` |
-/// |    84  |  12  | trailing scalar padding (`_pad0..2`) |
-/// |    96  |  16  | `eye`           |
-/// |   112  |  64  | `inv_view_proj` |
+/// |    80  |  16  | `sun_color`     |
+/// |    96  |  16  | `sky_color`     |
+/// |   112  |   4  | `sun_intensity` |
+/// |   116  |  12  | `time`, `underwater_factor`, `clip_y_min` |
+/// |   128  |  16  | `eye`           |
+/// |   144  |  64  | `inv_view_proj` |
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4],
     /// Unit-length sun direction in world space. `w` is unused padding.
     pub sun_dir: [f32; 4],
+    /// Sun color tint (RGB in 0..=1, w unused padding). PR 3 hardcodes
+    /// this to neutral-warm white; PR 8 makes it time-of-day driven.
+    pub sun_color: [f32; 4],
+    /// Sky ambient tint (RGB in 0..=1, w unused padding). PR 3 hardcodes
+    /// this to a cool noon blue.
+    pub sky_color: [f32; 4],
     /// Scalar sun brightness, 0..=1. The shader multiplies the per-vertex
     /// sky-light channel by this so torches still glow in the dark.
     pub sun_intensity: f32,
@@ -71,6 +79,8 @@ impl CameraUniform {
         Self {
             view_proj: Mat4::IDENTITY.to_cols_array_2d(),
             sun_dir: [0.0, 1.0, 0.0, 0.0],
+            sun_color: [1.00, 0.96, 0.90, 0.0],
+            sky_color: [0.55, 0.70, 0.95, 0.0],
             sun_intensity: 1.0,
             time: 0.0,
             underwater_factor: 0.0,
@@ -151,10 +161,13 @@ pub fn make_chunk_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLay
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("chunk-bgl"),
         entries: &[
-            // Binding 0 — per-chunk world-space origin uniform (unchanged).
+            // Binding 0 — per-chunk world-space origin uniform.
+            // Needs FRAGMENT visibility too: the fragment shader uses
+            // `chunk.origin.xyz` when computing the light-volume UVW
+            // coords for per-pixel sampling (Task 4+).
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: true,

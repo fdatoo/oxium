@@ -32,6 +32,8 @@
 struct CameraUniform {
     view_proj:         mat4x4<f32>,
     sun_dir:           vec4<f32>,
+    sun_color:         vec4<f32>,
+    sky_color:         vec4<f32>,
     sun_intensity:     f32,
     time:              f32,
     underwater_factor: f32,
@@ -93,6 +95,7 @@ struct VsOut {
     /// UV and shimmer the reflection content every frame even when
     /// the camera was still.
     @location(5) v_undisp_clip:     vec3<f32>,
+    @location(6) @interpolate(flat) v_face_normal: vec3<f32>,
 };
 
 // Multi-octave value-noise wave height. Driven by world-space xz and
@@ -280,6 +283,9 @@ fn vs_main(in: VsIn) -> VsOut {
     else if (face == 3u) { out.v_normal = vec3<f32>( 0.0, -1.0,  0.0); }
     else if (face == 4u) { out.v_normal = vec3<f32>( 0.0,  0.0,  1.0); }
     else                 { out.v_normal = vec3<f32>( 0.0,  0.0, -1.0); }
+
+    // Water surface is always +Y for light-volume sampling purposes.
+    out.v_face_normal = vec3<f32>(0.0, 1.0, 0.0);
 
     return out;
 }
@@ -477,6 +483,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let depth_t = clamp(depth_diff / 6.0, 0.0, 1.0);
     let depth_curve = pow(depth_t, 0.7);
     let deep_tint = vec3<f32>(0.04, 0.18, 0.32);
+
+    // Sample the chunk light volume at the water surface's air-side.
+    let sample_world = in.v_world + in.v_face_normal * 0.5;
+    let chunk_local  = sample_world - chunk.origin.xyz;
+    let uvw          = (chunk_local + vec3<f32>(0.5, 0.5, 0.5)) / 33.0;
+    let lvol         = textureSampleLevel(light_volume, light_sampler, uvw, 0.0);
+    let sky_level    = lvol.a;
+    let block_rgb    = lvol.rgb;
+    // Apply ambient + block light to the water's surface colour. This
+    // matches the opaque shader's composition style but at a milder
+    // strength so water still reads as water (not painted).
+    rgb = rgb * (camera.sky_color.rgb * sky_level * 0.4 + block_rgb * 0.6 + vec3<f32>(0.25));
+
     rgb = mix(rgb, deep_tint, depth_curve * 0.75);
 
     // Tonemap + underwater tint both live in composite.wgsl as of
