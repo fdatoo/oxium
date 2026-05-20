@@ -15,6 +15,23 @@ use std::path::Path;
 pub struct WorldgenConfig {
     pub density: DensityConfig,
     pub climate: ClimateConfig,
+    pub biomes: BiomesConfig,
+}
+
+/// PR 4 biome lookup config. The 6 existing biomes (Tundra,
+/// SnowyForest, Plains, Forest, Desert, Tropical) are selected by
+/// hyperbox claims in the 6D climate space — see
+/// `crate::worldgen::climate::ParameterPoint`. The `weirdness`
+/// noise is a new 2D Fbm sampled per column.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BiomesConfig {
+    /// Each entry claims one biome on the 6 climate axes.
+    pub entries: Vec<crate::worldgen::climate::ParameterPoint>,
+    /// Period (blocks) of the weirdness Fbm noise. Adds variant
+    /// biomes (ice spikes / sunflower plains analogues) inside
+    /// the same temperature/humidity/continentalness regions.
+    pub weirdness_period: f32,
+    pub weirdness_amplitude: f32,
 }
 
 /// Climate-driven spline pipeline tuning (PR 3).

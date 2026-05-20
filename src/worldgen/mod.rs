@@ -89,8 +89,8 @@ pub use crate::worldgen::tuning::SEA_LEVEL;
 // All other tuning constants live in `worldgen::tuning`. The names
 // below are imported into this module's scope for ergonomics.
 use crate::worldgen::tuning::{
-    BIOME_JITTER_AMPL, BIOME_JITTER_PERIOD, CAVE_FLOOR_Y, CAVE_SDF_INTENSITY,
-    CAVE_SURFACE_BUFFER, COLD_SNOW_MIN_ABOVE_SEA, COLD_THRESHOLD, FOREST_HUMIDITY,
+    CAVE_FLOOR_Y, CAVE_SDF_INTENSITY,
+    CAVE_SURFACE_BUFFER, COLD_SNOW_MIN_ABOVE_SEA,
     SAND_TRANSITION_BAND, SNOW_LINE, SURFACE_BAND, TREE_CELL_SIZE, TREE_MARGIN,
     TREE_RATE_FOREST, TREE_RATE_PLAINS,
 };
@@ -109,14 +109,9 @@ pub struct Generator {
     /// `fill_chunk` so moderate slopes don't read as clean
     /// chevron stripes.
     density: heightmap::DensityNoise,
-    /// Geographic "is this region desert?" mask. Same large period as the
-    /// mountainness map but uncorrelated (different seed) so deserts and
-    /// mountains drift independently.
-    desert_map: Fbm<Simplex>,
     /// Temperature map (large-period 2D noise). Drives the cold/warm
-    /// axis of the biome system; negative values are colder and earn
-    /// snow surfaces, positive values are warmer (and combined with
-    /// the desert mask, hottest values are arid).
+    /// axis of the biome R-tree lookup. Negative values are colder
+    /// (Tundra / SnowyForest), positive warmer (Desert / Tropical).
     temperature_map: Fbm<Simplex>,
     /// Humidity map (large-period 2D noise). Drives the wet/dry axis;
     /// wetter columns earn denser tree cover, drier columns read as
@@ -126,10 +121,16 @@ pub struct Generator {
     /// the graph-based cave systems below `WORMHOLE_BAND_Y`. Above
     /// that, caves come exclusively from the cave-system graph.
     wormhole_noise: caves::WormholeNoise,
-    /// High-frequency 2D noise used to perturb biome thresholds so
-    /// the resulting boundaries wave instead of cutting in straight
-    /// contour lines. Added in PR 5.
-    biome_jitter_noise: Fbm<Simplex>,
+    /// PR 4: weirdness 2D noise (mid-frequency). Mirrors MC's
+    /// "ridge" axis as a biome-table input — lets the same
+    /// (temperature, humidity) climate produce both base biomes
+    /// and variant biomes (ice spikes / sunflower plains analogues
+    /// — future work; for now the biome list doesn't distinguish).
+    weirdness_noise: Fbm<Simplex>,
+    /// PR 4: pre-built biome R-tree. Constructed once at Generator
+    /// init from the bundled config's `BiomesConfig::entries`.
+    /// Hot-reloading the biome table requires a Generator restart.
+    biome_list: std::sync::Arc<climate::ParameterList>,
     seed: u64,
     /// LRU cache of pre-built fine regions. Consulted per chunk fill
     /// to evaluate valley carve and lake water; built on first touch.
@@ -193,12 +194,7 @@ impl Generator {
             .expect("bundled default.ron must parse");
         let heightmap = heightmap::HeightmapNoise::new(seed, &bundled.climate);
         let density = heightmap::DensityNoise::new(seed, &bundled.density);
-        // Biome maps: large period so each biome covers many chunks.
-        let desert_map = Fbm::<Simplex>::new(seed.wrapping_add(4) as u32)
-            .set_octaves(2)
-            .set_frequency(1.0 / 512.0)
-            .set_persistence(0.5);
-        // Climate maps. Same scale as the other biome masks so a
+        // Climate maps. Large period so a
         // single climate cell covers many chunks — players walk for
         // a while between biome bands instead of crossing one every
         // few steps. Independently seeded so temperature and
@@ -213,40 +209,30 @@ impl Generator {
             .set_frequency(1.0 / 512.0)
             .set_persistence(0.5);
         let wormhole_noise = caves::WormholeNoise::new(seed);
-        // High-frequency biome-edge jitter. 2 octaves of Simplex at
-        // ~24-block period, amplitude shaped by `BIOME_JITTER_AMPL`.
-        let biome_jitter_noise = Fbm::<Simplex>::new(seed.wrapping_add(401) as u32)
+        // PR 4: weirdness noise — mid-frequency 2D Fbm. Used as the
+        // 6th biome-lookup axis (variant biomes within the same
+        // T/H/C region).
+        let weirdness_noise = Fbm::<Simplex>::new(seed.wrapping_add(501) as u32)
             .set_octaves(2)
-            .set_frequency(1.0 / BIOME_JITTER_PERIOD as f64)
+            .set_frequency(1.0 / bundled.biomes.weirdness_period as f64)
             .set_persistence(0.5);
+        // Build the biome R-tree once from the bundled entries.
+        let biome_list = std::sync::Arc::new(climate::ParameterList::new(
+            bundled.biomes.entries.clone(),
+        ));
         Self {
             heightmap,
             density,
-            desert_map,
             temperature_map,
             humidity_map,
             wormhole_noise,
-            biome_jitter_noise,
+            weirdness_noise,
+            biome_list,
             seed,
             fine_cache: region::fresh_fine_cache(),
             macro_cache: region::fresh_macro_cache(),
             config: config::ConfigHolder::new(bundled),
         }
-    }
-
-    /// Sample the biome-edge jitter at world `(wx, wz)`. Scaled to
-    /// `±BIOME_JITTER_AMPL` (noise-value units).
-    fn biome_jitter(&self, wx: i32, wz: i32) -> f32 {
-        (self.biome_jitter_noise.get([wx as f64, wz as f64]) as f32)
-            * BIOME_JITTER_AMPL
-    }
-
-    /// Rotated jitter — sample at `(wz, -wx)` so it's uncorrelated
-    /// with the primary jitter. Used for the humidity threshold so
-    /// Forest/Plains edges don't co-jitter with desert edges.
-    fn biome_jitter_rot(&self, wx: i32, wz: i32) -> f32 {
-        (self.biome_jitter_noise.get([wz as f64, -(wx as f64)]) as f32)
-            * BIOME_JITTER_AMPL
     }
 
     /// Build the fine region at `coord` from noise (heightmap +
@@ -340,24 +326,47 @@ impl Generator {
         let height = (h_pre - carve)
             .clamp((CAVE_FLOOR_Y + 8) as f32, MAX_TERRAIN_Y as f32) as i32;
 
-        // Climate sample. PR 5 adds threshold perturbation: a small
-        // shared high-frequency noise field jitters the biome
-        // thresholds so transition edges wave instead of cutting in
-        // straight contour lines.
-        let xz = [wx as f64, wz as f64];
-        let jitter = self.biome_jitter(wx, wz);
+        // PR 4: 6D climate sample + R-tree biome lookup with
+        // per-block hash-Voronoi jitter for organic borders.
+        let (jx, jz) = climate::voronoi_jitter_offset(self.seed, wx, height, wz);
+        let qwx = wx + jx;
+        let qwz = wz + jz;
+        let xz_jitter = [qwx as f64, qwz as f64];
 
-        let desertness_raw = self.desert_map.get(xz) as f32;
-        let desertness = desertness_raw + jitter;
-        let is_desert = desertness > 0.30;
+        let temperature = self.temperature_map.get(xz_jitter) as f32;
+        let humidity = self.humidity_map.get(xz_jitter) as f32;
+        // Continentalness, terrain_shape, ridges_pv from the same
+        // climate sampler that drives the heightmap splines.
+        let (c, s, _pv, _look) = self.heightmap.climate(
+            self.seed,
+            qwx as f32,
+            qwz as f32,
+            &cfg.climate,
+        );
+        // Weirdness — independent mid-frequency Fbm.
+        let weirdness = (self
+            .weirdness_noise
+            .get(xz_jitter) as f32)
+            * cfg.biomes.weirdness_amplitude;
+        // Depth axis: normalized world-Y of the column's surface.
+        let depth_t = (height as f32 - cfg.density.y_min as f32)
+            / (cfg.density.y_max - cfg.density.y_min) as f32;
+        let depth = 1.0 - 2.0 * depth_t; // +1 at world floor, -1 at world top
 
-        let temperature_raw = self.temperature_map.get(xz) as f32;
-        let temperature = temperature_raw - jitter; // negate so cold zones jitter independently
-        let humidity_raw = self.humidity_map.get(xz) as f32;
-        // Rotated jitter for the humidity threshold so Forest/Plains
-        // and cold/warm boundaries don't co-jitter.
-        let humidity = humidity_raw + self.biome_jitter_rot(wx, wz);
-        let biome = Biome::classify(temperature, humidity, is_desert);
+        let target = climate::TargetPoint::new(
+            temperature,
+            humidity,
+            c,
+            s,
+            depth,
+            weirdness,
+        );
+        let biome = self.biome_list.lookup(&target);
+        // `desertness` is kept on ColumnData for the legacy sand
+        // transition heuristic in fill_chunk. Derived from the
+        // (now-quantized) humidity + temperature pair: high
+        // temperature × low humidity == high desertness.
+        let desertness = (temperature * 0.5) - humidity * 0.5;
 
         let lake_rim = regions.lake_rim_at(wx, wz);
         ColumnData {
@@ -810,7 +819,16 @@ pub struct ColumnData {
 /// purpose — every variant has a distinct visual signature (different
 /// surface block or noticeably different tree density), so the
 /// difference between biomes reads from a screenshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum Biome {
     /// Cold column. Snow on the surface; no trees grow here.
     Tundra,
@@ -831,32 +849,6 @@ pub enum Biome {
 }
 
 impl Biome {
-    /// Map climate values plus the (jitter-perturbed) desert mask to
-    /// a discrete biome. PR 5 adds `Tropical` for the hot+wet
-    /// bucket that the new continental geography produces a lot of.
-    fn classify(temperature: f32, humidity: f32, is_desert: bool) -> Self {
-        if temperature < COLD_THRESHOLD {
-            return if humidity > 0.0 {
-                Biome::SnowyForest
-            } else {
-                Biome::Tundra
-            };
-        }
-        if is_desert {
-            return Biome::Desert;
-        }
-        if humidity > FOREST_HUMIDITY {
-            // Hot+wet ⇒ Tropical; temperate+wet ⇒ Forest.
-            if temperature > 0.20 {
-                Biome::Tropical
-            } else {
-                Biome::Forest
-            }
-        } else {
-            Biome::Plains
-        }
-    }
-
     /// True when the biome should cap the surface column with Snow.
     fn snow_capped(self) -> bool {
         matches!(self, Biome::Tundra | Biome::SnowyForest)
@@ -1113,7 +1105,7 @@ mod tests {
         // SURFACE_BAND. The surface is now fuzz-jittered by 3D
         // relief noise instead of being column-quantised, so the
         // chevron-staircase artifact on moderate slopes is gone.
-        const GOLDEN_42_002: u64 = 0xC61C_CC96_419A_D929;
+        const GOLDEN_42_002: u64 = 0xBE99_03A1_9BAF_D8E0;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);

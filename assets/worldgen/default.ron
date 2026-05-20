@@ -162,4 +162,86 @@
             ]), slope: 0.0),
         ]),
     ),
+
+    // ── Biome hyperbox claims (PR 4) ────────────────────────────────────
+    //
+    // Each entry stakes out a region of the 6D climate space
+    // (temperature, humidity, continentalness, terrain_shape, depth,
+    // weirdness). A query lands in the biome whose hyperbox is
+    // nearest by squared-L2 distance — see climate::RTree.
+    //
+    // The parameter ranges are stored as quantized i64 (raw value
+    // × 10000). E.g. min: -10000 == raw -1.0.
+    biomes: (
+        weirdness_period: 800.0,
+        weirdness_amplitude: 1.0,
+        entries: [
+            // Tundra — cold, dry to medium humidity, any other axis.
+            (
+                temperature:    (min: -20000, max: -3000),
+                humidity:       (min: -20000, max:  3000),
+                continentalness:(min: -20000, max: 20000),
+                terrain_shape:  (min: -20000, max: 20000),
+                depth:          (min: -20000, max: 20000),
+                weirdness:      (min: -20000, max: 20000),
+                offset: 0,
+                biome: Tundra,
+            ),
+            // SnowyForest — cold + humid. Same cold range, humidity > 0.
+            (
+                temperature:    (min: -20000, max: -3000),
+                humidity:       (min:  0,     max: 20000),
+                continentalness:(min: -20000, max: 20000),
+                terrain_shape:  (min: -20000, max: 20000),
+                depth:          (min: -20000, max: 20000),
+                weirdness:      (min: -20000, max: 20000),
+                offset: 0,
+                biome: SnowyForest,
+            ),
+            // Plains — temperate + dry.
+            (
+                temperature:    (min: -3000,  max:  3000),
+                humidity:       (min: -20000, max:  500),
+                continentalness:(min: -20000, max: 20000),
+                terrain_shape:  (min: -20000, max: 20000),
+                depth:          (min: -20000, max: 20000),
+                weirdness:      (min: -20000, max: 20000),
+                offset: 0,
+                biome: Plains,
+            ),
+            // Forest — temperate + humid.
+            (
+                temperature:    (min: -3000,  max:  3000),
+                humidity:       (min:   500,  max: 20000),
+                continentalness:(min: -20000, max: 20000),
+                terrain_shape:  (min: -20000, max: 20000),
+                depth:          (min: -20000, max: 20000),
+                weirdness:      (min: -20000, max: 20000),
+                offset: 0,
+                biome: Forest,
+            ),
+            // Desert — hot.
+            (
+                temperature:    (min:  3000,  max: 20000),
+                humidity:       (min: -20000, max:  2000),
+                continentalness:(min: -20000, max: 20000),
+                terrain_shape:  (min: -20000, max: 20000),
+                depth:          (min: -20000, max: 20000),
+                weirdness:      (min: -20000, max: 20000),
+                offset: 0,
+                biome: Desert,
+            ),
+            // Tropical — hot + humid.
+            (
+                temperature:    (min:  2000,  max: 20000),
+                humidity:       (min:  2000,  max: 20000),
+                continentalness:(min: -20000, max: 20000),
+                terrain_shape:  (min: -20000, max: 20000),
+                depth:          (min: -20000, max: 20000),
+                weirdness:      (min: -20000, max: 20000),
+                offset: 0,
+                biome: Tropical,
+            ),
+        ],
+    ),
 )

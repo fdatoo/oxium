@@ -149,29 +149,22 @@ pub const WORMHOLE_BAND: f64 = 0.05;
 
 // ── Biomes & surface ─────────────────────────────────────────────────
 
-/// Temperature noise value below which a column is cold (Tundra /
-/// SnowyForest). The climate noise is roughly distributed in
-/// `[-1, 1]` and centred near 0, so `-0.30` puts ~20% of the world
-/// in the cold belt — down from ~45% at the previous `-0.10` value,
-/// which produced too much surface snow.
-pub const COLD_THRESHOLD: f32 = -0.30;
+// PR 4: COLD_THRESHOLD, FOREST_HUMIDITY, BIOME_JITTER_*,
+// SAND_TRANSITION_BAND are gone — the if-else biome classifier
+// they parameterised is replaced by the R-tree lookup in
+// climate.rs, and the boundaries are softened by per-block
+// hash-Voronoi jitter (climate::voronoi_jitter_offset). The
+// `BiomesConfig::entries` table in default.ron stakes biome
+// claims directly.
+
 /// Minimum height (blocks above sea level) for cold-biome
 /// surface-snow to apply. Below this elevation, cold biomes still
 /// get their grass/dirt surface so coastal cold regions don't put
 /// a strip of snow directly against the ocean.
 pub const COLD_SNOW_MIN_ABOVE_SEA: i32 = 8;
-/// Humidity noise value above which a temperate column is Forest /
-/// Tropical (otherwise Plains / Desert).
-pub const FOREST_HUMIDITY: f32 = 0.05;
-/// Amplitude of the threshold-perturbation noise used to break up
-/// straight biome edges. Sampled in noise-value units.
-pub const BIOME_JITTER_AMPL: f32 = 0.05;
-/// Spatial period of the threshold-perturbation noise.
-pub const BIOME_JITTER_PERIOD: f32 = 24.0;
-/// Width (in noise-value units, not blocks) of the stochastic
-/// sand/grass transition band on the grass side of a desert
-/// boundary. Roughly 4–8 blocks in spatial width depending on local
-/// desert-noise gradient.
+/// Sand transition band on the grass side of a desert boundary
+/// (in temperature-noise units). Inside this band the surface block
+/// is rolled stochastically per column.
 pub const SAND_TRANSITION_BAND: f32 = 0.05;
 /// Spatial width (blocks) over which tree density is interpolated
 /// across a biome boundary.
