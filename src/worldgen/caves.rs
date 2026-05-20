@@ -1030,27 +1030,33 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "graph caves disabled — CAVE_SYSTEMS_PER_REGION = (0, 0) for now"]
     fn cave_air_returns_true_inside_chamber_center() {
+        // Graph systems are now rare (CAVE_SYSTEMS_PER_REGION =
+        // (0, 1)) — many regions have none. Scan a 4×4 grid of
+        // regions until we find one with a chamber.
         let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
         let hm = HeightmapNoise::new(42, &cfg.climate);
-        let coord = RegionCoord { x: 0, z: 0 };
-        let mut region = FineRegion::empty(coord);
-        build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut region);
-        for sys in &region.cave_systems {
-            if let Some(c) = sys.chambers.first() {
-                let wx = c.center.x as i32;
-                let wy = c.center.y as i32;
-                let wz = c.center.z as i32;
-                let arr: Vec<&CaveSystem> = vec![sys];
-                assert!(
-                    cave_air(wx, wy, wz, &arr),
-                    "chamber center should be air, was solid at ({wx},{wy},{wz})"
-                );
-                return;
+        for rx in 0..4 {
+            for rz in 0..4 {
+                let coord = RegionCoord { x: rx, z: rz };
+                let mut region = FineRegion::empty(coord);
+                build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut region);
+                for sys in &region.cave_systems {
+                    if let Some(c) = sys.chambers.first() {
+                        let wx = c.center.x as i32;
+                        let wy = c.center.y as i32;
+                        let wz = c.center.z as i32;
+                        let arr: Vec<&CaveSystem> = vec![sys];
+                        assert!(
+                            cave_air(wx, wy, wz, &arr),
+                            "chamber center should be air, was solid at ({wx},{wy},{wz})"
+                        );
+                        return;
+                    }
+                }
             }
         }
-        panic!("no chambers across region (0,0) — adjust test seed or region count");
+        panic!("no chambers across 4×4 regions — graph caves disabled?");
     }
 
     // ── PR 8: noise carver tests ─────────────────────────────────

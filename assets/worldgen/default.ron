@@ -328,18 +328,16 @@
             amplitudes: [0.5, 1.0, 2.0, 1.0, 2.0, 1.0, 0.0, 2.0, 0.0],
         ),
         cheese_xz_scale: 0.6666667,
-        // Cheese carves where noise > threshold. -0.27 hit roughly
-        // 67% of the FBM range (cheese was a default state, not a
-        // pocket); +0.30 limits it to the top ~20%, giving discrete
-        // chunks of carving rather than pervasive holes.
-        cheese_threshold: 0.30,
+        // +0.40: only the top ~10% of FBM values trigger cheese,
+        // making the carved chambers sparse and well-separated.
+        cheese_threshold: 0.40,
         cheese_y_min: -30,
         cheese_y_max: 10,
         cheese_fade_blocks: 8,
-        // 1.5: with smoothstep soft-edge, cheese now needs higher
-        // intensity to actually carve full-strength voxels at its
-        // center (depth=1 only at the top of the 0.10-wide band).
-        cheese_intensity: 1.5,
+        // 0.8 with smoothstep soft-edge. Higher intensity (1.5)
+        // made cheese carve overlapping bowl chambers; lower
+        // produces sparse pockets that don't merge.
+        cheese_intensity: 0.8,
 
         // ── Spaghetti tubes: two noises gated by rarity + Y-gradient.
         spaghetti_2d: (
@@ -358,13 +356,13 @@
             first_octave: -5,
             amplitudes: [1.0],
         ),
-        // Spaghetti is now the PRIMARY cave shape (graph caves are
-        // disabled). 0.4 ≈ ~70% of the FBM range passes the rarity
-        // gate, giving wide connected networks of tubes.
-        spaghetti_rarity_threshold: 0.4,
-        // Wider tubes — was 0.04 (≈2-3 block diameter). 0.08 gives
-        // 4-6 block tubes which read as actual passages.
-        spaghetti_thickness_offset: 0.08,
+        // -0.2: only ~25% of underground regions get spaghetti
+        // tubes. The modulator's wavelength is 2048 blocks, so this
+        // is "occasional tube networks" — not "tubes everywhere".
+        spaghetti_rarity_threshold: -0.2,
+        // 0.05: ~3-4 block-diameter tubes. 0.08 made tubes merge
+        // into bowl-shaped voids in regions where many overlapped.
+        spaghetti_thickness_offset: 0.05,
         // Gradient sign convention here: "top_y" refers to the
         // shallower world Y (we want suppression there), "bottom_y"
         // is deep (we want carving). The gradient value is added to

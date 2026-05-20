@@ -99,37 +99,34 @@ pub const MACRO_RIVER_THRESH: u32 = 500;
 // ── Caves ────────────────────────────────────────────────────────────
 
 /// Inclusive range of cave systems rolled per fine region.
-/// Set to (0, 0) — graph chambers + tunnels structurally produce
-/// bowl-shaped caverns no matter how small we make them, because
-/// they carve spheres out of a smooth interpolated density. MC
-/// 1.18+ has no graph caves; underground shape comes entirely
-/// from noise carvers (cheese / spaghetti). The graph code is
-/// kept around for entrances + future use.
-pub const CAVE_SYSTEMS_PER_REGION: (u32, u32) = (0, 0);
+/// (0, 1) — most regions get no graph caves at all, occasional
+/// regions get one small system. Graph caves are a discrete
+/// feature (one notable chamber every few hundred blocks), not
+/// the dominant cave shape (that's spaghetti).
+pub const CAVE_SYSTEMS_PER_REGION: (u32, u32) = (0, 1);
 /// Vertical band (inclusive both ends) for Shallow systems.
 pub const CAVE_BAND_SHALLOW: (i32, i32) = (10, 50);
 /// Vertical band for Middle systems.
 pub const CAVE_BAND_MIDDLE: (i32, i32) = (-40, 30);
 /// Vertical band for Deep systems.
 pub const CAVE_BAND_DEEP: (i32, i32) = (-110, -30);
-/// Inclusive range of chambers per system. Reduced from (4,8) so
-/// systems are smaller and feel like discrete features instead of
-/// chained megacaverns.
+/// Inclusive range of chambers per system. Small clusters feel
+/// like discrete rooms-connected-by-passages instead of mega
+/// dungeons.
 pub const CHAMBERS_PER_SYSTEM: (u32, u32) = (2, 4);
 /// Range of ellipsoid semi-axis lengths for chambers, in blocks.
-/// Drastically reduced from (6.0, 14.0) — at radius 14 you got a
-/// 28-block-diameter open-pit cavern. The new max (5.0) gives
-/// human-scale rooms.
-pub const CHAMBER_RADIUS_RANGE: (f32, f32) = (2.5, 5.0);
+/// Small — radius 3.5 max → 7-block-diameter chambers, which read
+/// as "a room you can stand in" rather than a cavern.
+pub const CHAMBER_RADIUS_RANGE: (f32, f32) = (2.0, 3.5);
 /// Poisson-disk minimum spacing between chamber centers, as a
 /// multiple of chamber radius.
 pub const POISSON_MIN_SPACING_MULT: f32 = 3.0;
 /// Inclusive range of extra MST edges (loops) to add beyond the
 /// minimum spanning tree.
 pub const MST_EXTRA_LOOPS: (u32, u32) = (1, 2);
-/// Tunnel cross-section radius, in blocks. Reduced from (3.0, 4.5)
-/// so the connecting passages feel like passages, not corridors.
-pub const TUNNEL_RADIUS: (f32, f32) = (1.5, 2.5);
+/// Tunnel cross-section radius, in blocks. (1.0, 1.8) gives
+/// 2-3 block-wide passages — squeeze-through tunnels between rooms.
+pub const TUNNEL_RADIUS: (f32, f32) = (1.0, 1.8);
 
 /// Probability a chamber in the Shallow band tries to expose to the
 /// surface (sinkhole / cliff mouth / skylight).
