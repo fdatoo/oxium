@@ -14,6 +14,12 @@ pub struct AppState {
     pub last_cursor: Option<(f64, f64)>,
     pub last_frame: Instant,
     pub last_regen_ms: Option<f32>,
+    /// Total chunks resident in the GPU scene HashMap last frame.
+    /// Cached from `SceneRenderer::chunk_count()` so the layout can
+    /// read it without a SceneRenderer reference.
+    pub scene_chunks_total: usize,
+    /// Chunks that passed frustum culling last frame.
+    pub scene_chunks_visible: usize,
 }
 
 impl AppState {
@@ -25,6 +31,8 @@ impl AppState {
             last_cursor: None,
             last_frame: Instant::now(),
             last_regen_ms: None,
+            scene_chunks_total: 0,
+            scene_chunks_visible: 0,
         }
     }
 

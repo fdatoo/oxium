@@ -298,10 +298,16 @@ impl ApplicationHandler for VizApp {
                     .egui_state
                     .handle_platform_output(window, full_output.platform_output.clone());
 
-                // Camera uniform + frame composition.
+                // Camera uniform + frame composition. update_camera
+                // also stashes the latest view_proj on the scene for
+                // CPU-side frustum culling; we mirror the chunk counts
+                // into AppState so the status bar can show them
+                // without holding a SceneRenderer reference.
                 let aspect = render.surface_config.width as f32
                     / render.surface_config.height.max(1) as f32;
                 scene.update_camera(&render.queue, self.state.session.camera(), aspect);
+                self.state.scene_chunks_total = scene.chunk_count();
+                self.state.scene_chunks_visible = scene.visible_chunk_count();
                 if let Err(e) = render_frame(render, scene, full_output) {
                     eprintln!("render: {e:?}");
                 }

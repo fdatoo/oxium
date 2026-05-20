@@ -160,11 +160,16 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
             ui.label(format!("seed {}", app.session.seed));
             ui.separator();
             ui.label(format!(
-                "chunks meshed: {}",
-                app.session.world.cached_mesh_coords().len()
-            ));
+                "drawn {}/{}",
+                app.scene_chunks_visible, app.scene_chunks_total,
+            ))
+            .on_hover_text(
+                "Chunks passing frustum culling / total chunks held by the renderer.\n\
+                 Chunks outside the camera frustum stay in memory but skip the draw call.",
+            );
             ui.separator();
-            ui.label(format!("in-flight: {}", app.session.world.in_flight_len()));
+            ui.label(format!("in-flight: {}", app.session.world.in_flight_len()))
+                .on_hover_text("Fill+mesh jobs queued on the rayon pool.");
             ui.separator();
             if let Some(remaining) = app.session.invalidator.pending_remaining() {
                 ui.colored_label(
