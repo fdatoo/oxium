@@ -123,8 +123,8 @@ pub const TUNNEL_RADIUS: (f32, f32) = (3.0, 4.5);
 
 /// Probability a chamber in the Shallow band tries to expose to the
 /// surface (sinkhole / cliff mouth / skylight).
-pub const ENTRANCE_PROB_SHALLOW: f32 = 0.40;
-pub const ENTRANCE_PROB_MIDDLE: f32 = 0.15;
+pub const ENTRANCE_PROB_SHALLOW: f32 = 0.70;
+pub const ENTRANCE_PROB_MIDDLE: f32 = 0.25;
 pub const ENTRANCE_PROB_DEEP: f32 = 0.05;
 /// Maximum gap (blocks) between chamber top and surface for a
 /// sinkhole to be geometrically possible.
@@ -133,9 +133,12 @@ pub const SINKHOLE_DEPTH_MAX: i32 = 8;
 /// gradient column for a cliff mouth to be possible.
 pub const CLIFF_ENTRANCE_DIST: i32 = 30;
 /// Top-of-terrain buffer (blocks). Non-entrance carving is forbidden
-/// inside this depth so the grass cap stays intact except at
-/// deliberate openings.
-pub const CAVE_SURFACE_BUFFER: i32 = 4;
+/// inside this depth so the grass cap stays *mostly* intact.
+/// Lowered to 1 to let the noise carvers (cheese, spaghetti) punch
+/// occasional ambient holes through the surface — random cave
+/// openings everywhere, separate from the deliberate graph
+/// entrances.
+pub const CAVE_SURFACE_BUFFER: i32 = 1;
 /// Floor (world Y) below which caves stop carving. Keeps the loaded
 /// chunk-stack bottom solid.
 pub const CAVE_FLOOR_Y: i32 = -120;

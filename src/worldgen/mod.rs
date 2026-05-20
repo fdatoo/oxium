@@ -1173,7 +1173,7 @@ mod tests {
         // SURFACE_BAND. The surface is now fuzz-jittered by 3D
         // relief noise instead of being column-quantised, so the
         // chevron-staircase artifact on moderate slopes is gone.
-        const GOLDEN_42_002: u64 = 0xDFB4_993E_1852_7241;
+        const GOLDEN_42_002: u64 = 0xE1FF_55C7_9632_0CAA;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);
