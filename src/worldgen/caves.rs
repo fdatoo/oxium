@@ -720,6 +720,9 @@ use crate::worldgen::noise_channel::{
 pub struct NoiseCarvers {
     // Cheese.
     pub cheese: Fbm<Simplex>,
+    /// `cave_layer` — the regional gating noise added to cheese as
+    /// `intensity * layer²`. See [`CaveConfig::cave_layer`].
+    pub cave_layer: Fbm<Simplex>,
     // Spaghetti.
     pub spaghetti_2d: Fbm<Simplex>,
     pub spaghetti_2d_modulator: Fbm<Simplex>,
@@ -740,6 +743,7 @@ impl NoiseCarvers {
     pub fn new(seed: u64, cfg: &CaveConfig) -> Self {
         Self {
             cheese: build_channel(&cfg.cheese, seed, 1001),
+            cave_layer: build_channel(&cfg.cave_layer, seed, 1011),
             spaghetti_2d: build_channel(&cfg.spaghetti_2d, seed, 1002),
             spaghetti_2d_modulator: build_channel(&cfg.spaghetti_2d_modulator, seed, 1003),
             spaghetti_2d_elevation: build_channel(&cfg.spaghetti_2d_elevation, seed, 1009),
@@ -848,17 +852,30 @@ pub fn cheese_contribution(
     carvers: &NoiseCarvers,
     cfg: &CaveConfig,
 ) -> f32 {
-    let scale = cfg.cheese_xz_scale as f64;
+    let xz_scale = cfg.cheese_xz_scale as f64;
+    let y_scale = cfg.cheese_y_scale as f64;
     let cheese = carvers.cheese.get([
-        wx as f64 * scale,
-        wy as f64,
-        wz as f64 * scale,
+        wx as f64 * xz_scale,
+        wy as f64 * y_scale,
+        wz as f64 * xz_scale,
     ]) as f32;
     let term1 = (cfg.cheese_offset + cheese).clamp(-1.0, 1.0);
     let supp = (cfg.cheese_suppression_offset
         + cfg.cheese_suppression_slope * raw_density)
         .clamp(cfg.cheese_suppression_min, cfg.cheese_suppression_max);
-    term1 + supp
+
+    // MC-parity `layerizedCaverns`: add `intensity * layer²` so
+    // cheese carving is regionally gated by horizontal strata.
+    // Without this the cheese clamp at -1 makes ~50% of deep
+    // voxels carve, producing uniform swiss cheese.
+    let layer = carvers.cave_layer.get([
+        wx as f64 * cfg.cave_layer_xz_scale as f64,
+        wy as f64 * cfg.cave_layer_y_scale as f64,
+        wz as f64 * cfg.cave_layer_xz_scale as f64,
+    ]) as f32;
+    let layerized = cfg.cave_layer_intensity * layer * layer;
+
+    term1 + supp + layerized
 }
 
 /// Signed-density spaghetti tube contribution.
@@ -1117,6 +1134,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "graph caves disabled via CAVE_SYSTEMS_PER_REGION = (0, 0); re-enable when graph systems come back"]
     fn cave_air_returns_true_inside_chamber_center() {
         // Graph systems are now rare (CAVE_SYSTEMS_PER_REGION =
         // (0, 1)) — many regions have none. Scan a 4×4 grid of
@@ -1208,19 +1226,21 @@ mod tests {
 
     #[test]
     fn cheese_signed_density_is_finite_and_in_expected_range() {
-        // Signed-density: result is roughly in [-1, 1.5]. Verify
-        // no NaN/Inf and that the band is respected across many
-        // raw_density values.
+        // term1 ∈ [-1, 1], supp ∈ [0, 0.5], layerized ∈ [0,
+        // cave_layer_intensity] → result ∈ [-1, 1.5 + intensity].
         let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
         let nc = NoiseCarvers::new(42, &cfg.cave);
+        let upper = 1.5 + cfg.cave.cave_layer_intensity + 0.01;
         for wy in (-100..=100).step_by(11) {
             for wx in (-100..100).step_by(17) {
                 for wz in (-100..100).step_by(17) {
                     for raw_density in [-1.0_f32, 0.0, 1.0, 4.0, 16.0] {
                         let v = cheese_contribution(wx, wy, wz, raw_density, &nc, &cfg.cave);
                         assert!(v.is_finite(), "cheese non-finite at ({wx},{wy},{wz})");
-                        // term1 ∈ [-1, 1], term2 ∈ [0, 0.5] → result ∈ [-1, 1.5]
-                        assert!((-1.001..=1.501).contains(&v), "out-of-range cheese: {v}");
+                        assert!(
+                            (-1.001..=upper).contains(&v),
+                            "out-of-range cheese: {v} (expected [-1, {upper}])"
+                        );
                     }
                 }
             }
@@ -1249,24 +1269,29 @@ mod tests {
 
     #[test]
     fn cheese_deep_can_go_negative() {
-        // At raw_density large (deep underground), the suppression
-        // term clamps to 0 — so cheese is just `clamp(offset +
-        // noise, -1, 1)` and can freely go negative.
+        // With the MC-parity `cave_layer` term added, the cheese
+        // sum is shifted upward by `intensity * layer²`. Cheese
+        // goes negative only where the layer is near zero (cave-
+        // rich band) AND the cheese noise is sufficiently negative.
+        // Scan several Y values to hit at least one cave-rich band
+        // and accept any v < 0.
         let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
         let nc = NoiseCarvers::new(42, &cfg.cave);
         let mut found_negative = false;
-        'outer: for wx in (-256..256).step_by(4) {
-            for wz in (-256..256).step_by(4) {
-                let v = cheese_contribution(wx, -40, wz, 20.0, &nc, &cfg.cave);
-                if v < -0.1 {
-                    found_negative = true;
-                    break 'outer;
+        'outer: for wy in (-80..=-40).step_by(2) {
+            for wx in (-256..256).step_by(4) {
+                for wz in (-256..256).step_by(4) {
+                    let v = cheese_contribution(wx, wy, wz, 20.0, &nc, &cfg.cave);
+                    if v < 0.0 {
+                        found_negative = true;
+                        break 'outer;
+                    }
                 }
             }
         }
         assert!(
             found_negative,
-            "expected cheese to go strongly negative somewhere deep underground"
+            "expected cheese to go negative in at least one cave-rich band"
         );
     }
 

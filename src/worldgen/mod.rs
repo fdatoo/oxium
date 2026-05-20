@@ -68,11 +68,13 @@ use noise::{Fbm, MultiFractal, NoiseFn, Simplex};
 //   * `hash`    — deterministic mixer used by plates / trees / caves.
 //   * `region`  — LRU caches + region data structs.
 pub mod aquifer;
+pub mod carver;
 pub mod caves;
 pub mod climate;
 pub mod config;
 pub mod density_graph;
 pub mod flat_cache;
+pub mod fluid;
 pub mod hash;
 pub mod heightmap;
 pub mod hydrology;
@@ -146,6 +148,13 @@ pub struct Generator {
     /// `fill_chunk` to compose with the graph cave SDFs and
     /// wormholes via `max()`.
     noise_carvers: caves::NoiseCarvers,
+    /// MC-style procedural carver tunnel cache. Per-chunk LRU keyed
+    /// on origin chunk coord; each entry is the deterministic list
+    /// of tunnels seeded by that chunk. Filled lazily as `fill_chunk`
+    /// gathers neighbours' carvers to rasterise into the local mask.
+    carver_cache: std::sync::Arc<
+        std::sync::Mutex<lru::LruCache<ChunkCoord, std::sync::Arc<Vec<carver::CarverTunnel>>>>,
+    >,
     seed: u64,
     /// LRU cache of pre-built fine regions. Consulted per chunk fill
     /// to evaluate valley carve and lake water; built on first touch.
@@ -249,6 +258,12 @@ impl Generator {
         // topology (which Fbm fields exist) is fixed in Rust; only
         // tunable values re-read live.
         let noise_carvers = caves::NoiseCarvers::new(seed, &bundled.cave);
+        // Carver cache: cap chosen so a chunk-fill's 11×5×11
+        // neighbour query has comfortable headroom for adjacent
+        // chunks' fills to reuse hot entries.
+        let carver_cache = std::sync::Arc::new(std::sync::Mutex::new(lru::LruCache::new(
+            std::num::NonZeroUsize::new(2048).unwrap(),
+        )));
         Self {
             heightmap,
             density,
@@ -260,11 +275,59 @@ impl Generator {
             surface_system,
             aquifer,
             noise_carvers,
+            carver_cache,
             seed,
             fine_cache: region::fresh_fine_cache(),
             macro_cache: region::fresh_macro_cache(),
             config: config::ConfigHolder::new(bundled),
         }
+    }
+
+    /// Fetch (build if missing) the carver tunnels rooted at the
+    /// given chunk. Pure in `(seed, coord)`; cached so neighbour
+    /// chunk fills don't rebuild it.
+    fn get_carver_tunnels(&self, coord: ChunkCoord) -> std::sync::Arc<Vec<carver::CarverTunnel>> {
+        let mut cache = self.carver_cache.lock().unwrap();
+        if let Some(t) = cache.get(&coord) {
+            return t.clone();
+        }
+        let t = std::sync::Arc::new(carver::build_tunnels_for_chunk(self.seed, coord));
+        cache.put(coord, t.clone());
+        t
+    }
+
+    /// Build the per-chunk carver mask by rasterising every tunnel
+    /// from neighbour chunks within reach. Returned as a flat
+    /// `CHUNK_DIM³` bool array indexed `lx + DIM·ly + DIM²·lz`.
+    fn build_carver_mask(&self, coord: ChunkCoord) -> Vec<bool> {
+        let dim = crate::voxel::coords::CHUNK_DIM as usize;
+        let mut mask = vec![false; dim * dim * dim];
+        let origin = coord.0 * crate::voxel::coords::CHUNK_DIM;
+        // Carver max reach is ~130 blocks horizontally — that's 5
+        // chunks at 32 each. Vertical extent is much smaller
+        // (tunnels rarely drift more than ±15 blocks in Y), but
+        // give a small margin.
+        let r_xz: i32 = 5;
+        let r_y: i32 = 2;
+        for dx in -r_xz..=r_xz {
+            for dy in -r_y..=r_y {
+                for dz in -r_xz..=r_xz {
+                    let nc = ChunkCoord(glam::IVec3::new(
+                        coord.0.x + dx,
+                        coord.0.y + dy,
+                        coord.0.z + dz,
+                    ));
+                    let tunnels = self.get_carver_tunnels(nc);
+                    if tunnels.is_empty() {
+                        continue;
+                    }
+                    for tunnel in tunnels.iter() {
+                        carver::rasterize_into_mask(tunnel, origin, &mut mask);
+                    }
+                }
+            }
+        }
+        mask
     }
 
     /// Build the fine region at `coord` from noise (heightmap +
@@ -438,6 +501,20 @@ impl Generator {
         // deterministic even if a file watcher swaps mid-generation.
         let cfg = self.config_snapshot();
 
+        // Procedural carver: rasterise nearby chunks' tunnels into
+        // a per-chunk boolean mask once. Per-voxel test is then O(1)
+        // mask lookup. See `carver.rs`.
+        let carver_mask = self.build_carver_mask(coord);
+        let dim = CHUNK_DIM_U as usize;
+
+        // Aquifer-placed-fluid mask. Tracks which voxels got their
+        // Water/Lava from the aquifer system (vs the ocean / lake
+        // surface flood). The `fluid::settle_fluid` pass after the
+        // y-loop ONLY processes masked voxels — ocean and lake
+        // water are preserved as-is, even when a carver punches
+        // through the seabed.
+        let mut aquifer_mask = vec![false; dim * dim * dim];
+
         // PR 5: cell-grid evaluator. Builds a 9x9x9 corner lattice
         // of pre-slide density values for this chunk; per-voxel
         // density is the trilerp of the 8 surrounding corners. ~730
@@ -599,6 +676,19 @@ impl Generator {
                         composed = composed.min(ent);
                     }
 
+                    // MC-style procedural carver mask. Hard carve to
+                    // air; pillars below can refill if present
+                    // (matches MC's `MAX(..., pillars)` semantics).
+                    if wy > CAVE_FLOOR_Y {
+                        let lx = (wx - origin.x) as usize;
+                        let ly = (wy - origin.y) as usize;
+                        let lz = (wz - origin.z) as usize;
+                        let idx = lx + dim * ly + dim * dim * lz;
+                        if carver_mask[idx] {
+                            composed = composed.min(-CAVE_SDF_INTENSITY);
+                        }
+                    }
+
                     // Pillars: positive density component refilling
                     // any carved voxel where pillars are present.
                     if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
@@ -618,25 +708,50 @@ impl Generator {
                     // the cave composition above.
                     let aq_substance = self.aquifer.substance(wx, wy, wz, composed);
 
+                    // Yield to the ocean / lake surface flood for
+                    // voxels above the column's heightmap in a
+                    // water-surface column. The aquifer's pressure
+                    // model can otherwise claim these voxels with
+                    // `aquifer_mask` set, putting them through the
+                    // settle pass for no benefit and risking
+                    // settle-decision edge cases that disturb a
+                    // body the surface flood would have kept pristine.
+                    let above_terrain_now = wy > height;
+                    let in_ocean_column = height <= SEA_LEVEL;
+                    let in_lake_column = lake_rim
+                        .map_or(false, |rim| wy <= rim);
+                    let yield_to_surface_flood = above_terrain_now
+                        && (in_ocean_column || in_lake_column);
+                    let aq_substance = if yield_to_surface_flood {
+                        aquifer::Substance::Density
+                    } else {
+                        aq_substance
+                    };
+
                     let block = if let aquifer::Substance::Block(b) = aq_substance {
                         // Aquifer placed a fluid (Water or Lava).
-                        // Treat as air for the depth tracker so the
-                        // surface rule fires correctly on the next
-                        // air → solid transition below.
                         depth_below_surface = None;
+                        let lx = (wx - origin.x) as usize;
+                        let ly = (wy - origin.y) as usize;
+                        let lz = (wz - origin.z) as usize;
+                        aquifer_mask[lx + dim * ly + dim * dim * lz] = true;
                         b
                     } else if !solid {
                         depth_below_surface = None;
-                        // Surface water flood: only voxels *above*
-                        // the natural heightmap and below sea level
-                        // (ocean) or the lake rim. Caves carved
-                        // BELOW the heightmap stay dry — the
-                        // ocean/lake water doesn't reach down into
-                        // the rock through a hydraulic miracle.
-                        let above_terrain = wy > height;
-                        let in_lake = above_terrain
+                        // Surface water flood. `wy >= height` (not
+                        // strict) so that when a carver opens the
+                        // heightmap voxel of an ocean column the
+                        // resulting carved-air voxel becomes Water,
+                        // not Air — otherwise you'd see a sealed
+                        // air bubble directly below the ocean
+                        // surface where a tunnel punches through.
+                        // Static approximation of "water flows down
+                        // through the seabed mouth"; proper runtime
+                        // fluid mechanics will replace it.
+                        let at_or_above_terrain = wy >= height;
+                        let in_lake = at_or_above_terrain
                             && lake_rim.map_or(false, |rim| wy <= rim);
-                        let in_ocean = above_terrain
+                        let in_ocean = at_or_above_terrain
                             && height <= SEA_LEVEL
                             && wy <= SEA_LEVEL;
                         if in_lake || in_ocean {
@@ -677,6 +792,15 @@ impl Generator {
                 let _ = lake_rim;
             }
         }
+
+        // Settle aquifer-placed fluid via per-voxel bottom-up
+        // support propagation (see `fluid::settle_fluid`). Demotes
+        // any masked Water/Lava voxel whose support chain (through
+        // fluid columns) does not resolve to a solid block, an
+        // external fluid body, or the chunk floor. Ocean and lake
+        // water are not masked → preserved.
+        fluid::settle_fluid(out, &aquifer_mask);
+
         // After the terrain pass, lay trees on top. Cross-chunk trees
         // (whose trunks live in a neighbouring chunk but whose leaves
         // overlap this one) are placed too, because we scan every
@@ -1394,8 +1518,30 @@ mod tests {
     /// where the water table extends underground regardless of
     /// surface ocean position. This is the inverse of the prior
     /// `deep_caves_under_land_are_dry` invariant.
+    /// Confirms the procedural carver actually carves voxels in
+    /// underground chunks (not just runs and does nothing). A 16×16
+    /// grid of chunks at chunk-Y=-1 (world Y -32..-1) should have
+    /// at least one chunk with substantial air voxels — caves from
+    /// the carver should be visible at this depth.
     #[test]
-    #[ignore = "all-cells-dry temp override; re-enable when aquifers are tuned back on"]
+    fn carver_produces_air_in_underground_chunks() {
+        let g = Generator::new(42);
+        let mut max_air = 0;
+        for cx in -8..8 {
+            for cz in -8..8 {
+                let mut c = DenseChunk::empty();
+                g.fill_chunk(ChunkCoord(IVec3::new(cx, -1, cz)), &mut c);
+                let air = c.blocks.iter().filter(|b| matches!(b, Block::Air)).count();
+                max_air = max_air.max(air);
+            }
+        }
+        assert!(
+            max_air > 1500,
+            "max air voxels = {max_air} — carver may not be running"
+        );
+    }
+
+    #[test]
     fn pr7_aquifer_floods_some_underground_caves() {
         let g = Generator::new(42);
         // Scan a wide grid of deep chunks (Y=-3 ≈ blocks -96..-65)

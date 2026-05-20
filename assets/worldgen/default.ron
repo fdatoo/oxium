@@ -334,12 +334,30 @@
             first_octave: -8,
             amplitudes: [0.5, 1.0, 2.0, 1.0, 2.0, 1.0, 0.0, 2.0, 0.0],
         ),
-        cheese_xz_scale: 0.6666667,
+        // MC parity: xz=1.0, y=0.6667 → cheese features are TALLER
+        // than wide (vertical caverns), not the flat sphere-shaped
+        // donut pockets the previous isotropic sampling produced.
+        cheese_xz_scale: 1.0,
+        cheese_y_scale: 0.6666667,
         cheese_offset: 0.27,
         cheese_suppression_offset: 1.5,
         cheese_suppression_slope: -0.64,
         cheese_suppression_min: 0.0,
         cheese_suppression_max: 0.5,
+
+        // cave_layer: regional gating for cheese. Sampled at
+        // (xz=1.0, y=8.0) — Y advances 8× faster than XZ, producing
+        // horizontal strata. `cave_layer_intensity * layer²` is
+        // added to cheese: cave-rich bands (|layer|≈0) carve;
+        // cave-poor bands stay solid. Without this term cheese
+        // carves ~50% of deep voxels uniformly.
+        cave_layer: (
+            first_octave: -8,
+            amplitudes: [1.0],
+        ),
+        cave_layer_xz_scale: 1.0,
+        cave_layer_y_scale: 8.0,
+        cave_layer_intensity: 6.0,
 
         // ── Spaghetti: signed-density tube carver.
         //   sloped_spag  = abs(elevation_mapped + y_gradient)
@@ -392,10 +410,15 @@
         // gradient gently lets tubes "leak" up to the surface
         // (Y ≈ 62) at about 5% density — rare but present, so
         // entrances appear without flooding the surface.
+        // MC-direction gradient: slope -0.075/block. y_grad peaks
+        // at y=0 (mid-shallow cave band) and tapers symmetrically.
+        // At y=70 y_grad ≈ -5.25 → tubes form at elev≈5.25 (~15%
+        // of columns), so tubes occasionally break the surface
+        // without flooding every column with cave entrances.
         spaghetti_gradient_from_y: 80,
-        spaghetti_gradient_from_value: 8.0,
+        spaghetti_gradient_from_value: -6.0,
         spaghetti_gradient_to_y: -120,
-        spaghetti_gradient_to_value: -2.0,
+        spaghetti_gradient_to_value: 9.0,
         // Negative offset on the thickness_mod biases the cube
         // term so tube interiors actually go negative; |offset|
         // is the half-width of the cube term's negative range,
@@ -406,7 +429,14 @@
         // -0.5 gives tubes around ~8 blocks across horizontally
         // (vs ~15 at -0.95). Combined with the asymmetric
         // gradient above, tubes stay tube-shaped.
-        spaghetti_thickness_offset: -0.5,
+        // -0.15: thin slivers. With the procedural carver providing
+        // the meandering tunnel network, spaghetti's role is reduced
+        // to "extra texture." Its elevation noise is sampled in
+        // pure 2D, so any tube formed is a VERTICAL CURTAIN over a
+        // 2D contour — narrow tubes minimise the curtain area so
+        // it reads as faint cracks rather than walls. Set to 0.0
+        // to disable spaghetti entirely.
+        spaghetti_thickness_offset: -0.15,
         spaghetti_thickness_slope: -0.2,
         spaghetti_clamp_min: -1.0,
         spaghetti_clamp_max: 1.0,

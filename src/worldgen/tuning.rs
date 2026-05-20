@@ -98,13 +98,12 @@ pub const MACRO_RIVER_THRESH: u32 = 500;
 
 // ── Caves ────────────────────────────────────────────────────────────
 
-/// Inclusive range of cave systems rolled per fine region.
-/// (1, 3) — every region gets at least one system, with up to
-/// three in busy regions. The noise carvers (spaghetti) provide
-/// the dominant cave shape; graph systems exist primarily as
-/// discoverable surface entrances (sinkholes / cliff mouths /
-/// skylights) plus the named-feature chambers attached to them.
-pub const CAVE_SYSTEMS_PER_REGION: (u32, u32) = (1, 3);
+/// Inclusive range of cave systems rolled per fine region. Set to
+/// (0, 0) — graph caves disabled; the procedural carver in
+/// `carver.rs` is the primary structural cave source (MC-style
+/// walking sphere-chain). Flip back to (1, 3) to re-enable graph
+/// caves alongside the carver.
+pub const CAVE_SYSTEMS_PER_REGION: (u32, u32) = (0, 0);
 /// Vertical band (inclusive both ends) for Shallow systems.
 pub const CAVE_BAND_SHALLOW: (i32, i32) = (10, 50);
 /// Vertical band for Middle systems.
@@ -116,18 +115,17 @@ pub const CAVE_BAND_DEEP: (i32, i32) = (-110, -30);
 /// dungeons.
 pub const CHAMBERS_PER_SYSTEM: (u32, u32) = (2, 4);
 /// Range of ellipsoid semi-axis lengths for chambers, in blocks.
-/// Small — radius 3.5 max → 7-block-diameter chambers, which read
-/// as "a room you can stand in" rather than a cavern.
-pub const CHAMBER_RADIUS_RANGE: (f32, f32) = (2.0, 3.5);
+/// 3.5..5.5 → 7..11-block-diameter chambers — MC-parity room sizes.
+pub const CHAMBER_RADIUS_RANGE: (f32, f32) = (3.5, 5.5);
 /// Poisson-disk minimum spacing between chamber centers, as a
 /// multiple of chamber radius.
 pub const POISSON_MIN_SPACING_MULT: f32 = 3.0;
 /// Inclusive range of extra MST edges (loops) to add beyond the
 /// minimum spanning tree.
 pub const MST_EXTRA_LOOPS: (u32, u32) = (1, 2);
-/// Tunnel cross-section radius, in blocks. (1.0, 1.8) gives
-/// 2-3 block-wide passages — squeeze-through tunnels between rooms.
-pub const TUNNEL_RADIUS: (f32, f32) = (1.0, 1.8);
+/// Tunnel cross-section radius, in blocks. (2.0, 3.0) gives
+/// 4-6 block-wide passages — walkable corridors connecting rooms.
+pub const TUNNEL_RADIUS: (f32, f32) = (2.0, 3.0);
 
 /// Probability a chamber in the Shallow band tries to expose to the
 /// surface (sinkhole / cliff mouth / skylight).

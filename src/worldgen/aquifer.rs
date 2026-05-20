@@ -197,24 +197,31 @@ impl AquiferSystem {
         let center_y = cy * AQUIFER_CELL_Y + CELL_CENTER_MARGIN + jy as i32;
         let center_z = cz * AQUIFER_CELL_Z + CELL_CENTER_MARGIN + jz as i32;
 
-        // DRY-CELL GATE: only a fraction of cells have an aquifer at
-        // all. The rest are sentinel-dry — their `y_top` is so far
-        // below any reasonable query that no voxel reads as "in
-        // fluid". This makes aquifers a *feature* (occasional flooded
-        // caves, lava pools) rather than a default state (every cave
-        // is full of water).
-        //
-        // `dry_roll`: per-cell uniform [0, 1).
-        // The kept fraction depends on depth — shallow aquifers are
-        // rare because they would conflict with the surface lake /
-        // ocean flood; deep aquifers are slightly more common.
+        // ABOVE-SEA-LEVEL GUARD: cells whose jittered center sits
+        // meaningfully above sea level are force-dry. Skips the
+        // probability roll entirely. The flood-fill `settle_fluid`
+        // pass catches any floating fluid that sneaks past this
+        // guard, but skipping these cells outright is the cheaper
+        // first line of defence.
+        if center_y > self.cfg.sea_level + 8 {
+            return AquiferCell {
+                cx,
+                cy,
+                cz,
+                center_x,
+                center_y,
+                center_z,
+                y_top: i32::MIN / 2,
+                fluid: Block::Water,
+            };
+        }
+
+        // DRY-CELL GATE: 3% of underground cells keep an aquifer.
+        // Combined with the `y_top` placement below (lower third
+        // of the cell), wet cells become rare punctuation in an
+        // otherwise dry underground.
         let dry_roll = hash::mix_unit(self.seed, &[cx, cy, cz, 5]);
-        // All bands: no aquifers for now. Re-enable selectively
-        // (e.g. ~5% lava pools deep underground) once cave shaping
-        // is settled — currently the aquifer paired with the
-        // bowl-cave problem made it impossible to see what was
-        // wrong with cave shape.
-        let keep_chance: f32 = 0.0;
+        let keep_chance: f32 = 0.03;
         if dry_roll >= keep_chance {
             return AquiferCell {
                 cx,
@@ -228,22 +235,20 @@ impl AquiferSystem {
             };
         }
 
-        // y_top: nominal band depends on the cell's center Y.
-        //   * Near/under sea level: water aquifer well BELOW the cell
-        //     (only the bottom few voxels of a cave there see water).
-        //   * Deeper: water table near the cell's bottom so each
-        //     pocket is a shallow puddle, not a column-filler.
-        let band_nominal = if center_y >= LAVA_BAND_TOP_Y {
-            // Shallow band: y_top a couple of blocks below the cell
-            // center — only the lower portion of a cave catches it.
-            center_y - 2
-        } else {
-            // Deep band: y_top near the cell's bottom.
-            cy * AQUIFER_CELL_Y + AQUIFER_CELL_Y / 4
-        };
+        // y_top: place the fluid surface in the LOWER THIRD of the
+        // cell so wet cells flood only the bottom few blocks of any
+        // cave they touch (shallow puddles inside chambers rather
+        // than chambers fully submerged).
+        let band_nominal = cy * AQUIFER_CELL_Y + AQUIFER_CELL_Y / 3;
         let jitter_unit = hash::mix_unit(self.seed, &[cx, cy, cz, 3]);
         let jitter = ((jitter_unit - 0.5) * 2.0 * self.cfg.y_top_jitter as f32) as i32;
-        let y_top = band_nominal.saturating_add(jitter);
+        // Cap one block below sea level. Without this cap, cells
+        // near sea level could jitter their `y_top` above the
+        // ocean's surface, producing visible water cubes hovering
+        // over the sea.
+        let y_top = band_nominal
+            .saturating_add(jitter)
+            .min(self.cfg.sea_level - 1);
 
         // Fluid kind: lava only allowed below LAVA_BAND_TOP_Y.
         let fluid_roll = hash::mix_unit(self.seed, &[cx, cy, cz, 4]);

@@ -49,7 +49,14 @@ impl ChannelParams {
 pub struct CaveConfig {
     // Cheese: signed-density carver, see `cheese_contribution`.
     pub cheese: ChannelParams,
+    /// XZ multiplier on world coords when sampling the cheese noise.
+    /// MC uses 1.0 (sample at the channel's natural frequency).
     pub cheese_xz_scale: f32,
+    /// Y multiplier on world coords when sampling the cheese noise.
+    /// Decoupled from xz so the cheese rooms can be anisotropic — MC
+    /// uses 0.6666 (Y advances slower → features taller in Y →
+    /// vertical caverns rather than spherical pockets).
+    pub cheese_y_scale: f32,
     /// Constant added to the cheese noise sample. Positive = solid
     /// bias; lowering it lets more voxels carve.
     pub cheese_offset: f32,
@@ -62,6 +69,23 @@ pub struct CaveConfig {
     pub cheese_suppression_slope: f32,
     pub cheese_suppression_min: f32,
     pub cheese_suppression_max: f32,
+
+    /// MC-parity `cave_layer` noise. Sampled at `(xz=1, y=8)` so
+    /// the noise advances 8× faster in Y than XZ → forms thin
+    /// horizontal "layers" of cave-rich vs cave-poor strata. The
+    /// term `cave_layer_intensity * cave_layer²` is ADDED to the
+    /// cheese sum before the carve check: where `|layer|≈0` (cave-
+    /// rich band) cheese can carve; where `|layer|` is large the
+    /// layer² term swamps the cheese signal and the band stays
+    /// solid. Without this term cheese carves uniformly at
+    /// ~50% of deep voxels, producing chaotic swiss cheese.
+    pub cave_layer: ChannelParams,
+    pub cave_layer_xz_scale: f32,
+    pub cave_layer_y_scale: f32,
+    /// Multiplier on `cave_layer²` added to cheese. MC uses 4.0.
+    /// Higher → fewer / sparser cave-rich bands; lower → uniform
+    /// carving everywhere.
+    pub cave_layer_intensity: f32,
 
     // Spaghetti: signed-density tube carver, see `spaghetti_contribution`.
     pub spaghetti_2d: ChannelParams,
