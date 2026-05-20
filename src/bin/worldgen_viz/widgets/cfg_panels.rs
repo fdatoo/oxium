@@ -49,7 +49,7 @@ pub fn density_panel(ui: &mut Ui, cfg: &mut DensityConfig) -> bool {
         );
     });
     ui.collapsing("Offset spline", |ui| {
-        ui.add(crate::spline_widget::SplineEditor::new(&mut cfg.offset_spline));
+        ui.add(crate::widgets::spline::SplineEditor::new(&mut cfg.offset_spline));
         if let oxium::worldgen::spline::CubicSpline::Multipoint(knots) = &cfg.offset_spline {
             ui.label(format!("{} knots", knots.len()));
         } else {
