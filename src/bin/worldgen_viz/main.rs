@@ -340,6 +340,7 @@ impl ApplicationHandler for VizApp {
                     aspect,
                     selected_chunk,
                     time_s,
+                    self.state.cutaway_max_y,
                 );
                 self.state.scene_chunks_total = scene.chunk_count();
                 self.state.scene_chunks_visible = scene.visible_chunk_count();

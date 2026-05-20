@@ -59,12 +59,26 @@ impl Orientation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layer {
-    /// Signed density value, divergent gradient through 0. Solid > 0, air <= 0.
+    /// Final signed density value (post-carver). Solid > 0, air <= 0.
     Density,
     /// Resolved block at the voxel, coloured the same way the mesher
     /// would colour it. Reads through the existing density+surface
     /// pipeline so the slice matches what fill_chunk would write.
     Block,
+    /// Combined cave-contribution magnitude (max of cave_sdf + cheese
+    /// + spaghetti). Bright = the carvers are removing material here.
+    /// Pillar contribution is positive in the opposite direction
+    /// and isn't included; see the dedicated `Pillar` layer for that.
+    CaveSdf,
+    /// Cheese noise contribution only (blobby caves). Bright = strong
+    /// cheese carve at this voxel.
+    Cheese,
+    /// Spaghetti tube contribution only (thin worming tubes). Bright =
+    /// strong spaghetti carve.
+    Spaghetti,
+    /// Pillar density-add-back. Bright = strong pillar add-back
+    /// (resists carving inside cave volumes).
+    Pillar,
 }
 
 impl Layer {
@@ -72,8 +86,21 @@ impl Layer {
         match self {
             Layer::Density => "Density (signed)",
             Layer::Block => "Block",
+            Layer::CaveSdf => "Cave SDF (combined)",
+            Layer::Cheese => "Cheese",
+            Layer::Spaghetti => "Spaghetti",
+            Layer::Pillar => "Pillar",
         }
     }
+
+    pub const ALL: &'static [Layer] = &[
+        Layer::Density,
+        Layer::Block,
+        Layer::CaveSdf,
+        Layer::Cheese,
+        Layer::Spaghetti,
+        Layer::Pillar,
+    ];
 }
 
 pub struct CrossSection {
@@ -290,7 +317,7 @@ impl CrossSection {
             egui::ComboBox::from_id_source("cross_layer_combo")
                 .selected_text(self.layer.label())
                 .show_ui(ui, |ui| {
-                    for l in [Layer::Density, Layer::Block] {
+                    for &l in Layer::ALL {
                         if ui.selectable_label(self.layer == l, l.label()).clicked() {
                             self.layer = l;
                             dirty = true;
@@ -403,6 +430,36 @@ fn sample_pixel(generator: &Generator, layer: Layer, wx: i32, wy: i32, wz: i32) 
     match layer {
         Layer::Density => density_color(bd.final_density),
         Layer::Block => block_color(bd.block),
+        // For each carver, normalise into [0, 1] over a sensible
+        // magnitude (~2.0 — most contributions sit there). Hot ramp
+        // so cave material is easy to spot against solid rock.
+        Layer::CaveSdf => {
+            let combined = bd.cave_sdf.max(bd.cheese).max(bd.spaghetti);
+            hot_color((combined / 2.0).clamp(0.0, 1.0))
+        }
+        Layer::Cheese => hot_color((bd.cheese / 2.0).clamp(0.0, 1.0)),
+        Layer::Spaghetti => hot_color((bd.spaghetti / 2.0).clamp(0.0, 1.0)),
+        Layer::Pillar => hot_color((bd.pillar / 2.0).clamp(0.0, 1.0)),
+    }
+}
+
+/// Black → red → orange → white hot gradient. For carver-strength layers.
+fn hot_color(t: f32) -> [u8; 4] {
+    let t = t.clamp(0.0, 1.0);
+    if t < 0.001 {
+        // Empty (no carver here) — keep the background dark so the
+        // overall scene reads as "mostly solid with a few hot spots".
+        return [12, 12, 18, 255];
+    }
+    if t < 0.4 {
+        let s = t / 0.4;
+        [(s * 200.0) as u8, 0, 0, 255]
+    } else if t < 0.75 {
+        let s = (t - 0.4) / 0.35;
+        [200 + (s * 55.0) as u8, (s * 165.0) as u8, 0, 255]
+    } else {
+        let s = (t - 0.75) / 0.25;
+        [255, 165 + (s * 90.0) as u8, (s * 255.0) as u8, 255]
     }
 }
 

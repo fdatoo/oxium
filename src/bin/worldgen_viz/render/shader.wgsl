@@ -5,7 +5,10 @@ struct Camera {
     // chunk is currently pinned, 0.0 otherwise).
     selected_chunk: vec4<f32>,
     // x = elapsed seconds, used to animate the chunk-tint pulse.
-    // y/z/w reserved.
+    // y = cutaway max-Y (fragments with world Y above this discard,
+    //     shaving the top off the world so the user can see caves).
+    //     A very large value (e.g. 1e9) disables the cutaway.
+    // z/w reserved.
     time: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> cam: Camera;
@@ -28,6 +31,14 @@ fn vs_main(in: VsIn) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    // Cutaway: discard any fragment whose world Y is above the
+    // user-selected cap. Lets you "shave off" the surface to see
+    // caves directly. cam.time.y == 1e9 (or any sufficiently large
+    // value) disables the cutaway.
+    if (in.world_pos.y > cam.time.y) {
+        discard;
+    }
+
     // Mild fake lighting: brighten high blocks slightly.
     var lit = in.color * (0.7 + 0.3 * clamp((in.world_pos.y - 40.0) / 100.0, 0.0, 1.0));
 

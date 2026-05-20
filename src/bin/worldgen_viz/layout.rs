@@ -73,6 +73,32 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
 
             ui.separator();
 
+            // Cutaway max-Y — shaves the top off the world so caves
+            // become visible without flying inside them. 1e9 = off.
+            ui.label("Cutaway:");
+            let mut cutaway_on = app.cutaway_max_y < 1e6;
+            if ui
+                .checkbox(&mut cutaway_on, "")
+                .on_hover_text(
+                    "Discard fragments above the chosen Y. Use to peel off the surface and see the cave network underneath.",
+                )
+                .changed()
+            {
+                app.cutaway_max_y = if cutaway_on { 60.0 } else { 1e9 };
+            }
+            if cutaway_on {
+                let mut y = app.cutaway_max_y;
+                if ui
+                    .add(egui::Slider::new(&mut y, -64.0..=192.0).text("max y"))
+                    .on_hover_text("World Y above which fragments are discarded.")
+                    .changed()
+                {
+                    app.cutaway_max_y = y;
+                }
+            }
+
+            ui.separator();
+
             // Region centre — chunk coords. Editing either kicks off
             // a full region regen via World::set_region. Helpful
             // tooltip on each so users know what the units are.

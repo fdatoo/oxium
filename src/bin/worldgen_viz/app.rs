@@ -42,6 +42,10 @@ pub struct AppState {
     /// Chunks that passed frustum culling last frame.
     pub scene_chunks_visible: usize,
     pub presets: PresetUi,
+    /// World-Y above which the fragment shader discards. A very
+    /// large default disables the cutaway. Lower to shave off the
+    /// surface and expose caves underneath.
+    pub cutaway_max_y: f32,
 }
 
 impl AppState {
@@ -58,6 +62,7 @@ impl AppState {
             scene_chunks_visible: 0,
             right_tab: RightTab::default(),
             presets: PresetUi::new(),
+            cutaway_max_y: 1e9,
         }
     }
 

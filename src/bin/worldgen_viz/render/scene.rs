@@ -164,6 +164,7 @@ impl SceneRenderer {
         aspect: f32,
         selected_chunk: Option<ChunkCoord>,
         time_seconds: f32,
+        cutaway_max_y: f32,
     ) {
         let vp = cam.view_proj(aspect);
         let selected = match selected_chunk {
@@ -173,7 +174,7 @@ impl SceneRenderer {
         let u = CameraUniform {
             view_proj: vp.to_cols_array_2d(),
             selected_chunk: selected,
-            time: [time_seconds, 0.0, 0.0, 0.0],
+            time: [time_seconds, cutaway_max_y, 0.0, 0.0],
         };
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[u]));
         self.last_view_proj = vp;
