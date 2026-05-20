@@ -44,6 +44,78 @@ pub fn rgb_brightness(cell: u16) -> u8 {
     r.max(g).max(b)
 }
 
+/// Build the 33³ Rgba8Unorm blob for a chunk's GPU light volume. Each
+/// axis spans 0..=32 — index 32 reads from the +X/+Y/+Z neighbor's
+/// index 0 so trilinear sampling at the chunk's far face sees valid
+/// neighbor values (no clamp artefact). Cells where the neighbor isn't
+/// loaded clamp to the local boundary value.
+///
+/// Layout per voxel:
+///   R = block_red   / 15
+///   G = block_green / 15
+///   B = block_blue  / 15
+///   A = sky_light   / 15
+pub fn build_light_volume_blob(
+    dense: &DenseChunk,
+    neighbors: &Neighbors,
+) -> Box<[u8; 33 * 33 * 33 * 4]> {
+    let mut buf = vec![0u8; 33 * 33 * 33 * 4].into_boxed_slice();
+    let out: &mut [u8; 33 * 33 * 33 * 4] =
+        buf.as_mut().try_into().expect("size mismatch");
+    // Scale 0..=15 → 0..=255 with rounding so 15 maps to 255 exactly.
+    let scale = |v: u8| ((v as u32 * 255 + 7) / 15) as u8;
+    for z in 0..33 {
+        for y in 0..33 {
+            for x in 0..33 {
+                let (r, g, b, a) = sample_for_blob(dense, neighbors, x, y, z);
+                let idx = (z * 33 * 33 + y * 33 + x) * 4;
+                out[idx]     = scale(r);
+                out[idx + 1] = scale(g);
+                out[idx + 2] = scale(b);
+                out[idx + 3] = scale(a);
+            }
+        }
+    }
+    buf.try_into().expect("size mismatch")
+}
+
+/// Sample (R, G, B, sky) at local index (x, y, z) where each axis is
+/// 0..=32. Indices 0..=31 read from this chunk; index 32 reads from the
+/// +X/+Y/+Z neighbor's index 0. If the neighbor isn't loaded, returns
+/// the local boundary cell (clamped to index 31).
+fn sample_for_blob(
+    dense: &DenseChunk,
+    neighbors: &Neighbors,
+    x: usize,
+    y: usize,
+    z: usize,
+) -> (u8, u8, u8, u8) {
+    use crate::mesher::Face;
+    let (chunk_src, lx, ly, lz): (&DenseChunk, usize, usize, usize) = if x == 32 {
+        match neighbors.chunks[Face::PosX as usize] {
+            Some(n) => (n, 0, y.min(31), z.min(31)),
+            None    => (dense, 31, y.min(31), z.min(31)),
+        }
+    } else if y == 32 {
+        match neighbors.chunks[Face::PosY as usize] {
+            Some(n) => (n, x.min(31), 0, z.min(31)),
+            None    => (dense, x.min(31), 31, z.min(31)),
+        }
+    } else if z == 32 {
+        match neighbors.chunks[Face::PosZ as usize] {
+            Some(n) => (n, x.min(31), y.min(31), 0),
+            None    => (dense, x.min(31), y.min(31), 31),
+        }
+    } else {
+        (dense, x, y, z)
+    };
+    let idx = crate::voxel::coords::LocalPos(glam::UVec3::new(lx as u32, ly as u32, lz as u32))
+        .to_index();
+    let (r, g, b) = unpack_rgb(chunk_src.block_rgb[idx]);
+    let a = chunk_src.sky_light[idx] & 0x0F;
+    (r, g, b, a)
+}
+
 /// Fully-expanded view of one chunk. ~160 KB:
 /// 64 KB blocks + 32 KB sky-light + 64 KB block-rgb.
 ///
@@ -371,5 +443,20 @@ mod tests {
         let d = DenseChunk::new_filled(Block::Stone);
         let p = PalettedChunk::compress(&d);
         assert_eq!(p.palette.len(), 1);
+    }
+
+    #[test]
+    fn light_volume_blob_size_and_layout() {
+        let mut d = DenseChunk::empty();
+        d.sky_light[0] = 15;
+        d.block_rgb[0] = pack_rgb(15, 0, 0);
+        let n = Neighbors { chunks: [None; 6] };
+        let blob = build_light_volume_blob(&d, &n);
+        assert_eq!(blob.len(), 33 * 33 * 33 * 4);
+        // First voxel (0,0,0): R should be ~255 (from block_rgb's R=15), A also ~255.
+        assert!(blob[0] >= 240, "R channel scaled wrong: {}", blob[0]);
+        assert_eq!(blob[1], 0);
+        assert_eq!(blob[2], 0);
+        assert!(blob[3] >= 240, "A channel scaled wrong: {}", blob[3]);
     }
 }
