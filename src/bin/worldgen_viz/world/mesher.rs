@@ -48,7 +48,11 @@ pub fn mesh_chunk(coord: ChunkCoord, chunk: &DenseChunk, paint: &PaintContext) -
                         is_solid(chunk.get(nl))
                     };
                     if !neighbor_solid {
-                        let color = paint.color_for(voxel.x, voxel.y, voxel.z, face, block);
+                        let mut color = paint.color_for(voxel.x, voxel.y, voxel.z, face, block);
+                        let ao = face_ao(chunk, lx, ly, lz, face);
+                        color[0] *= ao;
+                        color[1] *= ao;
+                        color[2] *= ao;
                         emit_face(p, color, face, &mut mesh);
                     }
                 }
@@ -56,6 +60,49 @@ pub fn mesh_chunk(coord: ChunkCoord, chunk: &DenseChunk, paint: &PaintContext) -
         }
     }
     mesh
+}
+
+/// Cheap voxel ambient occlusion. For the face we're about to emit,
+/// sample the four cardinal voxels at the face's outward level
+/// (perpendicular to the face normal). Each solid neighbour casts a
+/// shadow onto the face — count them and darken accordingly.
+///
+/// Without this, a cave floor and the surrounding rock both render
+/// at the same PosY face brightness from a top-down view (everything
+/// is "the top of a stone block"). With AO, the cave floor sits next
+/// to walls so it counts 2-4 solid neighbours, while open rock has 0,
+/// giving the cave silhouette visible contrast.
+///
+/// Single-chunk only: occluders outside the chunk are treated as air
+/// (slight under-shadowing at chunk borders, acceptable for a tuning
+/// viz). With our region pipeline we could plumb neighbour chunks in
+/// for a perfect result; left as a future polish.
+fn face_ao(chunk: &DenseChunk, lx: i32, ly: i32, lz: i32, face: Face) -> f32 {
+    let dim = CHUNK_DIM_U as i32;
+    let [nx, ny, nz] = face.normal();
+    let face_lx = lx + nx;
+    let face_ly = ly + ny;
+    let face_lz = lz + nz;
+    let perp: [(i32, i32, i32); 4] = match face {
+        Face::PosY | Face::NegY => [(1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1)],
+        Face::PosX | Face::NegX => [(0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)],
+        Face::PosZ | Face::NegZ => [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0)],
+    };
+    let mut solid_count = 0u8;
+    for (dx, dy, dz) in perp {
+        let qx = face_lx + dx;
+        let qy = face_ly + dy;
+        let qz = face_lz + dz;
+        if qx < 0 || qx >= dim || qy < 0 || qy >= dim || qz < 0 || qz >= dim {
+            continue; // outside the chunk → treated as air, no occlusion
+        }
+        let q = LocalPos(glam::UVec3::new(qx as u32, qy as u32, qz as u32));
+        if is_solid(chunk.get(q)) {
+            solid_count += 1;
+        }
+    }
+    // 0 occluders → 1.0 (bright); 4 occluders → 0.4 (deep shadow).
+    1.0 - 0.15 * solid_count as f32
 }
 
 fn emit_face(p: Vec3, color: [f32; 3], face: Face, mesh: &mut VizMesh) {
