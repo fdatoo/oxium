@@ -2,7 +2,9 @@
 //! PR 4 will let the AppState hold two sessions for A/B compare.
 
 use crate::camera::{Camera, FlyCamera, OrbitCamera};
+use crate::overlays::MapView;
 use crate::paint::PaintMode;
+use crate::probe::Probe;
 use crate::world::invalidate::Invalidator;
 use crate::world::stream::StreamRadius;
 use crate::world::World;
@@ -25,6 +27,8 @@ pub struct Session {
     pub cam_kind: CamKind,
     pub paint: PaintMode,
     pub invalidator: Invalidator,
+    pub probe: Probe,
+    pub map: MapView,
 }
 
 impl Session {
@@ -42,6 +46,8 @@ impl Session {
             cam_kind: CamKind::Fly,
             paint: PaintMode::default(),
             invalidator: Invalidator::new(),
+            probe: Probe::new(),
+            map: MapView::new(),
         }
     }
 

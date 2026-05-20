@@ -80,13 +80,46 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
             });
         });
 
-    // Right panel: probe placeholder (PR 2 fills this).
+    // Right panel: overlay map + probe (PR 2).
+    let generator = app.session.generator.clone();
     egui::SidePanel::right("probe_panel")
         .resizable(true)
-        .default_width(280.0)
+        .default_width(360.0)
         .show(ctx, |ui| {
-            ui.heading("Probe");
-            ui.label("Click a column in the 3D view to inspect (PR 2).");
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                // Map section
+                ui.heading("Overlay map");
+                let revision = app.session.invalidator.revision();
+                let clicked = app.session.map.show(ui, &generator, revision);
+                if let Some((wx, wz)) = clicked {
+                    app.session.probe.pin(&generator, wx, wz);
+                }
+                ui.separator();
+
+                // Probe section
+                ui.heading("Probe");
+                if let Some(snap) = app.session.probe.snapshot.clone() {
+                    ui.horizontal(|ui| {
+                        if ui.button("Unpin").clicked() {
+                            app.session.probe.unpin();
+                        }
+                    });
+                    let probe_y_before = app.session.probe.probe_y;
+                    let mut y_local = probe_y_before;
+                    ui.add(egui::Slider::new(&mut y_local, -64..=256).text("probe y"));
+                    if y_local != probe_y_before {
+                        app.session.probe.set_y(&generator, y_local);
+                    }
+                    crate::widgets::probe_table::show(
+                        ui,
+                        &snap,
+                        app.session.probe.breakdown.as_ref(),
+                        app.session.probe.probe_y,
+                    );
+                } else {
+                    ui.label("Click the map to pin a column.");
+                }
+            });
         });
 
     // Bottom status bar.

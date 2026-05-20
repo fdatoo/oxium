@@ -173,6 +173,7 @@ impl ApplicationHandler for VizApp {
                 let t0 = Instant::now();
                 if self.state.session.invalidator.take_pending() {
                     self.state.session.world.wipe();
+                    self.state.session.probe.refresh(&self.state.session.generator);
                     scene.clear();
                 }
                 let cam_pos = self.state.session.camera().position();

@@ -24,6 +24,13 @@ impl Invalidator {
         self.current = self.current.wrapping_add(1);
     }
 
+    /// Current revision counter. Bumped on `bump()`; consumed by
+    /// `take_pending`. Used as a cache key by overlays that want to
+    /// re-render exactly once per config change.
+    pub fn revision(&self) -> u64 {
+        self.current
+    }
+
     /// Call once per frame. Returns `true` exactly once per `bump()`:
     /// when the revision has advanced since the last call. The caller
     /// is responsible for performing the wipe (typically
