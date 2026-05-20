@@ -1,5 +1,7 @@
 //! wgpu device + surface + egui rendering glue.
 
+pub mod scene;
+
 use std::sync::Arc;
 use winit::window::Window;
 
