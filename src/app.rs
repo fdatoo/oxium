@@ -579,6 +579,13 @@ impl AppState {
         // we just generated it from the current data on the main
         // thread, so by definition it's the latest.
         renderer.upload_chunk_mesh(coord, 0, &mesh);
+        // Upload the light volume too — without this the GPU keeps
+        // the pre-edit values and broken/placed blocks render against
+        // stale lighting (pits stay pitch-black, torches don't bleed
+        // their RGB into neighbours). Cheap (one wgpu queue write of
+        // ~144 KB) and the path is hot enough that the cost is fine.
+        let blob = crate::voxel::chunk::build_light_volume_blob(&dense, &ns);
+        renderer.upload_chunk_light_volume(coord, blob.as_ref());
     }
 
     /// Apply one UI-emitted intent. Each variant maps to a small piece
