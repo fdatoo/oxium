@@ -71,6 +71,10 @@ impl World {
             self.in_flight.insert(coord);
             let tx = self.tx.clone();
             let generator = self.generator.clone();
+            // FIXME(PR 7): wrap the body in std::panic::catch_unwind. Today a
+            // panic inside fill_chunk or mesh_chunk leaves `coord` in `in_flight`
+            // forever — silent data loss with no diagnostic. A failure variant
+            // on ChunkJobResult plus a watchdog drain fixes it.
             self.pool.spawn(move || {
                 let mut chunk = DenseChunk::empty();
                 generator.fill_chunk(coord, &mut chunk);
@@ -89,7 +93,13 @@ impl World {
     }
 
     /// Drain any completed jobs into the cache. Returns the coords whose
-    /// meshes just landed (caller uploads them to the GPU).
+    /// meshes just landed; the caller is expected to upload these to the
+    /// GPU immediately. The LRU also keeps its own copy (cheap — Arc'd
+    /// vertex+index buffers) for future cache-hit queries, but the LRU is
+    /// NOT the source of truth for what's on the GPU. The `SceneRenderer`'s
+    /// internal HashMap is. If the LRU evicts a coord whose GPU buffer is
+    /// still live, the renderer keeps drawing it until the next request
+    /// rebuilds the mesh.
     pub fn drain_results(&mut self) -> Vec<(ChunkCoord, ChunkMeshGpu)> {
         let mut out = Vec::new();
         while let Ok(r) = self.rx.try_recv() {
