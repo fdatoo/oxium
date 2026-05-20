@@ -65,6 +65,11 @@ pub struct CrossSection {
     pub center_a: f32,
     pub center_b: f32,
     pub blocks_per_pixel: f32,
+    /// The pinned column seen on the most recent `show()` call.
+    /// When the pin changes (user clicks a new column), we auto-snap
+    /// the cross-section's centre + slice to that column so the
+    /// freshly-pinned target lands in the middle of the slice.
+    last_seen_pin: Option<(i32, i32, i32)>,
     texture: Option<TextureHandle>,
     last_key: Option<RenderKey>,
 }
@@ -89,8 +94,35 @@ impl CrossSection {
             center_a: 0.0,
             center_b: 70.0,
             blocks_per_pixel: PLOT_BLOCKS_PER_PIXEL_INITIAL,
+            last_seen_pin: None,
             texture: None,
             last_key: None,
+        }
+    }
+
+    /// Snap centre + slice axis to a pinned column. Independent of
+    /// the auto-snap on-pin-change so callers can also expose a
+    /// manual "Center on pinned" button.
+    pub fn focus_on(&mut self, wx: i32, h_target: i32, wz: i32) {
+        match self.orientation {
+            Orientation::Xz => {
+                // Horizontal slice: centre on (wx, wz), slice at the surface Y.
+                self.center_a = wx as f32;
+                self.center_b = wz as f32;
+                self.slice_axis = h_target;
+            }
+            Orientation::Xy => {
+                // Vertical slice fixed-Z: centre on (wx, h_target), slice plane = wz.
+                self.center_a = wx as f32;
+                self.center_b = h_target as f32;
+                self.slice_axis = wz;
+            }
+            Orientation::Yz => {
+                // Vertical slice fixed-X: centre on (wz, h_target), slice plane = wx.
+                self.center_a = wz as f32;
+                self.center_b = h_target as f32;
+                self.slice_axis = wx;
+            }
         }
     }
 
@@ -140,10 +172,27 @@ impl CrossSection {
         self.last_key = Some(key);
     }
 
-    /// Render UI; returns true if any control mutated (caller can use
-    /// it to drive debounce/regen, though regenerate() already keys on
-    /// the relevant state).
-    pub fn show(&mut self, ui: &mut Ui, generator: &Generator, revision: u64) -> bool {
+    /// Render UI; returns true if any control mutated. `pin` is the
+    /// currently-pinned column (`(wx, h_target, wz)`), if any —
+    /// when it differs from what we saw last frame the slice auto-
+    /// snaps to it. Orientation changes also re-snap (since each
+    /// orientation needs the pin mapped to different axes).
+    pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        generator: &Generator,
+        revision: u64,
+        pin: Option<(i32, i32, i32)>,
+    ) -> bool {
+        // Auto-snap on pin change.
+        if pin != self.last_seen_pin {
+            if let Some((wx, h, wz)) = pin {
+                self.focus_on(wx, h, wz);
+            }
+            self.last_seen_pin = pin;
+        }
+
+        let prev_orient = self.orientation;
         let mut dirty = false;
         ui.horizontal(|ui| {
             ui.label("Orientation:");
@@ -170,6 +219,29 @@ impl CrossSection {
                     }
                 });
         });
+
+        // If the orientation changed and we have a pin, re-snap to
+        // it under the new axes (otherwise sliders look stale).
+        if self.orientation != prev_orient {
+            if let Some((wx, h, wz)) = pin {
+                self.focus_on(wx, h, wz);
+            }
+        }
+
+        // "Center on pinned" button — explicit re-snap for users who
+        // manually drifted away with the sliders and want to reset.
+        if let Some((wx, h, wz)) = pin {
+            ui.horizontal(|ui| {
+                if ui
+                    .small_button(format!("⌖ Centre on pinned ({wx}, {h}, {wz})"))
+                    .on_hover_text("Snap the slice's centre + slice axis back to the pinned column.")
+                    .clicked()
+                {
+                    self.focus_on(wx, h, wz);
+                    dirty = true;
+                }
+            });
+        }
         dirty |= ui
             .add(egui::Slider::new(&mut self.slice_axis, -128..=256).text(self.orientation.slice_axis_label()))
             .on_hover_text("World coordinate of the cut plane along the orientation's fixed axis.")

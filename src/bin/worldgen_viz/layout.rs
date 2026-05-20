@@ -147,11 +147,21 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
 
                 // Cross-section panel — collapsed by default so it
                 // doesn't dominate the right column for users who
-                // aren't actively probing density.
+                // aren't actively probing density. Threads the
+                // pinned column through so the slice auto-focuses on
+                // it whenever the user clicks a new one.
+                let pin_for_cross = app
+                    .session
+                    .probe
+                    .snapshot
+                    .as_ref()
+                    .map(|s| (s.wx, s.h_target, s.wz));
                 egui::CollapsingHeader::new("Cross-section")
                     .default_open(false)
                     .show(ui, |ui| {
-                        app.session.cross.show(ui, &generator, revision);
+                        app.session
+                            .cross
+                            .show(ui, &generator, revision, pin_for_cross);
                     });
             });
         });
