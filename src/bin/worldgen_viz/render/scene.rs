@@ -179,6 +179,14 @@ impl SceneRenderer {
         self.chunks.clear();
     }
 
+    /// Coords of every chunk currently holding GPU buffers. Used by
+    /// the post-edit refill path: each gets re-requested so its mesh
+    /// updates against the new config without the screen ever
+    /// flashing blank.
+    pub fn chunk_coords(&self) -> Vec<ChunkCoord> {
+        self.chunks.keys().copied().collect()
+    }
+
     pub fn render<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.camera_bind_group, &[]);
