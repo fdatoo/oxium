@@ -10,9 +10,24 @@ The `--screenshot-and-exit` flag captures after a warmup period during which
 chunks stream in. The default 60-frame warmup is **not enough at radius 16** —
 chunks require wall-clock time to generate on worker threads. Set
 `OXIUM_SCREENSHOT_WARMUP_FRAMES=1800` (≈30 seconds at 60 FPS) to give the
-streaming system time to populate the world.
+streaming system time to populate the world. The harness also waits for chunk
+streaming to quiesce (no growth for 60 consecutive frames) before capturing.
 
 The window is automatically hidden when `--screenshot-and-exit` is set.
+
+## Determinism + diff threshold
+
+Even with quiesce + a zeroed shader time uniform, ~6% of pixels still differ by
+±1-2 between two identical-code runs (floating-point physics drift carries into
+LOD selection and per-chunk vertex jitter). To diff after a refactor, use:
+
+```
+python3 tests/screenshots/diff.py tests/screenshots/baseline_<scene>.png /tmp/new.png
+```
+
+The script flags a regression only when differences exceed calibrated noise-floor
+thresholds (>2% of pixels differ by >5 channels, or >0.5% by >25, etc.). Exit
+code 0 = within noise floor, 1 = regression.
 
 ## Regenerate
 
