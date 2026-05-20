@@ -16,6 +16,7 @@ pub mod font;
 pub mod gpu;
 pub mod hdr;
 pub mod hud;
+pub mod light_volume;
 pub mod mesh;
 pub mod pipelines;
 pub mod screenshot;
