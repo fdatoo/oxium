@@ -296,6 +296,85 @@
         Block(Stone),
     ]),
 
+    // ── Noise carvers (PR 8): cheese / spaghetti / pillars ───────────
+    //
+    // Supplements the graph-based cave systems and wormholes with
+    // MC-style ambient cave density. Each channel mirrors MC's
+    // data/.../worldgen/noise/<name>.json. Topology stays in Rust;
+    // only values are file-driven.
+    cave: (
+        // ── Cheese caves: single 3D noise, threshold carves.
+        cheese: (
+            first_octave: -8,
+            amplitudes: [0.5, 1.0, 2.0, 1.0, 2.0, 1.0, 0.0, 2.0, 0.0],
+        ),
+        cheese_xz_scale: 0.6666667,
+        cheese_threshold: -0.27,
+        cheese_y_min: -30,
+        cheese_y_max: 10,
+        cheese_fade_blocks: 8,
+        // 0.6 ≈ CAVE_SDF_INTENSITY (4) / 7 — strong enough to
+        // perforate the chunk visibly but not enough to dominate
+        // graph chambers (intensity 4).
+        cheese_intensity: 0.6,
+
+        // ── Spaghetti tubes: two noises gated by rarity + Y-gradient.
+        spaghetti_2d: (
+            first_octave: -7,
+            amplitudes: [1.0],
+        ),
+        spaghetti_2d_modulator: (
+            first_octave: -11,
+            amplitudes: [1.0],
+        ),
+        spaghetti_2d_thickness: (
+            first_octave: -8,
+            amplitudes: [1.0],
+        ),
+        spaghetti_roughness: (
+            first_octave: -5,
+            amplitudes: [1.0],
+        ),
+        // 0.0: spaghetti modulator < 0 ⇒ ~50% gate area, but the
+        // resulting per-voxel carve rate is still <10% because the
+        // |field| < half_width test inside the gate is also
+        // selective. Anything more permissive flooded entire deep
+        // chunks; -0.1 was too dry (just dust). Zero is the sweet
+        // spot.
+        spaghetti_rarity_threshold: 0.0,
+        spaghetti_thickness_offset: 0.04,
+        // Gradient sign convention here: "top_y" refers to the
+        // shallower world Y (we want suppression there), "bottom_y"
+        // is deep (we want carving). The gradient value is added to
+        // `abs(field)` before the half-width test, so a positive
+        // value pushes tube_distance up → less carving. Deep voxels
+        // get -40, shallow voxels +8, matching MC's tube band but
+        // with Oxium's compressed Y range.
+        spaghetti_gradient_top_y: 140,
+        spaghetti_gradient_top_value: 8.0,
+        spaghetti_gradient_bottom_y: -120,
+        spaghetti_gradient_bottom_value: -40.0,
+        spaghetti_intensity: 1.2,
+
+        // ── Pillars: positive-density blobs that ADD stone back.
+        pillar: (
+            first_octave: -7,
+            amplitudes: [1.0, 1.0],
+        ),
+        pillar_rareness: (
+            first_octave: -8,
+            amplitudes: [1.0],
+        ),
+        pillar_thickness: (
+            first_octave: -8,
+            amplitudes: [1.0],
+        ),
+        pillar_xz_scale: 25.0,
+        pillar_y_scale: 0.3,
+        pillar_cutoff: 0.03,
+        pillar_intensity: 4.0,
+    ),
+
     // ── Aquifer system (PR 7) ────────────────────────────────────────
     //
     // 16×12×16 jittered cell grid. Each cell rolls a fluid kind

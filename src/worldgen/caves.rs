@@ -702,6 +702,232 @@ impl WormholeNoise {
     }
 }
 
+// ── Noise carver layers (PR 8) ───────────────────────────────────────
+//
+// Cheese / spaghetti / pillars: MC-style ambient noise-based cave
+// density. Live alongside the graph cave systems and wormholes above.
+// The three contributions wire into fill_chunk's `cave_contribution`
+// composition (cheese + spaghetti subtract from density; pillars add
+// back).
+
+use crate::worldgen::config::CaveConfig;
+use crate::worldgen::noise_channel::build_channel;
+
+/// All nine MC-derived noise channels needed for the cheese,
+/// spaghetti, and pillar carvers. Built once per Generator.
+pub struct NoiseCarvers {
+    // Cheese.
+    pub cheese: Fbm<Simplex>,
+    // Spaghetti.
+    pub spaghetti_2d: Fbm<Simplex>,
+    pub spaghetti_2d_modulator: Fbm<Simplex>,
+    pub spaghetti_2d_thickness: Fbm<Simplex>,
+    pub spaghetti_roughness: Fbm<Simplex>,
+    // Pillars.
+    pub pillar: Fbm<Simplex>,
+    pub pillar_rareness: Fbm<Simplex>,
+    pub pillar_thickness: Fbm<Simplex>,
+}
+
+impl NoiseCarvers {
+    /// Build all eight channels from their config descriptors. Each
+    /// channel uses a different seed-salt so they're uncorrelated.
+    pub fn new(seed: u64, cfg: &CaveConfig) -> Self {
+        Self {
+            cheese: build_channel(&cfg.cheese, seed, 1001),
+            spaghetti_2d: build_channel(&cfg.spaghetti_2d, seed, 1002),
+            spaghetti_2d_modulator: build_channel(&cfg.spaghetti_2d_modulator, seed, 1003),
+            spaghetti_2d_thickness: build_channel(&cfg.spaghetti_2d_thickness, seed, 1004),
+            spaghetti_roughness: build_channel(&cfg.spaghetti_roughness, seed, 1005),
+            pillar: build_channel(&cfg.pillar, seed, 1006),
+            pillar_rareness: build_channel(&cfg.pillar_rareness, seed, 1007),
+            pillar_thickness: build_channel(&cfg.pillar_thickness, seed, 1008),
+        }
+    }
+}
+
+/// Per-voxel cheese cave contribution. Returns a non-negative value
+/// in `[0, cheese_intensity]` that is subtracted from density in
+/// `fill_chunk`'s composition.
+///
+/// Returns 0 outside `[cheese_y_min, cheese_y_max]` (with a
+/// `cheese_fade_blocks` linear soft edge at each end). Inside the
+/// band, returns `cheese_intensity * fade` when the 3D cheese noise
+/// (sampled with `cheese_xz_scale` applied to X and Z) exceeds
+/// `cheese_threshold`, 0 otherwise.
+pub fn cheese_contribution(
+    wx: i32,
+    wy: i32,
+    wz: i32,
+    carvers: &NoiseCarvers,
+    cfg: &CaveConfig,
+) -> f32 {
+    let fade = cheese_y_fade(wy, cfg);
+    if fade <= 0.0 {
+        return 0.0;
+    }
+    let scale = cfg.cheese_xz_scale as f64;
+    let v = carvers.cheese.get([
+        wx as f64 * scale,
+        wy as f64,
+        wz as f64 * scale,
+    ]) as f32;
+    if v > cfg.cheese_threshold {
+        cfg.cheese_intensity * fade
+    } else {
+        0.0
+    }
+}
+
+/// Soft Y-edge fade for cheese caves. Returns 0 outside the band,
+/// linearly ramps from 0 to 1 over `cheese_fade_blocks` at each end,
+/// 1 in the interior.
+fn cheese_y_fade(wy: i32, cfg: &CaveConfig) -> f32 {
+    if wy < cfg.cheese_y_min || wy > cfg.cheese_y_max {
+        return 0.0;
+    }
+    let from_bottom = (wy - cfg.cheese_y_min) as f32;
+    let from_top = (cfg.cheese_y_max - wy) as f32;
+    let fade_w = cfg.cheese_fade_blocks.max(1) as f32;
+    (from_bottom.min(from_top) / fade_w).clamp(0.0, 1.0)
+}
+
+/// Per-voxel spaghetti tube contribution. Returns a non-negative
+/// value in `[0, spaghetti_intensity]` that is subtracted from
+/// density in `fill_chunk`'s composition.
+///
+/// Adapts MC's `data/.../caves/spaghetti_2d.json`: a rarity gate
+/// (low-frequency modulator), an abs-near-zero check on the main
+/// field perturbed by a Y-clamped gradient (so tubes drift slowly
+/// downward through the underground band), and per-region thickness
+/// + roughness perturbation of the tube wall.
+pub fn spaghetti_contribution(
+    wx: i32,
+    wy: i32,
+    wz: i32,
+    carvers: &NoiseCarvers,
+    cfg: &CaveConfig,
+) -> f32 {
+    let modulator = carvers.spaghetti_2d_modulator.get([
+        wx as f64,
+        wy as f64,
+        wz as f64,
+    ]) as f32;
+    if modulator >= cfg.spaghetti_rarity_threshold {
+        return 0.0;
+    }
+    let y_grad = y_clamped_gradient(
+        wy,
+        cfg.spaghetti_gradient_top_y,
+        cfg.spaghetti_gradient_top_value,
+        cfg.spaghetti_gradient_bottom_y,
+        cfg.spaghetti_gradient_bottom_value,
+    );
+    let field = carvers.spaghetti_2d.get([
+        wx as f64,
+        wy as f64,
+        wz as f64,
+    ]) as f32;
+    let thickness = carvers.spaghetti_2d_thickness.get([
+        wx as f64,
+        wy as f64,
+        wz as f64,
+    ]) as f32;
+    let roughness = carvers.spaghetti_roughness.get([
+        wx as f64,
+        wy as f64,
+        wz as f64,
+    ]) as f32;
+    let half_width = cfg.spaghetti_thickness_offset
+        + 0.5 * cfg.spaghetti_thickness_offset * thickness.abs()
+        + 0.1 * cfg.spaghetti_thickness_offset * roughness;
+    // MC's `slopedSpaghetti` does `y_grad / 256.0` — the gradient is
+    // a small additive nudge to the tube_distance test, not a
+    // dominating term. We use the same scale: at the band extremes
+    // (gradient ≈ ±40), this shifts tube_distance by ≈ ±0.16 — a
+    // visible bias on a [0,1]-scale abs(field) without flooding the
+    // entire band with tubes.
+    let tube_distance = field.abs() + y_grad / 256.0;
+    if tube_distance < half_width {
+        let depth = (half_width - tube_distance) / half_width.max(1e-4);
+        cfg.spaghetti_intensity * depth.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// Y-clamped linear gradient: returns `top_value` at `top_y`,
+/// `bottom_value` at `bottom_y`, linear in between, clamped at the
+/// boundaries. Mirrors MC's `yClampedGradient` density function.
+fn y_clamped_gradient(
+    wy: i32,
+    top_y: i32,
+    top_value: f32,
+    bottom_y: i32,
+    bottom_value: f32,
+) -> f32 {
+    let (lo_y, hi_y, lo_v, hi_v) = if top_y < bottom_y {
+        (top_y, bottom_y, top_value, bottom_value)
+    } else {
+        (bottom_y, top_y, bottom_value, top_value)
+    };
+    if wy <= lo_y {
+        lo_v
+    } else if wy >= hi_y {
+        hi_v
+    } else {
+        let t = (wy - lo_y) as f32 / (hi_y - lo_y) as f32;
+        lo_v + t * (hi_v - lo_v)
+    }
+}
+
+/// Per-voxel pillar contribution. Returns a non-negative value in
+/// `[0, pillar_intensity]` that is ADDED to density (not subtracted)
+/// in `fill_chunk`'s composition. Composition order matters:
+/// pillars apply AFTER all cave subtractions so they can refill
+/// previously-carved voxels — the MC "columns inside open caves"
+/// look.
+///
+/// MC formula (from `data/.../caves/pillars.json`):
+///
+/// ```text
+///   pillar_raw  = 2 * noise(pillar, xz_scale, y_scale)
+///   pillar_rare = -1 - noise(pillar_rareness)
+///   thickness   = (0.55 + 0.55 * noise(pillar_thickness))^3
+///   pillars     = (pillar_raw + pillar_rare) * thickness
+///   range_choice: if pillars >= cutoff → pillars, else 0
+/// ```
+pub fn pillar_contribution(
+    wx: i32,
+    wy: i32,
+    wz: i32,
+    carvers: &NoiseCarvers,
+    cfg: &CaveConfig,
+) -> f32 {
+    let p_x = wx as f64 * cfg.pillar_xz_scale as f64;
+    let p_y = wy as f64 * cfg.pillar_y_scale as f64;
+    let p_z = wz as f64 * cfg.pillar_xz_scale as f64;
+    let pillar_raw = 2.0 * carvers.pillar.get([p_x, p_y, p_z]) as f32;
+    let pillar_rare = -1.0
+        - carvers.pillar_rareness.get([
+            wx as f64,
+            wy as f64,
+            wz as f64,
+        ]) as f32;
+    let thickness_noise = carvers.pillar_thickness.get([
+        wx as f64,
+        wy as f64,
+        wz as f64,
+    ]) as f32;
+    let thickness = (0.55 + 0.55 * thickness_noise).powi(3);
+    let raw = (pillar_raw + pillar_rare) * thickness;
+    if raw < cfg.pillar_cutoff {
+        return 0.0;
+    }
+    let depth = (raw - cfg.pillar_cutoff).clamp(0.0, 1.0);
+    cfg.pillar_intensity * depth
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -820,6 +1046,165 @@ mod tests {
             }
         }
         panic!("no chambers across region (0,0) — adjust test seed or region count");
+    }
+
+    // ── PR 8: noise carver tests ─────────────────────────────────
+
+    #[test]
+    fn noise_carvers_builds_from_config_without_panicking() {
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let _ = NoiseCarvers::new(42, &cfg.cave);
+    }
+
+    #[test]
+    fn noise_carvers_is_deterministic_in_seed() {
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let a = NoiseCarvers::new(42, &cfg.cave);
+        let b = NoiseCarvers::new(42, &cfg.cave);
+        let p = [10.0, 5.0, -3.0];
+        assert_eq!(a.cheese.get(p), b.cheese.get(p));
+        assert_eq!(a.spaghetti_2d.get(p), b.spaghetti_2d.get(p));
+        assert_eq!(a.pillar.get(p), b.pillar.get(p));
+    }
+
+    #[test]
+    fn noise_carvers_different_seeds_differ() {
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let a = NoiseCarvers::new(42, &cfg.cave);
+        let b = NoiseCarvers::new(43, &cfg.cave);
+        assert_ne!(a.cheese.get([10.0, 5.0, -3.0]), b.cheese.get([10.0, 5.0, -3.0]));
+    }
+
+    #[test]
+    fn cheese_contribution_zero_outside_y_window() {
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let nc = NoiseCarvers::new(42, &cfg.cave);
+        for wx in (-100..100).step_by(17) {
+            for wz in (-100..100).step_by(17) {
+                let v = cheese_contribution(wx, 50, wz, &nc, &cfg.cave);
+                assert!(v.abs() < 1e-6, "cheese should be 0 at y=50, got {v}");
+                let v = cheese_contribution(wx, -80, wz, &nc, &cfg.cave);
+                assert!(v.abs() < 1e-6, "cheese should be 0 at y=-80, got {v}");
+            }
+        }
+    }
+
+    #[test]
+    fn cheese_contribution_bounded_by_intensity() {
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let nc = NoiseCarvers::new(42, &cfg.cave);
+        for wx in (-100..100).step_by(11) {
+            for wz in (-100..100).step_by(11) {
+                for wy in -30..=10 {
+                    let v = cheese_contribution(wx, wy, wz, &nc, &cfg.cave);
+                    assert!(v >= 0.0);
+                    assert!(v <= cfg.cave.cheese_intensity + 1e-4);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cheese_contribution_zero_at_band_boundary() {
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let nc = NoiseCarvers::new(42, &cfg.cave);
+        // y=10 is the exact top boundary → fade = 0 → no contribution.
+        let avg = |y: i32| -> f32 {
+            let mut s = 0.0;
+            let mut n = 0;
+            for wx in -8..8 {
+                for wz in -8..8 {
+                    s += cheese_contribution(wx, y, wz, &nc, &cfg.cave);
+                    n += 1;
+                }
+            }
+            s / n as f32
+        };
+        assert!((avg(10) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn spaghetti_contribution_is_non_negative_and_bounded() {
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let nc = NoiseCarvers::new(42, &cfg.cave);
+        for wx in (-200..200).step_by(13) {
+            for wz in (-200..200).step_by(13) {
+                for wy in (-100..=80).step_by(7) {
+                    let v = spaghetti_contribution(wx, wy, wz, &nc, &cfg.cave);
+                    assert!(v >= 0.0);
+                    assert!(v <= cfg.cave.spaghetti_intensity + 1e-4);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn spaghetti_carves_somewhere_underground() {
+        // The Y-clamped gradient biases carving toward deeper Y on
+        // average, but the modulator wavelength (~2048 blocks)
+        // means a 256-block test region samples roughly one
+        // modulator value per Y slice — so directional Y assertions
+        // are noisy. The robust claim is "spaghetti carves SOMEWHERE
+        // in a wide deep-band sweep", catching the regression where
+        // the carver gets silently disabled.
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let nc = NoiseCarvers::new(42, &cfg.cave);
+        let mut any_carve = false;
+        'outer: for y in (-100..=80).step_by(10) {
+            for wx in (-256..256).step_by(4) {
+                for wz in (-256..256).step_by(4) {
+                    if spaghetti_contribution(wx, y, wz, &nc, &cfg.cave) > 0.0 {
+                        any_carve = true;
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        assert!(any_carve, "no spaghetti carving across a wide underground sweep");
+    }
+
+    #[test]
+    fn pillar_contribution_is_non_negative_and_bounded() {
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let nc = NoiseCarvers::new(42, &cfg.cave);
+        for wx in (-200..200).step_by(13) {
+            for wz in (-200..200).step_by(13) {
+                for wy in (-100..=80).step_by(7) {
+                    let v = pillar_contribution(wx, wy, wz, &nc, &cfg.cave);
+                    assert!(v >= 0.0);
+                    assert!(v <= cfg.cave.pillar_intensity + 1e-4);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pillar_cutoff_gate_makes_most_voxels_zero() {
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let nc = NoiseCarvers::new(42, &cfg.cave);
+        let mut zero_count = 0;
+        let mut total = 0;
+        for wx in (-128..128).step_by(4) {
+            for wz in (-128..128).step_by(4) {
+                let v = pillar_contribution(wx, -40, wz, &nc, &cfg.cave);
+                if v == 0.0 {
+                    zero_count += 1;
+                }
+                total += 1;
+            }
+        }
+        let frac_zero = zero_count as f32 / total as f32;
+        assert!(frac_zero >= 0.7, "expected ≥70% zero, got {frac_zero}");
+    }
+
+    #[test]
+    fn y_clamped_gradient_endpoint_values() {
+        // Helper accepts either (lo,hi) ordering. Probe both orientations.
+        assert!((y_clamped_gradient(-120, 140, 8.0, -120, -40.0) - (-40.0)).abs() < 1e-4);
+        assert!((y_clamped_gradient(140, 140, 8.0, -120, -40.0) - 8.0).abs() < 1e-4);
+        // Above the higher end → clamped to the higher Y's value.
+        assert!((y_clamped_gradient(200, 140, 8.0, -120, -40.0) - 8.0).abs() < 1e-4);
+        assert!((y_clamped_gradient(-200, 140, 8.0, -120, -40.0) - (-40.0)).abs() < 1e-4);
     }
 
     #[test]

@@ -18,6 +18,71 @@ pub struct WorldgenConfig {
     pub biomes: BiomesConfig,
     pub surface: crate::worldgen::surface::RuleSource,
     pub aquifer: crate::worldgen::aquifer::AquiferConfig,
+    pub cave: CaveConfig,
+}
+
+/// One MC-style noise channel descriptor. Mirrors the JSON shape in
+/// `data/minecraft/worldgen/noise/<name>.json`:
+///
+/// ```json
+/// { "firstOctave": -8, "amplitudes": [1.0, 1.0] }
+/// ```
+///
+/// `first_octave` sets the lowest-frequency octave's wavelength
+/// (`2^-first_octave` ≈ ~the wavelength in blocks). `amplitudes`
+/// weights successive octaves; a zero entry skips that octave.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChannelParams {
+    pub first_octave: i32,
+    pub amplitudes: Vec<f32>,
+}
+
+impl ChannelParams {
+    /// Effective number of octaves (count of nonzero amplitudes).
+    pub fn octave_count(&self) -> usize {
+        self.amplitudes.iter().filter(|&&a| a != 0.0).count()
+    }
+
+    /// Frequency of the first (lowest) octave, in cycles/block.
+    pub fn first_frequency(&self) -> f64 {
+        2.0_f64.powi(self.first_octave)
+    }
+}
+
+/// Cave-carving tunables — applies to the noise carvers (cheese,
+/// spaghetti, pillars), not the graph cave systems.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CaveConfig {
+    // Cheese caves.
+    pub cheese: ChannelParams,
+    pub cheese_xz_scale: f32,
+    pub cheese_threshold: f32,
+    pub cheese_y_min: i32,
+    pub cheese_y_max: i32,
+    pub cheese_fade_blocks: i32,
+    pub cheese_intensity: f32,
+
+    // Spaghetti tubes.
+    pub spaghetti_2d: ChannelParams,
+    pub spaghetti_2d_modulator: ChannelParams,
+    pub spaghetti_2d_thickness: ChannelParams,
+    pub spaghetti_roughness: ChannelParams,
+    pub spaghetti_rarity_threshold: f32,
+    pub spaghetti_thickness_offset: f32,
+    pub spaghetti_gradient_top_y: i32,
+    pub spaghetti_gradient_top_value: f32,
+    pub spaghetti_gradient_bottom_y: i32,
+    pub spaghetti_gradient_bottom_value: f32,
+    pub spaghetti_intensity: f32,
+
+    // Pillars (add density BACK inside carved volumes).
+    pub pillar: ChannelParams,
+    pub pillar_rareness: ChannelParams,
+    pub pillar_thickness: ChannelParams,
+    pub pillar_xz_scale: f32,
+    pub pillar_y_scale: f32,
+    pub pillar_cutoff: f32,
+    pub pillar_intensity: f32,
 }
 
 /// PR 4 biome lookup config. The 6 existing biomes (Tundra,

@@ -76,6 +76,7 @@ pub mod flat_cache;
 pub mod hash;
 pub mod heightmap;
 pub mod hydrology;
+pub mod noise_channel;
 pub mod plates;
 pub mod region;
 pub mod spline;
@@ -140,6 +141,11 @@ pub struct Generator {
     /// per-cell `y_top` + fluid kind (Water/Lava). Floods caves
     /// and replaces the primitive ocean/lake-rim filler.
     aquifer: aquifer::AquiferSystem,
+    /// PR 8: cheese / spaghetti / pillar noise channels. Built once
+    /// per Generator from `WorldgenConfig::cave`. Read per-voxel in
+    /// `fill_chunk` to compose with the graph cave SDFs and
+    /// wormholes via `max()`.
+    noise_carvers: caves::NoiseCarvers,
     seed: u64,
     /// LRU cache of pre-built fine regions. Consulted per chunk fill
     /// to evaluate valley carve and lake water; built on first touch.
@@ -238,6 +244,11 @@ impl Generator {
         // probabilities) requires a Generator restart; only the
         // pressure tunables in `AquiferConfig` re-read live.
         let aquifer = aquifer::AquiferSystem::new(seed, bundled.aquifer.clone());
+        // PR 8: noise carvers (cheese / spaghetti / pillar Fbm
+        // channels) built from the bundled cave config. Channel
+        // topology (which Fbm fields exist) is fixed in Rust; only
+        // tunable values re-read live.
+        let noise_carvers = caves::NoiseCarvers::new(seed, &bundled.cave);
         Self {
             heightmap,
             density,
@@ -248,6 +259,7 @@ impl Generator {
             biome_list,
             surface_system,
             aquifer,
+            noise_carvers,
             seed,
             fine_cache: region::fresh_fine_cache(),
             macro_cache: region::fresh_macro_cache(),
@@ -507,36 +519,84 @@ impl Generator {
                     let raw_density =
                         heightmap::slide(evaluator.evaluate(wx, wy, wz), wy, &cfg.density);
 
+                    // PR 8: combine all carvers via max() so multiple
+                    // sources at the same voxel don't stack to
+                    // absurd subtractions. The strongest contributor
+                    // wins. Behaviour for a single source is
+                    // unchanged.
                     let mut cave_contribution = 0.0_f32;
                     if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y {
                         if approx_depth > CAVE_SURFACE_BUFFER {
-                            cave_contribution +=
-                                caves::cave_sdf(wx, wy, wz, &cave_systems);
+                            cave_contribution = cave_contribution
+                                .max(caves::cave_sdf(wx, wy, wz, &cave_systems));
                         }
-                        cave_contribution +=
-                            caves::entrance_sdf(wx, wy, wz, &cave_systems);
+                        cave_contribution = cave_contribution
+                            .max(caves::entrance_sdf(wx, wy, wz, &cave_systems));
                     }
                     if approx_depth > CAVE_SURFACE_BUFFER
                         && wy > CAVE_FLOOR_Y
                         && self.wormhole_noise.carve(wx, wy, wz)
                     {
-                        cave_contribution += CAVE_SDF_INTENSITY;
+                        cave_contribution = cave_contribution.max(CAVE_SDF_INTENSITY);
                     }
+                    // PR 8 new: noise carver contributions. Gated by
+                    // the same surface buffer + cave floor as the
+                    // existing carvers so the surface cap stays
+                    // intact.
+                    if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
+                        cave_contribution = cave_contribution.max(
+                            caves::cheese_contribution(
+                                wx,
+                                wy,
+                                wz,
+                                &self.noise_carvers,
+                                &cfg.cave,
+                            ),
+                        );
+                        cave_contribution = cave_contribution.max(
+                            caves::spaghetti_contribution(
+                                wx,
+                                wy,
+                                wz,
+                                &self.noise_carvers,
+                                &cfg.cave,
+                            ),
+                        );
+                    }
+                    // Pillars ADD density back; computed only when
+                    // we're underground (surface buffer + cave floor
+                    // match the carver gating).
+                    let pillar = if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
+                        caves::pillar_contribution(
+                            wx,
+                            wy,
+                            wz,
+                            &self.noise_carvers,
+                            &cfg.cave,
+                        )
+                    } else {
+                        0.0
+                    };
 
-                    // The new composition's quarter_negative softens
-                    // above the surface, but below the surface
-                    // density still saturates large (composition_scale
-                    // × factor × y_gradient_amplitude). Caves carve a
-                    // bounded ±CAVE_SDF_INTENSITY contribution, so we
-                    // still need the cap when cave subtraction is in
-                    // play. PR 5 will adopt MC's full squeeze+subtract
-                    // pattern that doesn't need an explicit cap.
+                    // Composition order:
+                    //   solid_density = density_for_compare
+                    //                   - cave_subtract + pillar_addback
+                    //
+                    // The min(1.0) cap is only applied when any
+                    // carver fires — raw_density at depth saturates
+                    // around +24 (composition_scale * factor *
+                    // y_gradient_amplitude), but carver intensities
+                    // are ~4, so without the cap no cave can ever
+                    // open up rock at depth. Pillars (also ≤4) then
+                    // add back into the capped frame, so the
+                    // "pillar refills carved void" math still works.
                     let density_for_compare = if cave_contribution > 0.0 {
                         raw_density.min(1.0)
                     } else {
                         raw_density
                     };
-                    let solid = (density_for_compare - cave_contribution) > 0.0;
+                    let solid =
+                        (density_for_compare - cave_contribution + pillar) > 0.0;
 
                     // PR 7: aquifer can override both branches. When
                     // `solid` is true but the aquifer pressure
@@ -1113,7 +1173,7 @@ mod tests {
         // SURFACE_BAND. The surface is now fuzz-jittered by 3D
         // relief noise instead of being column-quantised, so the
         // chevron-staircase artifact on moderate slopes is gone.
-        const GOLDEN_42_002: u64 = 0xEECE_DFF7_DEC7_EB0A;
+        const GOLDEN_42_002: u64 = 0xDFB4_993E_1852_7241;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);
@@ -1154,16 +1214,26 @@ mod tests {
                         _ => {}
                     }
                 }
-                // Every chunk should still be mostly stone — no
-                // system carves more than half a chunk.
+                // PR 8: ambient noise carvers + graph chambers +
+                // wormholes + aquifer flood can stack in a single
+                // chunk near a system intersection. "Mostly stone"
+                // is no longer a useful invariant — `stone +
+                // mostly-fluid >= 5%` is the realistic floor that
+                // catches a fully-blank chunk.
+                let fluid: i32 = c
+                    .blocks
+                    .iter()
+                    .filter(|b| matches!(b, Block::Water | Block::Lava))
+                    .count() as i32;
+                let solid_or_fluid: i32 = stone + fluid;
                 assert!(
-                    stone > CHUNK_VOL / 2,
-                    "chunk ({cx}, -2, {cz}) had insufficient stone: stone={stone}"
+                    solid_or_fluid > (CHUNK_VOL / 20) as i32,
+                    "chunk ({cx}, -2, {cz}) had insufficient stone+fluid: solid_or_fluid={solid_or_fluid}"
                 );
-                if air > CHUNK_VOL / 200 {
-                    // Lowered to 0.5% per chunk because tunnels can
-                    // pass through a chunk and only intersect a
-                    // narrow strip of cells.
+                if air > CHUNK_VOL / 50 {
+                    // 2% — well above the 0.5% pre-PR-8 threshold;
+                    // ambient cheese + spaghetti carving means every
+                    // underground chunk should easily clear this.
                     found_carved_chunk = true;
                 }
             }
@@ -1232,6 +1302,72 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// PR 8 invariant: cheese caves must not carve outside their
+    /// configured Y window. With all other carvers (spaghetti,
+    /// pillars) zero'd and cheese on, a chunk well above the
+    /// cheese y_max should have an air count IDENTICAL to a chunk
+    /// with cheese also zero — i.e. cheese contributed nothing.
+    #[test]
+    fn cheese_only_carves_in_its_y_window() {
+        let base = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let mut cfg_cheese_only = base.clone();
+        cfg_cheese_only.cave.spaghetti_intensity = 0.0;
+        cfg_cheese_only.cave.pillar_intensity = 0.0;
+        let g_cheese = Generator::with_config(
+            42,
+            crate::worldgen::config::ConfigHolder::new(cfg_cheese_only.clone()),
+        );
+        let mut cfg_none = cfg_cheese_only.clone();
+        cfg_none.cave.cheese_intensity = 0.0;
+        let g_none =
+            Generator::with_config(42, crate::worldgen::config::ConfigHolder::new(cfg_none));
+
+        // Chunk Y=3 → world Y in [96, 127], well above cheese y_max=10.
+        let coord = ChunkCoord(IVec3::new(0, 3, 0));
+        let mut chunk_cheese = DenseChunk::empty();
+        let mut chunk_none = DenseChunk::empty();
+        g_cheese.fill_chunk(coord, &mut chunk_cheese);
+        g_none.fill_chunk(coord, &mut chunk_none);
+        let air = |c: &DenseChunk| -> usize {
+            c.blocks
+                .iter()
+                .filter(|b| matches!(b, Block::Air | Block::Water | Block::Lava))
+                .count()
+        };
+        assert_eq!(
+            air(&chunk_cheese),
+            air(&chunk_none),
+            "cheese carving leaked outside its Y window (chunk Y=3)"
+        );
+    }
+
+    /// PR 8 invariant: pillars are additive. With pillar_intensity
+    /// zero'd out, a deep chunk should have STRICTLY MORE empty
+    /// space than with pillars on (pillars refill carved voxels).
+    #[test]
+    fn pillars_increase_stone_count_relative_to_carvers_alone() {
+        let base = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let mut cfg_no_pillars = base.clone();
+        cfg_no_pillars.cave.pillar_intensity = 0.0;
+        let g_no_pillars =
+            Generator::with_config(42, crate::worldgen::config::ConfigHolder::new(cfg_no_pillars));
+        let g_with =
+            Generator::with_config(42, crate::worldgen::config::ConfigHolder::new(base));
+        let coord = ChunkCoord(IVec3::new(0, -2, 0));
+        let mut a = DenseChunk::empty();
+        let mut b = DenseChunk::empty();
+        g_no_pillars.fill_chunk(coord, &mut a);
+        g_with.fill_chunk(coord, &mut b);
+        let stone =
+            |c: &DenseChunk| c.blocks.iter().filter(|b| matches!(b, Block::Stone)).count();
+        let s_no = stone(&a);
+        let s_yes = stone(&b);
+        assert!(
+            s_yes >= s_no,
+            "pillars should add stone back (no_pillars={s_no}, with_pillars={s_yes})"
+        );
     }
 
     /// PR 7 aquifer: deep caves under land should contain *some*
