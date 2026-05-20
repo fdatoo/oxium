@@ -203,7 +203,7 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
     });
 
     // Central panel = transparent so the wgpu scene shows through.
-    // We also draw the pinned-column highlight here so it gets clipped
+    // We also draw the pinned-chunk wireframe here so it gets clipped
     // to the 3D viewport rect (no overlap with side panels).
     egui::CentralPanel::default()
         .frame(egui::Frame::none())
@@ -213,16 +213,14 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
                 let aspect = screen.width() / screen.height().max(1.0);
                 let view_proj = app.session.camera().view_proj(aspect);
                 let cfg = app.session.config.load();
-                let y_min = cfg.density.y_min as f32;
-                let y_max = cfg.density.y_max as f32;
-                draw_pinned_column(
+                draw_pinned_chunk_outline(
                     ui,
                     screen,
                     view_proj,
-                    pwx as f32 + 0.5,
-                    pwz as f32 + 0.5,
-                    y_min,
-                    y_max,
+                    pwx,
+                    pwz,
+                    cfg.density.y_min as f32,
+                    cfg.density.y_max as f32,
                 );
             }
         });
@@ -230,32 +228,80 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
     out
 }
 
-/// Draw a yellow vertical line in screen space at world XZ `(wx, wz)`
-/// spanning Y in `[y_min, y_max]`. Each segment is projected through
-/// `view_proj` and stitched with a polyline so curvature from
-/// perspective is honoured. Segments whose endpoints are behind the
-/// camera are dropped (no spurious wrap-around across the screen).
-fn draw_pinned_column(
+/// Draw a yellow wireframe of the chunk that contains world column
+/// `(pwx, pwz)` — 12 edges of the chunk's AABB (4 vertical posts, 4
+/// edges along the top, 4 along the bottom). Each edge is sampled
+/// and stitched with a polyline so perspective curvature is honoured
+/// and segments behind the camera are dropped. Far more informative
+/// than the previous single-column line: you can see at a glance
+/// which 32-block slab the probe is in.
+fn draw_pinned_chunk_outline(
     ui: &mut egui::Ui,
     screen: egui::Rect,
     view_proj: glam::Mat4,
-    wx: f32,
-    wz: f32,
+    pwx: i32,
+    pwz: i32,
     y_min: f32,
     y_max: f32,
 ) {
+    use oxium::voxel::coords::CHUNK_DIM_U;
+    let dim = CHUNK_DIM_U as i32;
+    let cx = pwx.div_euclid(dim) * dim;
+    let cz = pwz.div_euclid(dim) * dim;
+    let x0 = cx as f32;
+    let x1 = (cx + dim) as f32;
+    let z0 = cz as f32;
+    let z1 = (cz + dim) as f32;
+
     let painter = ui.painter();
-    let steps = 24;
     let stroke = egui::Stroke::new(
         2.0,
-        egui::Color32::from_rgba_premultiplied(255, 220, 70, 200),
+        egui::Color32::from_rgba_premultiplied(255, 220, 70, 220),
     );
+
+    let v = glam::Vec3::new;
+    // 12 edges of the chunk AABB.
+    let edges: [(glam::Vec3, glam::Vec3); 12] = [
+        // Verticals at the four XZ corners.
+        (v(x0, y_min, z0), v(x0, y_max, z0)),
+        (v(x1, y_min, z0), v(x1, y_max, z0)),
+        (v(x0, y_min, z1), v(x0, y_max, z1)),
+        (v(x1, y_min, z1), v(x1, y_max, z1)),
+        // Bottom rectangle.
+        (v(x0, y_min, z0), v(x1, y_min, z0)),
+        (v(x1, y_min, z0), v(x1, y_min, z1)),
+        (v(x1, y_min, z1), v(x0, y_min, z1)),
+        (v(x0, y_min, z1), v(x0, y_min, z0)),
+        // Top rectangle.
+        (v(x0, y_max, z0), v(x1, y_max, z0)),
+        (v(x1, y_max, z0), v(x1, y_max, z1)),
+        (v(x1, y_max, z1), v(x0, y_max, z1)),
+        (v(x0, y_max, z1), v(x0, y_max, z0)),
+    ];
+
+    for (a, b) in edges {
+        draw_world_segment(&painter, screen, view_proj, a, b, stroke);
+    }
+}
+
+/// Sample a world-space line segment, project each sample through
+/// `view_proj` to screen space, draw a polyline. Drops samples behind
+/// the camera so an edge that crosses the camera plane doesn't wrap
+/// around the screen.
+fn draw_world_segment(
+    painter: &egui::Painter,
+    screen: egui::Rect,
+    view_proj: glam::Mat4,
+    from: glam::Vec3,
+    to: glam::Vec3,
+    stroke: egui::Stroke,
+) {
+    let steps = 16;
     let mut prev: Option<egui::Pos2> = None;
     for i in 0..=steps {
         let t = i as f32 / steps as f32;
-        let y = y_min + t * (y_max - y_min);
-        let world = glam::Vec4::new(wx, y, wz, 1.0);
-        let clip = view_proj * world;
+        let p = from.lerp(to, t);
+        let clip = view_proj * glam::Vec4::new(p.x, p.y, p.z, 1.0);
         if clip.w <= 0.001 {
             prev = None;
             continue;
@@ -264,10 +310,10 @@ fn draw_pinned_column(
         let ny = clip.y / clip.w;
         let sx = screen.left() + (nx + 1.0) * 0.5 * screen.width();
         let sy = screen.top() + (1.0 - ny) * 0.5 * screen.height();
-        let p = egui::pos2(sx, sy);
+        let sp = egui::pos2(sx, sy);
         if let Some(pp) = prev {
-            painter.line_segment([pp, p], stroke);
+            painter.line_segment([pp, sp], stroke);
         }
-        prev = Some(p);
+        prev = Some(sp);
     }
 }

@@ -301,29 +301,91 @@ fn draw_and_edit_curve(ui: &mut Ui, spline: &mut NestedSpline) -> (bool, Option<
             best.map(|(t, _)| t)
         });
 
-        let shift_held = ui.input(|i| i.modifiers.shift);
+        // Scan raw input events for a primary-button RELEASE inside
+        // the curve rect. Capturing modifiers at the release instant
+        // is the only reliable way — `response.clicked()` doesn't
+        // fire if the press introduced even a single pixel of drag,
+        // which a real trackpad shift+click often does. We also use
+        // press events to detect a plain click (so clicks that
+        // weren't a drag still register), but the modifier check
+        // happens against the release-event modifiers.
+        let mut shift_release_in_rect: Option<Pos2> = None;
+        let mut plain_release_in_rect: Option<Pos2> = None;
+        ui.input(|i| {
+            for ev in &i.events {
+                if let egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers,
+                } = ev
+                {
+                    if !rect.contains(*pos) {
+                        continue;
+                    }
+                    if modifiers.shift {
+                        shift_release_in_rect = Some(*pos);
+                    } else {
+                        plain_release_in_rect = Some(*pos);
+                    }
+                }
+            }
+        });
 
-        // Click on a knot: shift+click → reset slope; plain click → select.
-        if response.clicked() {
-            match hovered_target {
-                Some(DragTarget::Knot(i)) if shift_held => {
-                    if i < knots.len() {
-                        knots[i].slope = 0.0;
-                        dirty = true;
+        // Hit-test a click position against the knot + tangent layout
+        // we already computed.
+        let hit_target = |pos: Pos2| -> Option<DragTarget> {
+            let mut best: Option<(DragTarget, f32)> = None;
+            for (i, &p) in knot_px.iter().enumerate() {
+                let d = (pos - p).length();
+                if d <= KNOT_HIT_RADIUS_PX && best.map_or(true, |(_, bd)| d < bd) {
+                    best = Some((DragTarget::Knot(i), d));
+                }
+            }
+            if best.is_none() {
+                for (i, &p) in left_handle_px.iter().enumerate() {
+                    let d = (pos - p).length();
+                    if d <= HANDLE_HIT_RADIUS_PX && best.map_or(true, |(_, bd)| d < bd) {
+                        best = Some((DragTarget::Tangent(i), d));
                     }
                 }
-                Some(DragTarget::Knot(i)) => {
-                    selected = Some(i);
-                }
-                Some(DragTarget::Tangent(i)) if shift_held => {
-                    if i < knots.len() {
-                        knots[i].slope = 0.0;
-                        dirty = true;
+                for (i, &p) in right_handle_px.iter().enumerate() {
+                    let d = (pos - p).length();
+                    if d <= HANDLE_HIT_RADIUS_PX && best.map_or(true, |(_, bd)| d < bd) {
+                        best = Some((DragTarget::Tangent(i), d));
                     }
                 }
-                _ => {
-                    selected = None;
+            }
+            best.map(|(t, _)| t)
+        };
+
+        // Shift+release on a knot or handle → reset that knot's slope to 0.
+        // Suppresses the plain-release "deselect" that would also fire.
+        let mut consumed_release = false;
+        if let Some(pos) = shift_release_in_rect {
+            match hit_target(pos) {
+                Some(DragTarget::Knot(i)) | Some(DragTarget::Tangent(i)) if i < knots.len() => {
+                    knots[i].slope = 0.0;
+                    dirty = true;
+                    consumed_release = true;
                 }
+                _ => {}
+            }
+        }
+
+        // Plain release: click-to-select on a knot, click-on-empty to deselect.
+        // Uses response.clicked() AS WELL so a release without an event hit
+        // (e.g. egui already consumed the event) still selects — and falls
+        // back to the explicit event when response.clicked() is suppressed
+        // by a micro-drag.
+        if !consumed_release && (response.clicked() || plain_release_in_rect.is_some()) {
+            let pos = response
+                .interact_pointer_pos()
+                .or(plain_release_in_rect)
+                .unwrap_or(rect.center());
+            match hit_target(pos) {
+                Some(DragTarget::Knot(i)) => selected = Some(i),
+                _ => selected = None,
             }
         }
 
