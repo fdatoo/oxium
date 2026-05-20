@@ -431,20 +431,28 @@
             amplitudes: [1.0, 0.5],
         ),
         surface_entrance_xz_scale: 1.0,
-        surface_entrance_y_scale: 0.4,
-        // The surface_entrance FBM tops out around 0.62 in practice
-        // (verified via `probe_surface_entrance_noise_distribution`).
-        // 0.30 hits roughly the top 10% of voxels in the Y band,
-        // giving discoverable openings every few dozen blocks of
-        // exploration. Raise → fewer entrances; lower → more.
-        surface_entrance_threshold: 0.30,
+        // y_scale = 0.0 → the noise is constant in Y, so wherever
+        // an XZ column passes threshold the carving applies for the
+        // entire active Y range. That gives a *vertical shaft* from
+        // the top of the band down into the cave network, instead
+        // of a localized 3D pocket that's disconnected from the
+        // underground.
+        surface_entrance_y_scale: 0.0,
+        // With 2D shafts, the threshold determines what fraction of
+        // XZ columns get a shaft. 0.35 lands ~3% of columns →
+        // about 30 shafts per 32×32 chunk patch on average.
+        // Raise → fewer; lower → more.
+        surface_entrance_threshold: 0.35,
         // Intensity 8 — well above the spaghetti / cheese signed
-        // densities (clamped to [-1, 1]) so a fired entrance can
-        // punch through positive raw_density in the surface band.
+        // densities (clamped to [-1, 1]) so a fired shaft can punch
+        // through positive raw_density at depth.
         surface_entrance_intensity: 8.0,
-        // Active in sea_level (62) ± 20 → [42, 82]. The Y range
-        // covers ocean floors up to the high inland terrain band.
-        surface_entrance_y_min: 42,
+        // Extended down to Y=10 so shafts reach the depths where
+        // the noise cave network operates (raw_density crosses the
+        // underground threshold around Y ≈ 30 in typical terrain).
+        // Top stays at sea level + 20 so shafts emerge naturally
+        // through hills and ocean floors alike.
+        surface_entrance_y_min: 10,
         surface_entrance_y_max: 82,
         surface_entrance_fade_blocks: 4,
     ),
