@@ -192,6 +192,53 @@ impl World {
     pub fn in_flight_len(&self) -> usize {
         self.in_flight.len()
     }
+
+    /// Step a ray through the chunk cache and return the `(wx, wz)` of
+    /// the first column whose voxel along the ray is solid. Returns
+    /// `None` if the ray traverses `max_distance` without hitting a
+    /// solid voxel (or hits only chunks that aren't cached yet).
+    ///
+    /// Coarse DDA: half-block steps. Accurate enough for picking
+    /// terrain at typical camera distances; not suitable for sub-voxel
+    /// queries. Reads through the LRU which moves accessed chunks to
+    /// the front — fine because picking happens in the camera-radius
+    /// chunks that we want to keep cached anyway.
+    pub fn raycast_column(&mut self, origin: Vec3, dir: Vec3, max_distance: f32) -> Option<(i32, i32)> {
+        use oxium::voxel::block::Block;
+        use oxium::voxel::coords::{LocalPos, CHUNK_DIM_U};
+
+        if dir.length_squared() < 1e-6 {
+            return None;
+        }
+        let dir = dir.normalize();
+        let step_size = 0.5_f32;
+        let step = dir * step_size;
+        let mut pos = origin;
+        let mut t = 0.0_f32;
+        let dim = CHUNK_DIM_U as i32;
+        while t < max_distance {
+            let voxel = pos.floor().as_ivec3();
+            let chunk_coord = ChunkCoord(glam::IVec3::new(
+                voxel.x.div_euclid(dim),
+                voxel.y.div_euclid(dim),
+                voxel.z.div_euclid(dim),
+            ));
+            if let Some(chunk) = self.cache.get_chunk(chunk_coord) {
+                let local = LocalPos(glam::UVec3::new(
+                    voxel.x.rem_euclid(dim) as u32,
+                    voxel.y.rem_euclid(dim) as u32,
+                    voxel.z.rem_euclid(dim) as u32,
+                ));
+                let block = chunk.get(local);
+                if !matches!(block, Block::Air | Block::Water) {
+                    return Some((voxel.x, voxel.z));
+                }
+            }
+            pos += step;
+            t += step_size;
+        }
+        None
+    }
 }
 
 #[cfg(test)]

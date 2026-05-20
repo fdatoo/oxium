@@ -145,9 +145,71 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
     });
 
     // Central panel = transparent so the wgpu scene shows through.
+    // We also draw the pinned-column highlight here so it gets clipped
+    // to the 3D viewport rect (no overlap with side panels).
     egui::CentralPanel::default()
         .frame(egui::Frame::none())
-        .show(ctx, |_ui| {});
+        .show(ctx, |ui| {
+            if let Some((pwx, pwz)) = app.session.probe.pinned {
+                let screen = ctx.screen_rect();
+                let aspect = screen.width() / screen.height().max(1.0);
+                let view_proj = app.session.camera().view_proj(aspect);
+                let cfg = app.session.config.load();
+                let y_min = cfg.density.y_min as f32;
+                let y_max = cfg.density.y_max as f32;
+                draw_pinned_column(
+                    ui,
+                    screen,
+                    view_proj,
+                    pwx as f32 + 0.5,
+                    pwz as f32 + 0.5,
+                    y_min,
+                    y_max,
+                );
+            }
+        });
 
     out
+}
+
+/// Draw a yellow vertical line in screen space at world XZ `(wx, wz)`
+/// spanning Y in `[y_min, y_max]`. Each segment is projected through
+/// `view_proj` and stitched with a polyline so curvature from
+/// perspective is honoured. Segments whose endpoints are behind the
+/// camera are dropped (no spurious wrap-around across the screen).
+fn draw_pinned_column(
+    ui: &mut egui::Ui,
+    screen: egui::Rect,
+    view_proj: glam::Mat4,
+    wx: f32,
+    wz: f32,
+    y_min: f32,
+    y_max: f32,
+) {
+    let painter = ui.painter();
+    let steps = 24;
+    let stroke = egui::Stroke::new(
+        2.0,
+        egui::Color32::from_rgba_premultiplied(255, 220, 70, 200),
+    );
+    let mut prev: Option<egui::Pos2> = None;
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let y = y_min + t * (y_max - y_min);
+        let world = glam::Vec4::new(wx, y, wz, 1.0);
+        let clip = view_proj * world;
+        if clip.w <= 0.001 {
+            prev = None;
+            continue;
+        }
+        let nx = clip.x / clip.w;
+        let ny = clip.y / clip.w;
+        let sx = screen.left() + (nx + 1.0) * 0.5 * screen.width();
+        let sy = screen.top() + (1.0 - ny) * 0.5 * screen.height();
+        let p = egui::pos2(sx, sy);
+        if let Some(pp) = prev {
+            painter.line_segment([pp, p], stroke);
+        }
+        prev = Some(p);
+    }
 }

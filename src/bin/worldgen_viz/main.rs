@@ -138,6 +138,28 @@ impl ApplicationHandler for VizApp {
             WindowEvent::MouseInput { state, button, .. } => {
                 if button == MouseButton::Right {
                     self.state.mouse_down = state == ElementState::Pressed;
+                } else if button == MouseButton::Left
+                    && state == ElementState::Released
+                    && !render.egui_ctx.wants_pointer_input()
+                {
+                    // Left-click in the 3D viewport → raycast to the
+                    // first solid voxel and pin its column. We gate on
+                    // `!wants_pointer_input()` so clicks inside any
+                    // egui panel (config sliders, map, probe) don't
+                    // double-fire as pickers.
+                    if let Some((mx, my)) = self.state.last_cursor {
+                        let w = render.surface_config.width as f32;
+                        let h = render.surface_config.height as f32;
+                        let aspect = w / h.max(1.0);
+                        let vp = self.state.session.camera().view_proj(aspect);
+                        let (origin, dir) = mouse_to_ray((mx, my), (w, h), vp);
+                        if let Some((wx, wz)) =
+                            self.state.session.world.raycast_column(origin, dir, 4096.0)
+                        {
+                            let gen_arc = self.state.session.generator.clone();
+                            self.state.session.probe.pin(&gen_arc, wx, wz);
+                        }
+                    }
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -246,6 +268,22 @@ impl ApplicationHandler for VizApp {
             _ => {}
         }
     }
+}
+
+/// Inverse-project a mouse click into a world-space ray. NDC space is
+/// (-1, -1) at bottom-left, (+1, +1) at top-right; mouse pixels are
+/// (0, 0) at top-left with Y growing downward — hence the Y flip.
+fn mouse_to_ray(
+    mouse: (f64, f64),
+    screen: (f32, f32),
+    view_proj: glam::Mat4,
+) -> (glam::Vec3, glam::Vec3) {
+    let nx = (mouse.0 as f32 / screen.0).clamp(0.0, 1.0) * 2.0 - 1.0;
+    let ny = 1.0 - (mouse.1 as f32 / screen.1).clamp(0.0, 1.0) * 2.0;
+    let inv = view_proj.inverse();
+    let near = inv.project_point3(glam::Vec3::new(nx, ny, 0.0));
+    let far = inv.project_point3(glam::Vec3::new(nx, ny, 1.0));
+    (near, (far - near).normalize_or_zero())
 }
 
 fn render_frame(
