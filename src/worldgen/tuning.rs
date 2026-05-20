@@ -99,27 +99,33 @@ pub const MACRO_RIVER_THRESH: u32 = 500;
 // ── Caves ────────────────────────────────────────────────────────────
 
 /// Inclusive range of cave systems rolled per fine region.
-pub const CAVE_SYSTEMS_PER_REGION: (u32, u32) = (1, 4);
+/// Down from (1,4) — the old number combined with big chambers
+/// produced 32-block-wide caverns everywhere underground.
+pub const CAVE_SYSTEMS_PER_REGION: (u32, u32) = (1, 2);
 /// Vertical band (inclusive both ends) for Shallow systems.
 pub const CAVE_BAND_SHALLOW: (i32, i32) = (10, 50);
 /// Vertical band for Middle systems.
 pub const CAVE_BAND_MIDDLE: (i32, i32) = (-40, 30);
 /// Vertical band for Deep systems.
 pub const CAVE_BAND_DEEP: (i32, i32) = (-110, -30);
-/// Inclusive range of chambers per system.
-pub const CHAMBERS_PER_SYSTEM: (u32, u32) = (4, 8);
+/// Inclusive range of chambers per system. Reduced from (4,8) so
+/// systems are smaller and feel like discrete features instead of
+/// chained megacaverns.
+pub const CHAMBERS_PER_SYSTEM: (u32, u32) = (2, 4);
 /// Range of ellipsoid semi-axis lengths for chambers, in blocks.
-pub const CHAMBER_RADIUS_RANGE: (f32, f32) = (6.0, 14.0);
+/// Drastically reduced from (6.0, 14.0) — at radius 14 you got a
+/// 28-block-diameter open-pit cavern. The new max (5.0) gives
+/// human-scale rooms.
+pub const CHAMBER_RADIUS_RANGE: (f32, f32) = (2.5, 5.0);
 /// Poisson-disk minimum spacing between chamber centers, as a
 /// multiple of chamber radius.
 pub const POISSON_MIN_SPACING_MULT: f32 = 3.0;
 /// Inclusive range of extra MST edges (loops) to add beyond the
 /// minimum spanning tree.
 pub const MST_EXTRA_LOOPS: (u32, u32) = (1, 2);
-/// Tunnel cross-section radius, in blocks. With the carve threshold
-/// at cap=1 / intensity=4, the effective carved tunnel radius is 75%
-/// of this — so (3.0, 4.5) gives navigable 4.5..7 block-wide tunnels.
-pub const TUNNEL_RADIUS: (f32, f32) = (3.0, 4.5);
+/// Tunnel cross-section radius, in blocks. Reduced from (3.0, 4.5)
+/// so the connecting passages feel like passages, not corridors.
+pub const TUNNEL_RADIUS: (f32, f32) = (1.5, 2.5);
 
 /// Probability a chamber in the Shallow band tries to expose to the
 /// surface (sinkhole / cliff mouth / skylight).

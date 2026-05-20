@@ -212,9 +212,9 @@ impl AquiferSystem {
         let keep_chance = if center_y >= self.cfg.sea_level {
             0.0 // never above sea level
         } else if center_y >= LAVA_BAND_TOP_Y {
-            0.15 // shallow band: rare wet pockets
+            0.0 // shallow band: NO aquifers — caves stay dry
         } else {
-            0.30 // deep band: lava + water pockets a bit more common
+            0.20 // deep band: occasional lava pools / deep aquifers
         };
         if dry_roll >= keep_chance {
             return AquiferCell {

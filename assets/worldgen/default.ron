@@ -328,7 +328,11 @@
             amplitudes: [0.5, 1.0, 2.0, 1.0, 2.0, 1.0, 0.0, 2.0, 0.0],
         ),
         cheese_xz_scale: 0.6666667,
-        cheese_threshold: -0.27,
+        // Cheese carves where noise > threshold. -0.27 hit roughly
+        // 67% of the FBM range (cheese was a default state, not a
+        // pocket); +0.30 limits it to the top ~20%, giving discrete
+        // chunks of carving rather than pervasive holes.
+        cheese_threshold: 0.30,
         cheese_y_min: -30,
         cheese_y_max: 10,
         cheese_fade_blocks: 8,
