@@ -169,12 +169,8 @@ impl ApplicationHandler for VizApp {
 
                 // Stream + invalidate.
                 let t0 = Instant::now();
-                if self
-                    .state
-                    .session
-                    .invalidator
-                    .maybe_wipe(self.state.session.world.cache_mut())
-                {
+                if self.state.session.invalidator.take_pending() {
+                    self.state.session.world.wipe();
                     scene.clear();
                 }
                 let cam_pos = self.state.session.camera().position();

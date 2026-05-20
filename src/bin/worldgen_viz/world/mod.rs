@@ -131,6 +131,17 @@ impl World {
         &mut self.cache
     }
 
+    /// Wipe both the chunk cache and the in-flight set. Used by the
+    /// `Invalidator` when the active `WorldgenConfig` changes. Without
+    /// the `in_flight` clear, jobs spawned before the wipe complete and
+    /// `drain_results` uploads stale geometry for 1-2 frames; the
+    /// `request_around` call after the wipe respawns them against the
+    /// new config.
+    pub fn wipe(&mut self) {
+        self.cache.clear();
+        self.in_flight.clear();
+    }
+
     /// Convenience: request chunks within radius of camera position.
     pub fn request_around(&mut self, pos: Vec3) {
         let coords = chunks_in_radius(pos, self.radius);

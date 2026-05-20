@@ -79,29 +79,36 @@ pub fn density_panel(ui: &mut Ui, cfg: &mut DensityConfig) -> bool {
         || (cfg.slide_bottom_target - snapshot_bot_tgt).abs() > 1e-6
 }
 
-/// Stub panel for climate spline tuning. Returns true if changed.
+/// Climate panel — terrain-shape and ridge noise sliders. Returns true
+/// if any slider changed this frame. PR 2 adds the nested-spline editors
+/// (offset_spline, factor_spline, jaggedness_spline, plate_roughness_bias_range)
+/// which the schema still carries.
 pub fn climate_panel(ui: &mut Ui, cfg: &mut oxium::worldgen::config::ClimateConfig) -> bool {
+    let mut dirty = false;
     ui.heading("Climate");
     ui.collapsing("Terrain shape noise", |ui| {
-        ui.add(
-            egui::Slider::new(&mut cfg.terrain_shape_period, 100.0..=4000.0)
-                .text("terrain_shape_period"),
-        );
-        ui.add(
-            egui::Slider::new(&mut cfg.terrain_shape_amplitude, 0.1..=4.0)
-                .text("terrain_shape_amplitude"),
-        );
+        dirty |= ui
+            .add(
+                egui::Slider::new(&mut cfg.terrain_shape_period, 100.0..=4000.0)
+                    .text("terrain_shape_period"),
+            )
+            .changed();
+        dirty |= ui
+            .add(
+                egui::Slider::new(&mut cfg.terrain_shape_amplitude, 0.1..=4.0)
+                    .text("terrain_shape_amplitude"),
+            )
+            .changed();
     });
     ui.collapsing("Ridge noise", |ui| {
-        ui.add(
-            egui::Slider::new(&mut cfg.ridges_period, 50.0..=1000.0).text("ridges_period"),
-        );
-        ui.add(
-            egui::Slider::new(&mut cfg.ridges_amplitude, 0.1..=4.0).text("ridges_amplitude"),
-        );
+        dirty |= ui
+            .add(egui::Slider::new(&mut cfg.ridges_period, 50.0..=1000.0).text("ridges_period"))
+            .changed();
+        dirty |= ui
+            .add(egui::Slider::new(&mut cfg.ridges_amplitude, 0.1..=4.0).text("ridges_amplitude"))
+            .changed();
     });
-    // Stub: no dirty tracking for spline sub-fields yet.
-    false
+    dirty
 }
 
 /// Stub panel for cave configuration. Returns true if changed.
@@ -111,18 +118,26 @@ pub fn caves_panel(ui: &mut Ui, _cfg: &mut WorldgenConfig) -> bool {
     false
 }
 
-/// Stub panel for biome configuration. Returns true if changed.
+/// Biomes panel — weirdness noise sliders. Returns true if any slider
+/// changed this frame. PR 2 adds the ParameterPoint entries editor.
 pub fn biomes_panel(ui: &mut Ui, cfg: &mut oxium::worldgen::config::BiomesConfig) -> bool {
+    let mut dirty = false;
     ui.heading("Biomes");
     ui.collapsing("Weirdness noise", |ui| {
-        ui.add(
-            egui::Slider::new(&mut cfg.weirdness_period, 50.0..=2000.0).text("weirdness_period"),
-        );
-        ui.add(
-            egui::Slider::new(&mut cfg.weirdness_amplitude, 0.0..=2.0).text("weirdness_amplitude"),
-        );
+        dirty |= ui
+            .add(
+                egui::Slider::new(&mut cfg.weirdness_period, 50.0..=2000.0)
+                    .text("weirdness_period"),
+            )
+            .changed();
+        dirty |= ui
+            .add(
+                egui::Slider::new(&mut cfg.weirdness_amplitude, 0.0..=2.0)
+                    .text("weirdness_amplitude"),
+            )
+            .changed();
     });
-    false
+    dirty
 }
 
 /// Stub panel for surface decoration. Returns true if changed.

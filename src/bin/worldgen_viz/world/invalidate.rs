@@ -1,7 +1,12 @@
 //! Cache invalidation on config change. PR 1: wipe-all; PR 7 may add
 //! field-aware partial invalidation if profiling shows it's needed.
-
-use crate::world::cache::ChunkCache;
+//!
+//! `Invalidator` is a pure revision detector — it returns whether the
+//! caller should perform a wipe this frame. The actual wipe is performed
+//! by the caller (via `World::wipe()`), which gives the caller a single
+//! point of control over the cache AND the in-flight set (the former
+//! `maybe_wipe(&mut ChunkCache)` API forgot the in-flight set, causing
+//! stale geometry to land 1-2 frames after an edit).
 
 pub struct Invalidator {
     last_config_revision: u64,
@@ -19,11 +24,12 @@ impl Invalidator {
         self.current = self.current.wrapping_add(1);
     }
 
-    /// Call once per frame. If the revision has advanced since the last
-    /// check, wipe the cache and synchronise. Returns `true` if it wiped.
-    pub fn maybe_wipe(&mut self, cache: &mut ChunkCache) -> bool {
+    /// Call once per frame. Returns `true` exactly once per `bump()`:
+    /// when the revision has advanced since the last call. The caller
+    /// is responsible for performing the wipe (typically
+    /// `world.wipe(); scene.clear();`).
+    pub fn take_pending(&mut self) -> bool {
         if self.current != self.last_config_revision {
-            cache.clear();
             self.last_config_revision = self.current;
             true
         } else {
@@ -35,37 +41,29 @@ impl Invalidator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::cache::ChunkMeshGpu;
-    use glam::IVec3;
-    use oxium::voxel::chunk::DenseChunk;
-    use oxium::voxel::coords::ChunkCoord;
-    use std::sync::Arc;
 
-    fn coord(x: i32, y: i32, z: i32) -> ChunkCoord {
-        ChunkCoord(IVec3::new(x, y, z))
+    #[test]
+    fn no_bump_means_not_pending() {
+        let mut inv = Invalidator::new();
+        assert!(!inv.take_pending());
     }
 
     #[test]
-    fn no_bump_means_no_wipe() {
+    fn bump_then_take_returns_true_once() {
         let mut inv = Invalidator::new();
-        let mut cache = ChunkCache::new(4);
-        cache.put_chunk(coord(0, 0, 0), Arc::new(DenseChunk::empty()));
-        assert!(!inv.maybe_wipe(&mut cache));
-        assert!(cache.has_chunk(coord(0, 0, 0)));
-    }
-
-    #[test]
-    fn bump_then_check_wipes_once() {
-        let mut inv = Invalidator::new();
-        let mut cache = ChunkCache::new(4);
-        cache.put_chunk(coord(0, 0, 0), Arc::new(DenseChunk::empty()));
-        cache.put_mesh(coord(0, 0, 0), ChunkMeshGpu::empty());
         inv.bump();
-        assert!(inv.maybe_wipe(&mut cache));
-        assert_eq!(cache.len(), (0, 0));
-        // Second check after the same bump is a no-op.
-        cache.put_chunk(coord(1, 0, 0), Arc::new(DenseChunk::empty()));
-        assert!(!inv.maybe_wipe(&mut cache));
-        assert!(cache.has_chunk(coord(1, 0, 0)));
+        assert!(inv.take_pending());
+        // Second take is a no-op for the same bump.
+        assert!(!inv.take_pending());
+    }
+
+    #[test]
+    fn multiple_bumps_collapse_to_one_take() {
+        let mut inv = Invalidator::new();
+        inv.bump();
+        inv.bump();
+        inv.bump();
+        assert!(inv.take_pending());
+        assert!(!inv.take_pending());
     }
 }
