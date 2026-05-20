@@ -127,7 +127,11 @@ impl SceneRender {
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: Some(wgpu::Face::Back),
+                // Debug viewer: render both sides of every face so a
+                // mis-wound mesh in worldgen_bridge::emit_face still
+                // displays. Negligible perf cost for the small region
+                // we mesh.
+                cull_mode: None,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
