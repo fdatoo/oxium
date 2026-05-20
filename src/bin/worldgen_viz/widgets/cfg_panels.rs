@@ -254,39 +254,6 @@ pub fn graph_panel(ui: &mut Ui, cfg: &oxium::worldgen::config::DensityConfig) {
     ui.monospace(&line);
 }
 
-pub fn preset_panel(ui: &mut Ui, cfg: &mut WorldgenConfig) -> bool {
-    let mut loaded = false;
-    ui.heading("Presets");
-    if add_with_tooltip(
-        ui,
-        |ui| ui.button("Save current → assets/worldgen/scratch.ron"),
-        "Serialises the current config to a scratch file you can rename and version later.",
-    )
-    .clicked()
-    {
-        if let Ok(s) = ron::ser::to_string_pretty(cfg, ron::ser::PrettyConfig::default()) {
-            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets")
-                .join("worldgen")
-                .join("scratch.ron");
-            if let Err(e) = std::fs::write(&path, s) {
-                eprintln!("save preset: {e}");
-            } else {
-                eprintln!("saved to {path:?}");
-            }
-        }
-    }
-    if add_with_tooltip(
-        ui,
-        |ui| ui.button("Reload default.ron"),
-        "Discards any in-session edits and reloads the bundled defaults from assets/worldgen/default.ron.",
-    )
-    .clicked()
-    {
-        if let Ok(new) = WorldgenConfig::bundled_default() {
-            *cfg = new;
-            loaded = true;
-        }
-    }
-    loaded
-}
+// Preset library lives in `crate::layout::preset_library_section` /
+// `crate::preset` — it needs AppState access for its UI state which
+// this thin per-panel function can't provide.

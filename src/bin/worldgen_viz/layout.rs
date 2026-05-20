@@ -3,8 +3,7 @@
 use crate::app::AppState;
 use crate::session::CamKind;
 use crate::widgets::cfg_panels::{
-    biomes_panel, caves_panel, climate_panel, density_panel, graph_panel, preset_panel,
-    surface_panel,
+    biomes_panel, caves_panel, climate_panel, density_panel, graph_panel, surface_panel,
 };
 use egui::Context;
 use oxium::worldgen::config::WorldgenConfig;
@@ -69,15 +68,27 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
         });
     });
 
-    // Left panel: config editors (today's panels, unchanged).
+    // Left panel: preset library + config editors.
     egui::SidePanel::left("config_panel")
         .resizable(true)
         .default_width(380.0)
         .show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
+                // Preset library — sits at the top so it's the first
+                // thing the user sees. Loading a preset is a
+                // wholesale config swap; subsequent panel edits work
+                // on top of it.
                 let cfg_arc = app.session.config.load();
                 let mut cfg: WorldgenConfig = (*cfg_arc).clone();
-                let mut local_dirty = false;
+                let mut preset_loaded = false;
+                egui::CollapsingHeader::new("Presets")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        preset_loaded = preset_library_section(ui, app, &mut cfg);
+                    });
+                ui.separator();
+
+                let mut local_dirty = preset_loaded;
                 local_dirty |= density_panel(ui, &mut cfg.density);
                 ui.separator();
                 local_dirty |= climate_panel(ui, &mut cfg.climate);
@@ -88,15 +99,14 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
                 ui.separator();
                 local_dirty |= surface_panel(ui, &mut cfg);
                 ui.separator();
-                local_dirty |= preset_panel(ui, &mut cfg);
-                ui.separator();
                 graph_panel(ui, &cfg.density);
                 if local_dirty {
                     app.session.config.swap(cfg);
-                    // queue() instead of bump() — debounces slider /
-                    // spline drags so each tick of a drag doesn't
-                    // trigger a wipe-and-refill. The actual bump fires
-                    // ~200 ms after the user pauses, via Invalidator::tick().
+                    // queue() instead of bump() for slider/spline
+                    // drags. Preset loads are also queued for
+                    // simplicity — the debounce window is short
+                    // enough that the user perceives a load as
+                    // immediate.
                     app.session.invalidator.queue();
                     out.dirty = true;
                 }
@@ -261,3 +271,167 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
 
     out
 }
+
+/// Preset library section. Lists every `*.ron` under
+/// `assets/worldgen/presets/`, plus the bundled `default.ron` as
+/// an immutable factory baseline. Returns `true` if the user just
+/// loaded a preset (caller marks the config dirty so the regen
+/// path picks it up).
+fn preset_library_section(
+    ui: &mut egui::Ui,
+    app: &mut AppState,
+    cfg: &mut WorldgenConfig,
+) -> bool {
+    use crate::preset;
+    let mut loaded = false;
+
+    // Always-available factory baseline.
+    ui.horizontal(|ui| {
+        if ui
+            .button("⟲ Reload default")
+            .on_hover_text("Replace the current config with the bundled assets/worldgen/default.ron.")
+            .clicked()
+        {
+            if let Ok(new) = WorldgenConfig::bundled_default() {
+                *cfg = new;
+                app.presets.activate(None);
+                loaded = true;
+            }
+        }
+    });
+
+    ui.separator();
+
+    // Save-as input.
+    ui.horizontal(|ui| {
+        ui.label("Save as:");
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut app.presets.new_name)
+                .hint_text("preset-name")
+                .desired_width(180.0),
+        );
+        let _ = resp;
+        let can_save = !app.presets.new_name.trim().is_empty();
+        if ui
+            .add_enabled(can_save, egui::Button::new("💾 Save"))
+            .on_hover_text("Write the current config to assets/worldgen/presets/<name>.ron. Existing presets with the same name are overwritten.")
+            .clicked()
+        {
+            match preset::save(&app.presets.new_name, cfg) {
+                Ok(entry) => {
+                    let name = entry.name.clone();
+                    app.presets.refresh_entries();
+                    app.presets.activate(Some(name));
+                    app.presets.new_name.clear();
+                }
+                Err(e) => eprintln!("save preset: {e}"),
+            }
+        }
+    });
+
+    ui.separator();
+
+    // Preset list.
+    if app.presets.entries.is_empty() {
+        ui.label(
+            egui::RichText::new("No saved presets yet. Type a name above and click Save.")
+                .small()
+                .weak(),
+        );
+    } else {
+        let active = app.presets.active_name.clone();
+        let entries = app.presets.entries.clone();
+        let mut to_load: Option<usize> = None;
+        let mut to_delete: Option<usize> = None;
+        for (i, entry) in entries.iter().enumerate() {
+            ui.horizontal(|ui| {
+                let is_active = active.as_deref() == Some(entry.name.as_str());
+                let label = if is_active {
+                    format!("● {}", entry.name)
+                } else {
+                    format!("○ {}", entry.name)
+                };
+                if ui
+                    .selectable_label(is_active, label)
+                    .on_hover_text("Click to activate (select for notes); use Load to apply its config.")
+                    .clicked()
+                {
+                    app.presets.activate(Some(entry.name.clone()));
+                }
+                if ui
+                    .small_button("▶ Load")
+                    .on_hover_text("Replace the current config with this preset.")
+                    .clicked()
+                {
+                    to_load = Some(i);
+                }
+                if ui
+                    .small_button("✖")
+                    .on_hover_text("Delete this preset and its notes file.")
+                    .clicked()
+                {
+                    to_delete = Some(i);
+                }
+            });
+        }
+        if let Some(i) = to_load {
+            match preset::load(&entries[i]) {
+                Ok(new_cfg) => {
+                    *cfg = new_cfg;
+                    app.presets.activate(Some(entries[i].name.clone()));
+                    loaded = true;
+                }
+                Err(e) => eprintln!("load preset {}: {e}", entries[i].name),
+            }
+        }
+        if let Some(i) = to_delete {
+            let _ = preset::delete(&entries[i]);
+            app.presets.refresh_entries();
+            if app.presets.active_name.as_deref() == Some(entries[i].name.as_str()) {
+                app.presets.activate(None);
+            }
+        }
+    }
+
+    // Notes editor for the active preset.
+    if let Some(name) = app.presets.active_name.clone() {
+        ui.separator();
+        ui.label(
+            egui::RichText::new(format!("Notes for '{name}':"))
+                .small()
+                .weak(),
+        );
+        ui.add(
+            egui::TextEdit::multiline(&mut app.presets.notes_buffer)
+                .desired_rows(3)
+                .desired_width(f32::INFINITY)
+                .hint_text("Freeform notes — what works, what to try next."),
+        );
+        ui.horizontal(|ui| {
+            let dirty = app.presets.notes_dirty();
+            if ui
+                .add_enabled(dirty, egui::Button::new("💾 Save notes"))
+                .on_hover_text("Write notes to assets/worldgen/presets/<name>.notes.md.")
+                .clicked()
+            {
+                if let Some(entry) = app.presets.entries.iter().find(|e| e.name == name).cloned() {
+                    match preset::save_notes(&entry, &app.presets.notes_buffer) {
+                        Ok(()) => app.presets.mark_notes_saved(),
+                        Err(e) => eprintln!("save notes: {e}"),
+                    }
+                }
+            }
+            if dirty {
+                ui.label(
+                    egui::RichText::new("(unsaved)")
+                        .small()
+                        .color(egui::Color32::from_rgb(220, 180, 80)),
+                );
+            }
+        });
+    }
+
+    loaded
+}
+
+

@@ -1,5 +1,6 @@
 //! AppState: aggregates session + UI state + frame timing.
 
+use crate::preset::PresetUi;
 use crate::session::Session;
 use crate::world::stream::StreamRadius;
 use oxium::worldgen::config::WorldgenConfig;
@@ -40,6 +41,7 @@ pub struct AppState {
     pub scene_chunks_total: usize,
     /// Chunks that passed frustum culling last frame.
     pub scene_chunks_visible: usize,
+    pub presets: PresetUi,
 }
 
 impl AppState {
@@ -55,6 +57,7 @@ impl AppState {
             scene_chunks_total: 0,
             scene_chunks_visible: 0,
             right_tab: RightTab::default(),
+            presets: PresetUi::new(),
         }
     }
 

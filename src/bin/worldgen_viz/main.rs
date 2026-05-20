@@ -6,6 +6,7 @@ mod crosssection;
 mod layout;
 mod overlays;
 mod paint;
+mod preset;
 mod probe;
 mod render;
 mod session;
