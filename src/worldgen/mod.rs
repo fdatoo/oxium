@@ -812,21 +812,36 @@ impl Generator {
             0.0
         };
 
-        // Combined cave contribution (matching fill_chunk's max() composition).
-        let cave_contribution = cave_sdf_val.max(cheese).max(spaghetti);
-
-        // Density comparison (with cap when any carver fires, matching fill_chunk).
-        let density_for_compare = if cave_contribution > 0.0 {
-            raw_density.min(1.0)
-        } else {
-            raw_density
-        };
-        let final_density = density_for_compare - cave_contribution + pillar;
+        // Compose to a signed final density the same way fill_chunk
+        // does: start from `raw_density`, then `min()` in each cave
+        // carver's signed contribution. Graph cave / wormhole SDFs
+        // are positive intensities, so they're applied as
+        // `min(-sdf)`. `cheese` and `spaghetti` are signed
+        // (post-cave-referendum: cheese includes the cave_layer²
+        // term and can be strongly positive in cave-poor strata,
+        // so treating it as a positive-only subtraction would flip
+        // solid voxels to air). Pillars apply last via `max()`.
+        //
+        // NB: the procedural carver (`carver.rs`) mask isn't included
+        // here — it operates per-chunk and isn't cheap to query at
+        // a single voxel. The probe is informative, not authoritative;
+        // the chunk fill is the ground truth.
+        let mut final_density = raw_density;
+        if cave_sdf_val > 0.0 {
+            final_density = final_density.min(-cave_sdf_val);
+        }
+        if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
+            final_density = final_density.min(cheese);
+            final_density = final_density.min(spaghetti);
+        }
+        if pillar > 0.0 {
+            final_density = final_density.max(pillar);
+        }
         let solid = final_density > 0.0;
 
         // --- Block resolution ---
         // Aquifer density input matches fill_chunk exactly.
-        let aquifer_density = density_for_compare - cave_contribution;
+        let aquifer_density = final_density;
         let aq_substance = self.aquifer.substance(wx, wy, wz, aquifer_density);
 
         let block = if let aquifer::Substance::Block(b) = aq_substance {
