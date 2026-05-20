@@ -291,6 +291,19 @@ where
     region
 }
 
+/// Look up `coord` in the fine cache **without building on miss**.
+/// Returns `None` if the entry is not cached. Unlike `get_fine`, this
+/// does NOT promote the entry's LRU position (uses `LruCache::peek`),
+/// so repeated peeks from the hydrology stitcher don't reshape the
+/// eviction order.
+pub fn peek_fine(cache: &FineCache, coord: RegionCoord) -> Option<Arc<FineRegion>> {
+    cache
+        .lock()
+        .expect("fine cache mutex poisoned")
+        .peek(&coord)
+        .cloned()
+}
+
 pub fn get_macro<F>(
     cache: &MacroCache,
     coord: MacroRegionCoord,
@@ -388,9 +401,18 @@ mod tests {
         let coord = RegionCoord { x: 4, z: 5 };
         let a = get_fine(&cache, coord, || build_fine_region_placeholder(coord));
         let b = get_fine(&cache, coord, || build_fine_region_placeholder(coord));
+        assert!(Arc::ptr_eq(&a, &b));
+
+        // peek_fine returns the same Arc without building.
+        let c = peek_fine(&cache, coord).expect("peek must find cached");
+        assert!(Arc::ptr_eq(&a, &c));
+
+        // peek_fine on cold key returns None and doesn't insert.
+        let cold = RegionCoord { x: 999, z: 999 };
+        assert!(peek_fine(&cache, cold).is_none());
         assert!(
-            Arc::ptr_eq(&a, &b),
-            "second lookup should return the same Arc"
+            cache.lock().unwrap().peek(&cold).is_none(),
+            "peek must not insert"
         );
     }
 
