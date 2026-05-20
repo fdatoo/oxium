@@ -105,12 +105,15 @@ impl MapView {
     }
 
     /// Render the map widget. Returns `Some((wx, wz))` if the user
-    /// clicked. Pan with drag (middle button); zoom with scroll.
+    /// clicked. Pan with drag (middle button); zoom with scroll. The
+    /// `pinned` coord, if any, is drawn as a yellow crosshair so the
+    /// 2D map and the (eventual) 3D viewport stay visually linked.
     pub fn show(
         &mut self,
         ui: &mut Ui,
         generator: &Generator,
         revision: u64,
+        pinned: Option<(i32, i32)>,
     ) -> Option<(i32, i32)> {
         self.regenerate(generator, ui.ctx(), revision);
 
@@ -125,11 +128,22 @@ impl MapView {
                 }
             });
 
+        // Per-stage description (helps if the user has no idea what
+        // "h_pre" or "FlowAccum" means).
+        ui.label(
+            egui::RichText::new(self.stage.description())
+                .small()
+                .weak(),
+        );
+
         let tex = self.texture.clone();
         let mut clicked = None;
+        let mut hover_world: Option<(i32, i32)> = None;
         if let Some(tex) = tex {
             let size = egui::vec2(MAP_SIZE_PX as f32, MAP_SIZE_PX as f32);
-            let resp = ui.add(egui::Image::new((tex.id(), size)).sense(egui::Sense::click_and_drag()));
+            let resp = ui.add(
+                egui::Image::new((tex.id(), size)).sense(egui::Sense::click_and_drag()),
+            );
             if resp.clicked() {
                 if let Some(pos) = resp.interact_pointer_pos() {
                     let local = pos - resp.rect.left_top();
@@ -146,13 +160,145 @@ impl MapView {
                     let factor = if scroll > 0.0 { 0.9 } else { 1.1 };
                     self.zoom(factor);
                 }
+                if let Some(pos) = resp.hover_pos() {
+                    let local = pos - resp.rect.left_top();
+                    hover_world = Some(self.pixel_to_world(local.x, local.y));
+                }
+            }
+
+            // Pinned-column crosshair: yellow lines bisecting the
+            // pixel that the pinned column occupies.
+            if let Some((pwx, pwz)) = pinned {
+                if let Some((px, py)) = self.world_to_pixel(pwx, pwz) {
+                    let p = resp.rect.left_top() + egui::vec2(px, py);
+                    let painter = ui.painter_at(resp.rect);
+                    let pin_color = egui::Color32::from_rgb(255, 220, 70);
+                    painter.line_segment(
+                        [
+                            egui::pos2(resp.rect.left(), p.y),
+                            egui::pos2(resp.rect.right(), p.y),
+                        ],
+                        egui::Stroke::new(1.0, pin_color),
+                    );
+                    painter.line_segment(
+                        [
+                            egui::pos2(p.x, resp.rect.top()),
+                            egui::pos2(p.x, resp.rect.bottom()),
+                        ],
+                        egui::Stroke::new(1.0, pin_color),
+                    );
+                    painter.circle_stroke(p, 3.5, egui::Stroke::new(1.5, pin_color));
+                }
+            }
+
+            // Hover-column cursor: thin cyan crosshair following the mouse.
+            if let (Some((hwx, hwz)), true) = (hover_world, resp.hovered()) {
+                if let Some((px, py)) = self.world_to_pixel(hwx, hwz) {
+                    let p = resp.rect.left_top() + egui::vec2(px, py);
+                    let painter = ui.painter_at(resp.rect);
+                    let hover_color = egui::Color32::from_rgba_premultiplied(120, 220, 240, 180);
+                    painter.line_segment(
+                        [
+                            egui::pos2(resp.rect.left(), p.y),
+                            egui::pos2(resp.rect.right(), p.y),
+                        ],
+                        egui::Stroke::new(0.5, hover_color),
+                    );
+                    painter.line_segment(
+                        [
+                            egui::pos2(p.x, resp.rect.top()),
+                            egui::pos2(p.x, resp.rect.bottom()),
+                        ],
+                        egui::Stroke::new(0.5, hover_color),
+                    );
+                }
             }
         }
-        ui.label(format!(
-            "center ({:.0}, {:.0})  bpp {:.1}",
-            self.center_wx, self.center_wz, self.blocks_per_pixel,
-        ));
+
+        // Hover / center / zoom readout.
+        ui.horizontal(|ui| {
+            ui.label(format!(
+                "center ({:.0}, {:.0})  bpp {:.1}",
+                self.center_wx, self.center_wz, self.blocks_per_pixel,
+            ));
+        });
+        if let Some((hwx, hwz)) = hover_world {
+            let raw = generator.sample_stage(self.stage, hwx, hwz);
+            ui.label(
+                egui::RichText::new(format!(
+                    "hover ({}, {}) → {} = {:.3}",
+                    hwx, hwz, self.stage.label(), raw,
+                ))
+                .monospace()
+                .small(),
+            );
+        }
+
+        // Legend strip for scalar stages.
+        legend(ui, self.stage);
+
         clicked
+    }
+}
+
+/// Draw a legend strip for the current stage. Scalar stages get a
+/// horizontal gradient with min/max labels; categorical stages get a
+/// short text hint.
+fn legend(ui: &mut Ui, stage: Stage) {
+    use crate::overlays::stages;
+    let strip_h = 12.0;
+    let strip_w = MAP_SIZE_PX as f32;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(strip_w, strip_h), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    if let Some((lo, hi)) = stages::range(stage) {
+        // Sample 64 stops across the gradient using the same colour
+        // mapping as the map texture, so the legend matches.
+        let stops = 64;
+        let dx = strip_w / stops as f32;
+        for i in 0..stops {
+            let t = i as f32 / (stops - 1) as f32;
+            let raw = lo + t * (hi - lo);
+            let rgba = stages::pixel(stage, raw);
+            let color = egui::Color32::from_rgba_premultiplied(rgba[0], rgba[1], rgba[2], rgba[3]);
+            let x0 = rect.left() + i as f32 * dx;
+            painter.rect_filled(
+                egui::Rect::from_min_size(egui::pos2(x0, rect.top()), egui::vec2(dx + 0.5, strip_h)),
+                0.0,
+                color,
+            );
+        }
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(format!("{lo:.2}")).small().weak());
+            ui.add_space(strip_w - 70.0);
+            ui.label(egui::RichText::new(format!("{hi:.2}")).small().weak());
+        });
+    } else {
+        // Categorical: paint a few sample hues so the user sees the
+        // palette, no min/max labels.
+        let samples: &[f32] = match stage {
+            Stage::AquiferSubstance => &[0.0, 1.0],
+            _ => &[0.0, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9],
+        };
+        let cell_w = strip_w / samples.len() as f32;
+        for (i, &v) in samples.iter().enumerate() {
+            let rgba = stages::pixel(stage, v);
+            let color = egui::Color32::from_rgba_premultiplied(rgba[0], rgba[1], rgba[2], rgba[3]);
+            painter.rect_filled(
+                egui::Rect::from_min_size(
+                    egui::pos2(rect.left() + i as f32 * cell_w, rect.top()),
+                    egui::vec2(cell_w, strip_h),
+                ),
+                0.0,
+                color,
+            );
+        }
+        let hint = match stage {
+            Stage::PlateId => "plate ID → hashed hue",
+            Stage::BiomeId => "biome ID → hashed hue",
+            Stage::AquiferSubstance => "blue = Water · orange = Lava",
+            _ => "",
+        };
+        ui.label(egui::RichText::new(hint).small().weak());
     }
 }
 

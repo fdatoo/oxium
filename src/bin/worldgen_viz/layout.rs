@@ -90,7 +90,8 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
                 // Map section
                 ui.heading("Overlay map");
                 let revision = app.session.invalidator.revision();
-                let clicked = app.session.map.show(ui, &generator, revision);
+                let pinned = app.session.probe.pinned;
+                let clicked = app.session.map.show(ui, &generator, revision, pinned);
                 if let Some((wx, wz)) = clicked {
                     app.session.probe.pin(&generator, wx, wz);
                 }

@@ -79,6 +79,7 @@ impl<'a> Widget for SplineEditor<'a> {
         }
 
         // Draw + drag knots.
+        let mut response = response;
         if let CubicSpline::Multipoint(knots) = self.spline {
             let mut drag_target: Option<usize> = None;
             for (i, knot) in knots.iter().enumerate() {
@@ -100,8 +101,18 @@ impl<'a> Widget for SplineEditor<'a> {
             if let Some(i) = drag_target {
                 if let Some(pos) = response.interact_pointer_pos() {
                     let (lx, ly) = from_screen(pos);
-                    knots[i].loc = lx.clamp(self.x_range.0, self.x_range.1);
-                    knots[i].val = ly.clamp(self.y_range.0, self.y_range.1);
+                    let new_loc = lx.clamp(self.x_range.0, self.x_range.1);
+                    let new_val = ly.clamp(self.y_range.0, self.y_range.1);
+                    if (knots[i].loc - new_loc).abs() > 1e-6
+                        || (knots[i].val - new_val).abs() > 1e-6
+                    {
+                        knots[i].loc = new_loc;
+                        knots[i].val = new_val;
+                        // Without this, callers see `response.changed()`
+                        // as false during drags and never trigger a
+                        // regen — silently broken spline tuning.
+                        response.mark_changed();
+                    }
                 }
             }
         }

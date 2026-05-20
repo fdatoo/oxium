@@ -126,6 +126,39 @@ impl Stage {
     pub fn is_categorical(self) -> bool {
         matches!(self, Stage::PlateId | Stage::BiomeId | Stage::AquiferSubstance)
     }
+
+    /// One-line human description of what this stage represents.
+    /// Shown beneath the map's stage dropdown.
+    pub fn description(self) -> &'static str {
+        match self {
+            Stage::Continentalness =>
+                "Signed plate-Voronoi distance field. Positive inland, negative offshore — drives continent/ocean shape.",
+            Stage::PlateId =>
+                "Hashed plate ID (categorical). Each tectonic plate gets a stable hue.",
+            Stage::Temperature =>
+                "Raw temperature noise in [-1, 1]. Combines with humidity + continentalness to pick the biome.",
+            Stage::Humidity =>
+                "Raw humidity noise in [-1, 1]. Combines with temperature + continentalness to pick the biome.",
+            Stage::Desertness =>
+                "Desert-mask noise. Above the desert threshold the column flips to sand surface.",
+            Stage::Weirdness =>
+                "Weirdness noise. Selects rare biome variants (ice spikes / sunflower plains analogues).",
+            Stage::HPre =>
+                "Pre-carve heightmap value (blocks). Plate base + ridges + warped FBM, before river carving.",
+            Stage::ValleyCarve =>
+                "Depth (blocks) that hydrology subtracts from h_pre to cut rivers. Brighter = deeper carve.",
+            Stage::HTarget =>
+                "Final terrain height (blocks) after the river carve. The actual top of the column.",
+            Stage::FlowAccum =>
+                "Hydrology flow accumulation (log-scaled). High values are trunk rivers; low values are headwaters.",
+            Stage::BiomeId =>
+                "Discrete biome label (categorical): Tundra, SnowyForest, Plains, Forest, Desert, Tropical.",
+            Stage::AquiferY =>
+                "Per-cell aquifer water-table Y. Cells below this Y get fluid; cells above stay dry.",
+            Stage::AquiferSubstance =>
+                "Aquifer cell fluid: blue = Water, orange = Lava. Cells are 16×16×16 blocks.",
+        }
+    }
 }
 
 #[cfg(test)]
