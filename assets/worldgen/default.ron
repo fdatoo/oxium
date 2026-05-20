@@ -379,19 +379,26 @@
         spaghetti_elevation_min: -8.0,
         spaghetti_elevation_max: 8.0,
         // Gradient placement matters: tubes form where
-        // abs(elev + ygrad) is small, and elev is in
-        // [elev_min, elev_max] = [-8, 8]. So tubes can exist only
-        // where ygrad is roughly in [-8, 8] too.
+        // abs(elev + ygrad) is small, and elev ∈ [-8, 8] so tubes
+        // can exist only where ygrad is in [-8, 8] too. The
+        // DENSITY of tubes at a given Y depends on what `elev`
+        // value is needed there: when `ygrad ≈ 0`, tubes form for
+        // `elev ≈ 0` (the most common noise value), so tube
+        // density peaks. When ygrad is near its extremes, tubes
+        // need extreme elev values (rare) → low density.
         //
-        // We want tubes to be densest *deep* and rare-but-possible
-        // near the surface — so the gradient peaks at +8 above the
-        // surface (no tubes high in the air) and tapers to 0 at
-        // the world floor (tubes are densest there, fading
-        // gradually upward through the depths).
-        spaghetti_gradient_from_y: 80,
+        // To get tubes that organically reach the surface,
+        // straddle ygrad=0 around the typical heightmap range
+        // (Y ≈ 0 to 80). At the world top (+140) ygrad ≈ +8
+        // (suppressed, no tubes above the world); at the floor
+        // (-120) ygrad ≈ -8 (also suppressed at the bedrock
+        // slide). Mid-band where ygrad crosses zero has the
+        // highest tube density — and that mid-band now overlaps
+        // the heightmap, so surface entrances appear naturally.
+        spaghetti_gradient_from_y: 140,
         spaghetti_gradient_from_value: 8.0,
         spaghetti_gradient_to_y: -120,
-        spaghetti_gradient_to_value: 0.0,
+        spaghetti_gradient_to_value: -8.0,
         // Negative offset on the thickness_mod biases the cube
         // term so tube interiors actually go negative. The slope
         // adds per-region width variation.
