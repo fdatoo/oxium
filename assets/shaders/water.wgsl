@@ -203,15 +203,8 @@ fn linear_depth(d: f32) -> f32 {
     return near * far / (far - d * (far - near));
 }
 
-// ACES filmic tonemap — same curve as the opaque shader.
-fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
-    let a = 2.51;
-    let b = 0.03;
-    let c = 2.43;
-    let d = 0.59;
-    let e = 0.14;
-    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
-}
+// Tonemap moved to composite.wgsl as of PR 1 Task 5; the water
+// fragment now outputs linear HDR into the Rgba16Float target.
 
 fn underwater_tint(rgb: vec3<f32>, world: vec3<f32>, t: f32, factor: f32) -> vec3<f32> {
     if (factor <= 0.0) {
@@ -498,7 +491,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let deep_tint = vec3<f32>(0.04, 0.18, 0.32);
     rgb = mix(rgb, deep_tint, depth_curve * 0.75);
 
-    rgb = aces_tonemap(rgb);
+    // Tonemap moved to composite; underwater tint stays here for now
+    // (Task 6 moves it as well). Output is linear HDR.
     rgb = underwater_tint(rgb, in.v_world, camera.time, camera.underwater_factor);
 
     // Alpha 0.78..0.97 — much more opaque than before. The previous

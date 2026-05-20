@@ -199,21 +199,6 @@ fn biome_tint_shift(world_xz: vec2<f32>) -> vec3<f32> {
     );
 }
 
-// ACES filmic tone mapping — the cinematographer's go-to curve. Compresses
-// highlights into a soft roll-off (no clip to pure white on bright
-// surfaces) and adds a touch of crispness in the shadows. Operates on
-// linear-space RGB; the output is also linear and gets converted to
-// sRGB by the render-target format. Fitted approximation by Krzysztof
-// Narkowicz — same five constants every modern engine reaches for.
-fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
-    let a = 2.51;
-    let b = 0.03;
-    let c = 2.43;
-    let d = 0.59;
-    let e = 0.14;
-    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
-}
-
 // Cheap 2D hash matching the sky/water shaders so the underwater
 // caustic pattern stays coherent across pipelines.
 fn uw_hash(p: vec2<f32>) -> f32 {
@@ -348,10 +333,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let fog_col = mix(cave_fog, sky_fog, max(in.v_light, 0.05));
     var out_rgb = mix(lit_rgb, fog_col, fog_t);
 
-    // ── Post: tonemap before the underwater tint so the tint stays
-    // a pure pulled colour instead of being compressed by the
-    // filmic curve into something muddier.
-    out_rgb = aces_tonemap(out_rgb);
+    // ── Post: underwater tint stays here for now (Task 6 moves it to
+    // composite). Tonemap moved to composite already, so this output
+    // is unclamped linear HDR — Rgba16Float carries the dynamic range.
     out_rgb = underwater_tint(out_rgb, in.v_world, camera.time, camera.underwater_factor);
 
     return vec4<f32>(out_rgb, 1.0);

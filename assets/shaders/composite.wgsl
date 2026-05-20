@@ -24,8 +24,22 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
     return out;
 }
 
+// ACES filmic tone mapping — moved here from the world shaders so the
+// HDR target stores unclamped linear values that future PRs (bloom)
+// can read pre-tonemap. Fitted approximation by Krzysztof Narkowicz.
+fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e),
+                 vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let hdr = textureSample(hdr_tex, hdr_sampler, in.uv).rgb;
-    return vec4<f32>(hdr, 1.0);
+    let hdr    = textureSample(hdr_tex, hdr_sampler, in.uv).rgb;
+    let mapped = aces_tonemap(hdr);
+    return vec4<f32>(mapped, 1.0);
 }
