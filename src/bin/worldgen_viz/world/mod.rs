@@ -25,6 +25,18 @@ pub enum ChunkJobResult {
     },
 }
 
+/// Soft cap on the number of fill+mesh jobs queued at once. Without
+/// this, `request_chunks` happily spawns hundreds of jobs per frame
+/// while the rayon pool drains them at a fixed rate; the queue grows
+/// unboundedly, and any config-change `wipe()` stalls behind a long
+/// backlog of stale-config jobs the pool still needs to finish. Sized
+/// at ~4× the CPU count: enough parallelism to keep all workers busy,
+/// short enough that a fresh edit's requests reach the pool within a
+/// frame or two.
+fn max_in_flight() -> usize {
+    rayon::current_num_threads().saturating_mul(4).max(8)
+}
+
 pub struct World {
     generator: Arc<Generator>,
     cache: ChunkCache,
@@ -33,6 +45,7 @@ pub struct World {
     tx: Sender<ChunkJobResult>,
     rx: Receiver<ChunkJobResult>,
     in_flight: HashSet<ChunkCoord>,
+    max_in_flight: usize,
 }
 
 impl World {
@@ -53,6 +66,7 @@ impl World {
             tx,
             rx,
             in_flight: HashSet::new(),
+            max_in_flight: max_in_flight(),
         }
     }
 
@@ -63,8 +77,18 @@ impl World {
     /// Spawn fill+mesh jobs for any coord in `coords` that is neither
     /// already cached nor currently in flight. Order matters: callers
     /// pass coords already sorted closest-first.
+    ///
+    /// Caps the number of jobs in flight at `max_in_flight`. Coords
+    /// past the cap are skipped this frame; the next call retries
+    /// them once the pool has drained. Without this cap, every frame
+    /// can pile on hundreds of new fills before earlier ones finish,
+    /// starving any subsequent edit-time refill behind a long
+    /// stale-config backlog.
     pub fn request_chunks(&mut self, coords: &[ChunkCoord]) {
         for &coord in coords {
+            if self.in_flight.len() >= self.max_in_flight {
+                break;
+            }
             if self.cache.has_mesh(coord) || self.in_flight.contains(&coord) {
                 continue;
             }
@@ -105,7 +129,14 @@ impl World {
         while let Ok(r) = self.rx.try_recv() {
             match r {
                 ChunkJobResult::Filled { coord, chunk, mesh } => {
-                    self.in_flight.remove(&coord);
+                    // Drop stale completions: a job in flight at the time
+                    // of a `wipe()` is no longer in `in_flight`, so its
+                    // result references the old config and shouldn't
+                    // reach the cache or the GPU. Without this gate,
+                    // post-wipe frames briefly display stale-config geometry.
+                    if !self.in_flight.remove(&coord) {
+                        continue;
+                    }
                     self.cache.put_chunk(coord, chunk);
                     self.cache.put_mesh(
                         coord,
@@ -131,15 +162,25 @@ impl World {
         &mut self.cache
     }
 
-    /// Wipe both the chunk cache and the in-flight set. Used by the
-    /// `Invalidator` when the active `WorldgenConfig` changes. Without
-    /// the `in_flight` clear, jobs spawned before the wipe complete and
-    /// `drain_results` uploads stale geometry for 1-2 frames; the
-    /// `request_around` call after the wipe respawns them against the
-    /// new config.
+    /// Wipe both the chunk cache and the in-flight set, and drain any
+    /// pre-wipe completions still sitting in the channel. Used by the
+    /// `Invalidator` when the active `WorldgenConfig` changes.
+    ///
+    /// The channel drain matters because rayon spawn() can't be
+    /// cancelled — workers still process pre-wipe jobs to completion
+    /// and send their (stale-config) results. Without the drain,
+    /// the next `drain_results` call would upload those stale meshes
+    /// to the GPU before the fresh config's chunks reach the pool.
+    ///
+    /// Workers currently mid-fill still run to completion (we can't
+    /// stop them); their results land in the channel and the next
+    /// `drain_results` discards them by virtue of `in_flight` no
+    /// longer containing the coord. With `max_in_flight` capped at
+    /// ~4× CPU, that backlog is at most ~32 jobs deep, not thousands.
     pub fn wipe(&mut self) {
         self.cache.clear();
         self.in_flight.clear();
+        while self.rx.try_recv().is_ok() {}
     }
 
     /// Convenience: request chunks within radius of camera position.
