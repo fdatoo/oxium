@@ -189,4 +189,36 @@ mod tests {
         }
         panic!("no stage varied across (0,0) vs (1000,1000) — dispatch broken");
     }
+
+    #[test]
+    fn density_breakdown_is_deterministic() {
+        let g = Generator::new(42);
+        let a = g.evaluate_density_breakdown(0, 70, 0);
+        let b = g.evaluate_density_breakdown(0, 70, 0);
+        assert_eq!(a.final_density.to_bits(), b.final_density.to_bits());
+        assert_eq!(a.block, b.block);
+    }
+
+    #[test]
+    fn density_high_y_is_air_or_water() {
+        // y=200 is well above any reasonable surface — should be air or water.
+        let g = Generator::new(42);
+        let b = g.evaluate_density_breakdown(0, 200, 0);
+        assert!(matches!(
+            b.block,
+            crate::voxel::block::Block::Air | crate::voxel::block::Block::Water
+        ), "got {:?}", b.block);
+    }
+
+    #[test]
+    fn density_low_y_is_solid() {
+        // y=-100 (deep underground) should almost always be solid.
+        let g = Generator::new(42);
+        let b = g.evaluate_density_breakdown(0, -100, 0);
+        assert!(b.final_density > 0.0, "expected positive density deep underground, got {}", b.final_density);
+        assert!(!matches!(
+            b.block,
+            crate::voxel::block::Block::Air
+        ), "expected solid block deep underground, got {:?}", b.block);
+    }
 }
