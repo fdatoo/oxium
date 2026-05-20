@@ -385,7 +385,7 @@ Seven PRs, each independently shippable. Each PR rebases on top of the worktree 
 
 | PR | Title | Scope |
 |---|---|---|
-| **1** | viz: streaming skeleton | New binary; fly cam; LRU chunk cache; reuse mesher; block paint mode only; dashboard layout with placeholder panels. **Replaces old binary.** |
+| **1** ✅ | viz: streaming skeleton | New binary; fly cam; LRU chunk cache; reuse mesher; block paint mode only; dashboard layout with placeholder panels. **Replaces old binary.** Landed at branch `worktree-worldgen-viz-redesign`. |
 | **2** | viz: pipeline overlays + column probe | 2D map panel with all stages; click-to-probe; probe panel with full field list; worldgen API additions land here. |
 | **3** | viz: cross-sections + extra paint modes | Cut plane (XZ/XY/YZ); biome / height-Δ / density / cave-distance / plate / slope paint modes. |
 | **4** | viz: A/B compare + preset library | Dual-session compare; preset directory + notes; toolbar Compare button. |
