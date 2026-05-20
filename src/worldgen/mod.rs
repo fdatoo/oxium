@@ -452,6 +452,8 @@ impl Generator {
         let weirdness = (self.weirdness_noise.get(xz) as f32) * cfg.biomes.weirdness_amplitude;
 
         // Flow accumulation: look up the fine region and read the cell.
+        // Granularity is FINE_CELL blocks (not per-column); adjacent columns
+        // inside the same cell share a flow_accum value.
         let fine_region = region::get_fine(&self.fine_cache, coord, || {
             self.build_fine_region(coord)
         });
@@ -466,13 +468,11 @@ impl Generator {
             fine_region.flow_acc[idx]
         };
 
-        // Aquifer: the nearest cell at sea-level for this column.
+        // Aquifer: the nearest cell at sea-level for this column. The
+        // cell's `fluid` is always `Block::Water` or `Block::Lava` —
+        // the per-voxel `Substance::Density|Block(_)` resolution is
+        // unrelated and only matters during chunk fill.
         let acell = self.aquifer.cell_for_column(wx, wz);
-        // Substance: query the aquifer at a representative underground Y
-        // (sea-level minus 10) as if there were a cavity there.
-        let aquifer_substance = self
-            .aquifer
-            .substance(wx, crate::worldgen::tuning::SEA_LEVEL - 10, wz, -1.0);
 
         // Cave systems intersecting this column's XZ coords across the
         // 3×3 region neighbourhood.
@@ -512,7 +512,7 @@ impl Generator {
             flow_accum,
             lake_rim: col.lake_rim,
             aquifer_y_top: acell.y_top,
-            aquifer_substance,
+            aquifer_fluid: acell.fluid,
             cave_systems_count,
         }
     }

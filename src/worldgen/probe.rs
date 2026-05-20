@@ -7,7 +7,6 @@
 //! "sliding y" section.
 
 use crate::voxel::block::Block;
-use crate::worldgen::aquifer;
 use crate::worldgen::plates::PlateLookup;
 use crate::worldgen::Biome;
 
@@ -35,7 +34,10 @@ pub struct ColumnProbe {
     pub lake_rim: Option<i32>,
     // Aquifer
     pub aquifer_y_top: i32,
-    pub aquifer_substance: aquifer::Substance,
+    /// The fluid the aquifer cell holds (always `Block::Water` or
+    /// `Block::Lava`). Distinct from `aquifer::Substance`, which is
+    /// the per-voxel resolution result; this is the per-cell choice.
+    pub aquifer_fluid: Block,
     // Cave systems whose bbox intersects this column's region
     pub cave_systems_count: usize,
 }

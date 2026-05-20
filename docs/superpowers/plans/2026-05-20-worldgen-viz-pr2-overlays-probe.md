@@ -90,7 +90,7 @@ pub struct ColumnProbe {
     pub lake_rim: Option<i32>,
     // Aquifer
     pub aquifer_y_top: i32,
-    pub aquifer_substance: aquifer::Substance,
+    pub aquifer_fluid: Block,  // Water or Lava — see ColumnProbe doc
     // Cave systems intersecting this column's chunk
     pub cave_systems_count: usize,
 }
@@ -181,7 +181,7 @@ pub struct ColumnProbe {
     pub lake_rim: Option<i32>,
     // Aquifer
     pub aquifer_y_top: i32,
-    pub aquifer_substance: aquifer::Substance,
+    pub aquifer_fluid: Block,  // Water or Lava — see ColumnProbe doc
     // Cave systems whose bbox intersects this column's region
     pub cave_systems_count: usize,
 }
@@ -368,7 +368,7 @@ pub fn probe_column(&self, wx: i32, wz: i32) -> probe::ColumnProbe {
         flow_accum,
         lake_rim: col.lake_rim,
         aquifer_y_top: acell.y_top,
-        aquifer_substance: acell.substance,
+        aquifer_fluid: acell.fluid,
         cave_systems_count: cave_systems.len(),
     }
 }
@@ -1297,7 +1297,7 @@ pub fn show(ui: &mut Ui, snapshot: &ColumnProbe, breakdown: Option<&DensityBreak
 
     ui.collapsing("Aquifer", |ui| {
         kv(ui, "y_top", snapshot.aquifer_y_top.to_string());
-        kv(ui, "substance", match snapshot.aquifer_substance {
+        kv(ui, "substance", match snapshot.aquifer_fluid {
             Substance::Water => "Water".to_string(),
             Substance::Lava => "Lava".to_string(),
         });
