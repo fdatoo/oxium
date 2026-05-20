@@ -373,8 +373,20 @@ impl DensityNoise {
 /// Apply top and bottom slides at world Y. Within `slide_top_blocks`
 /// of `y_max`, lerps density toward `slide_top_target` (negative →
 /// pull to air). Within `slide_bottom_blocks` of `y_min`, lerps
-/// toward `slide_bottom_target` (positive → pull to solid).
+/// toward `slide_bottom_target` (positive → pull to solid). Below
+/// `y_min` (the world's designed range), returns a hard-positive
+/// floor that no cave carver or aquifer can override — the void
+/// stays solid.
 pub fn slide(density: f32, wy: i32, cfg: &DensityConfig) -> f32 {
+    // Hard void floor. Without this, a player who falls below
+    // `y_min` lands inside the aquifer's per-cell water table at
+    // extreme depth (slide_bottom_target ≈ 0.12 is smaller than
+    // aquifer pressure ≈ 1, so the aquifer wins every voxel and
+    // the entire deep void becomes water). 100 is well above any
+    // single carver / aquifer contribution we ever produce.
+    if wy < cfg.y_min {
+        return 100.0;
+    }
     let top_start = cfg.y_max - cfg.slide_top_blocks;
     let top_f = ((wy - top_start) as f32 / cfg.slide_top_blocks.max(1) as f32).clamp(0.0, 1.0);
     let after_top = density + (cfg.slide_top_target - density) * top_f;

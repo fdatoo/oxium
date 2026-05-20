@@ -197,26 +197,50 @@ impl AquiferSystem {
         let center_y = cy * AQUIFER_CELL_Y + CELL_CENTER_MARGIN + jy as i32;
         let center_z = cz * AQUIFER_CELL_Z + CELL_CENTER_MARGIN + jz as i32;
 
-        // y_top: nominal band depends on the cell's center Y.
-        //   * Above sea level: dry (sentinel — y_top << center, so
-        //     all points read as "above"). This prevents above-sea
-        //     "sky aquifers".
-        //   * Near/under sea level: water aquifer at ~sea_level
-        //     − jitter (most caves near the surface get a stable
-        //     water table just below the ocean floor).
-        //   * Deeper: water table drifts down with depth; deep
-        //     cells may roll as lava.
-        let band_nominal = if center_y >= self.cfg.sea_level {
-            // Sentinel — well below any wy we'd ever query at that
-            // altitude.
-            i32::MIN / 2
+        // DRY-CELL GATE: only a fraction of cells have an aquifer at
+        // all. The rest are sentinel-dry — their `y_top` is so far
+        // below any reasonable query that no voxel reads as "in
+        // fluid". This makes aquifers a *feature* (occasional flooded
+        // caves, lava pools) rather than a default state (every cave
+        // is full of water).
+        //
+        // `dry_roll`: per-cell uniform [0, 1).
+        // The kept fraction depends on depth — shallow aquifers are
+        // rare because they would conflict with the surface lake /
+        // ocean flood; deep aquifers are slightly more common.
+        let dry_roll = hash::mix_unit(self.seed, &[cx, cy, cz, 5]);
+        let keep_chance = if center_y >= self.cfg.sea_level {
+            0.0 // never above sea level
         } else if center_y >= LAVA_BAND_TOP_Y {
-            self.cfg.sea_level - 6
+            0.15 // shallow band: rare wet pockets
         } else {
-            // Deep band: water table drifts toward the cell's own
-            // top, so deep pockets are shallow puddles, not column-
-            // filling lakes.
-            (center_y + AQUIFER_CELL_Y / 2).min(self.cfg.sea_level - 16)
+            0.30 // deep band: lava + water pockets a bit more common
+        };
+        if dry_roll >= keep_chance {
+            return AquiferCell {
+                cx,
+                cy,
+                cz,
+                center_x,
+                center_y,
+                center_z,
+                y_top: i32::MIN / 2,
+                fluid: Block::Water,
+            };
+        }
+
+        // y_top: nominal band depends on the cell's center Y.
+        //   * Near/under sea level: water aquifer well BELOW the cell
+        //     (only the bottom few voxels of a cave there see water).
+        //   * Deeper: water table near the cell's bottom so each
+        //     pocket is a shallow puddle, not a column-filler.
+        let band_nominal = if center_y >= LAVA_BAND_TOP_Y {
+            // Shallow band: y_top a couple of blocks below the cell
+            // center — only the lower portion of a cave catches it.
+            center_y - 2
+        } else {
+            // Deep band: y_top near the cell's bottom.
+            cy * AQUIFER_CELL_Y + AQUIFER_CELL_Y / 4
         };
         let jitter_unit = hash::mix_unit(self.seed, &[cx, cy, cz, 3]);
         let jitter = ((jitter_unit - 0.5) * 2.0 * self.cfg.y_top_jitter as f32) as i32;
@@ -515,13 +539,26 @@ mod tests {
 
     #[test]
     fn substance_below_table_in_cave_becomes_fluid() {
+        // With sparse aquifers (most cells are dry), we have to
+        // scan to find a wet cell whose y_top is above a candidate
+        // cave voxel, then verify that voxel floods.
         let s = sys();
-        // Carve a "cave" (density=-5) at a depth where the water
-        // table sits — this should flood as water.
-        let r = s.substance(0, 30, 0, -5.0);
-        match r {
-            Substance::Block(Block::Water) | Substance::Block(Block::Lava) => {}
-            other => panic!("expected fluid, got {other:?}"),
+        let mut found_fluid = false;
+        'outer: for cx in 0..32 {
+            for cz in 0..32 {
+                // Probe each deep cell; pick a wy 2 below its y_top.
+                let cell = s.cell_at(cx, -5, cz);
+                if cell.y_top < -1_000_000 {
+                    continue; // sentinel-dry cell
+                }
+                let wy = cell.y_top - 1;
+                let r = s.substance(cell.center_x, wy, cell.center_z, -5.0);
+                if matches!(r, Substance::Block(Block::Water) | Substance::Block(Block::Lava)) {
+                    found_fluid = true;
+                    break 'outer;
+                }
+            }
         }
+        assert!(found_fluid, "no fluid found in any of 1024 deep aquifer cells");
     }
 }

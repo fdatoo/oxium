@@ -203,12 +203,17 @@ impl AppState {
         // original frame.
         let manifest = crate::persistence::manifest::load_or_init(&saves_dir)
             .expect("failed to load or initialise world manifest");
+        // TEMP for worldgen testing: force a known seed so every
+        // launch shows the same terrain. Drop this override when the
+        // generator is locked in and we want fresh worlds again.
+        const TEST_SEED_OVERRIDE: Option<u64> = Some(42);
+        let seed = TEST_SEED_OVERRIDE.unwrap_or(manifest.seed);
         log::info!(
-            "world manifest loaded: seed={} version={}",
+            "world manifest loaded: seed={} (manifest seed={}, version={})",
+            seed,
             manifest.seed,
-            manifest.worldgen_version
+            manifest.worldgen_version,
         );
-        let seed = manifest.seed;
 
         let present_mode = if uncapped {
             wgpu::PresentMode::Immediate
