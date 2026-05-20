@@ -183,8 +183,13 @@ pub struct Renderer {
     /// the same chunk vertex buffers — the shader filters out
     /// non-water fragments at the top of `fs_main`.
     water_pipe: WaterPipeline,
-    /// Sky-gradient pipeline, drawn before opaque each frame.
+    /// Sky-gradient pipeline, drawn before opaque each frame. Targets
+    /// the HDR MSAA color view.
     sky_pipe: SkyPipeline,
+    /// Reflection-pass sky pipeline. Same shader; built against the
+    /// surface (swapchain) format because the reflection texture is
+    /// LDR — sampled by the water shader as ordinary color.
+    sky_pipe_reflection: SkyPipeline,
     /// Composite pipeline: resolves the HDR target to the swapchain.
     /// Currently passthrough; Tasks 5/6 add tonemap + underwater tint.
     composite_pipe: CompositePipeline,
@@ -255,11 +260,15 @@ impl Renderer {
             gpu.surface_cfg.width,
             gpu.surface_cfg.height,
         );
+        // World pass MSAA color attachment is HDR-format so the
+        // resolved output goes into the HdrTarget; the composite pass
+        // then reads HDR and writes the swapchain. Reflection pass keeps
+        // its own surface-format MSAA so water samples LDR reflections.
         let msaa_color_view = make_msaa_color_texture(
             &gpu.device,
             gpu.surface_cfg.width,
             gpu.surface_cfg.height,
-            gpu.surface_cfg.format,
+            hdr::HDR_FORMAT,
         );
         // Reflection-pass colour + depth attachments.
         let (reflection_msaa_view, reflection_resolve_texture, reflection_resolve_view) =
@@ -319,9 +328,14 @@ impl Renderer {
             .expect("build_atlas only errors on internal bugs, not missing files");
         let atlas = upload_atlas(&gpu.device, &gpu.queue, &atlas_image);
 
+        // World-pass pipelines target the HDR offscreen view; the
+        // reflection pipelines stay at the swapchain (surface) format
+        // so the water shader continues to sample its reflection as
+        // LDR colour. This split is the same shape as opaque_pipe vs
+        // opaque_pipe_reflection.
         let opaque_pipe = build_opaque(
             &gpu.device,
-            gpu.surface_cfg.format,
+            hdr::HDR_FORMAT,
             &camera_bgl,
             &chunk_bgl,
             &atlas.bind_group_layout,
@@ -337,12 +351,13 @@ impl Renderer {
         );
         let water_pipe = build_water(
             &gpu.device,
-            gpu.surface_cfg.format,
+            hdr::HDR_FORMAT,
             &camera_bgl,
             &chunk_bgl,
             &atlas.bind_group_layout,
         );
-        let sky_pipe = build_sky(&gpu.device, gpu.surface_cfg.format, &camera_bgl);
+        let sky_pipe = build_sky(&gpu.device, hdr::HDR_FORMAT, &camera_bgl);
+        let sky_pipe_reflection = build_sky(&gpu.device, gpu.surface_cfg.format, &camera_bgl);
         let composite_pipe = build_composite(&gpu.device, gpu.surface_cfg.format);
 
         // HUD: build the pipeline + upload the font atlas. The font
@@ -457,9 +472,11 @@ impl Renderer {
                 resource: cursor_buf.as_entire_binding(),
             }],
         });
+        // Cursor is drawn into the world's HDR MSAA view (inside the
+        // water pass) so it shares the HDR format.
         let cursor_pipe = build_cursor(
             &gpu.device,
-            gpu.surface_cfg.format,
+            hdr::HDR_FORMAT,
             &camera_bgl,
             &cursor_bgl,
         );
@@ -514,6 +531,7 @@ impl Renderer {
             opaque_pipe_reflection,
             water_pipe,
             sky_pipe,
+            sky_pipe_reflection,
             composite_pipe,
             cursor_pipe,
             cursor_buf,
@@ -615,7 +633,7 @@ impl Renderer {
         self.reflection_resolve_view = refl_resolve_view;
         self.reflection_depth_view = refl_depth;
         self.msaa_color_view =
-            make_msaa_color_texture(&self.gpu.device, w, h, self.gpu.surface_cfg.format);
+            make_msaa_color_texture(&self.gpu.device, w, h, hdr::HDR_FORMAT);
         // HUD lays out in pixel space so the screen-size uniform also
         // needs the new dimensions; otherwise the HUD shrinks/expands
         // to fill the old framebuffer rect.
@@ -843,8 +861,18 @@ impl Renderer {
         // chunks are tested for whether their unmirrored geometry
         // would be visible in the reflection's projection.
         self.encode_reflection_pass(&mut enc, eye, &refl_frustum);
-        // Main world pass (sky + opaque + water + cursor).
-        self.encode_opaque_pass(&mut enc, &self.msaa_color_view, &view, eye, &frustum);
+        // Main world pass (sky + opaque + water + cursor) into the
+        // HDR offscreen target.
+        self.encode_opaque_pass(
+            &mut enc,
+            &self.msaa_color_view,
+            &self.hdr.view,
+            eye,
+            &frustum,
+        );
+        // Composite: read HDR, write to the swapchain. Passthrough
+        // today; Tasks 5/6 add tonemap + underwater tint.
+        self.encode_composite_pass(&mut enc, &view);
         // HUD: uploaded once per frame into fresh vertex/index
         // buffers (the HUD layout changes every frame as FPS ticks).
         if let Some(hud) = hud {
@@ -853,6 +881,52 @@ impl Renderer {
         self.gpu.queue.submit(std::iter::once(enc.finish()));
         frame.present();
         Ok(())
+    }
+
+    /// Encode the composite pass: sample the HDR target, write to the
+    /// swapchain (or screenshot target). Today this is a passthrough;
+    /// Tasks 5/6 fold in ACES tonemap and underwater tint. The bind
+    /// group is created per-frame because the HDR view is recreated on
+    /// resize — caching it would dangle.
+    fn encode_composite_pass(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+    ) {
+        let bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("composite-bg"),
+            layout: &self.composite_pipe.bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.hdr.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.composite_pipe.sampler),
+                },
+            ],
+        });
+        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("composite-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    // Composite covers every pixel via the fullscreen
+                    // triangle, so the clear colour is a defensive
+                    // fallback only.
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&self.composite_pipe.pipeline);
+        pass.set_bind_group(0, &bg, &[]);
+        pass.draw(0..3, 0..1);
     }
 
     /// Encode the HUD pass: alpha-blended 2D overlay, two draws (font
@@ -989,7 +1063,11 @@ impl Renderer {
         // what was originally above the water. The sun position is
         // also mirrored in the camera uniform so the reflected sun
         // appears at the geometrically correct spot.
-        pass.set_pipeline(&self.sky_pipe.pipeline);
+        //
+        // Uses `sky_pipe_reflection` (surface format) — the reflection
+        // texture is LDR because the water shader samples it as plain
+        // colour, not HDR linear.
+        pass.set_pipeline(&self.sky_pipe_reflection.pipeline);
         pass.set_bind_group(0, &self.reflection_camera_bg, &[]);
         pass.draw(0..3, 0..1);
 
@@ -1288,10 +1366,17 @@ impl Renderer {
         // Screenshot targets are sized to match the surface
         // (`capture_offscreen` in `main.rs` clones the
         // `surface_cfg`), so the renderer's existing MSAA colour
-        // view is the right shape to resolve into the screenshot
-        // texture. Future callers that pass an off-size target
-        // would need to allocate their own MSAA intermediate.
-        self.encode_opaque_pass(&mut enc, &self.msaa_color_view, target, eye, &frustum);
+        // view is the right shape to resolve into HdrTarget.
+        // Future callers that pass an off-size target would need to
+        // allocate their own MSAA + HDR intermediates.
+        self.encode_opaque_pass(
+            &mut enc,
+            &self.msaa_color_view,
+            &self.hdr.view,
+            eye,
+            &frustum,
+        );
+        self.encode_composite_pass(&mut enc, target);
         if let Some(hud) = hud {
             self.encode_hud_pass(&mut enc, target, hud);
         }
