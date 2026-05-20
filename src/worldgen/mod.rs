@@ -78,6 +78,7 @@ pub mod heightmap;
 pub mod hydrology;
 pub mod noise_channel;
 pub mod plates;
+pub mod probe;
 pub mod region;
 pub mod spline;
 pub mod surface;
