@@ -733,9 +733,11 @@ impl Generator {
             cave_sdf_val = cave_sdf_val.max(CAVE_SDF_INTENSITY);
         }
 
-        // Noise carvers (cheese + spaghetti) — same gate.
+        // Noise carvers (cheese + spaghetti) — same gate. `cheese_contribution`
+        // also takes `raw_density` now (gates a density-aware cap that landed
+        // on main after our viz redesign started).
         let cheese = if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
-            caves::cheese_contribution(wx, wy, wz, &self.noise_carvers, &cfg.cave)
+            caves::cheese_contribution(wx, wy, wz, raw_density, &self.noise_carvers, &cfg.cave)
         } else {
             0.0
         };
@@ -818,7 +820,10 @@ impl Generator {
                 }
                 if scan_approx_depth > CAVE_SURFACE_BUFFER && scan_y > CAVE_FLOOR_Y {
                     scan_cave = scan_cave.max(
-                        caves::cheese_contribution(wx, scan_y, wz, &self.noise_carvers, &cfg.cave),
+                        caves::cheese_contribution(
+                            wx, scan_y, wz, scan_density,
+                            &self.noise_carvers, &cfg.cave,
+                        ),
                     );
                     scan_cave = scan_cave.max(
                         caves::spaghetti_contribution(wx, scan_y, wz, &self.noise_carvers, &cfg.cave),
