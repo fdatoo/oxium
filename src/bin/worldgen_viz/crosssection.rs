@@ -3,8 +3,10 @@
 //! follow). 64×64 px so each render is ~4k generator samples — slow
 //! enough to debounce on edits but fast enough to feel interactive.
 
-use egui::{ColorImage, TextureHandle, TextureOptions, Ui};
+use crossbeam_channel::{unbounded, Receiver, Sender};
+use egui::{Color32, ColorImage, TextureHandle, TextureOptions, Ui};
 use oxium::worldgen::Generator;
+use std::sync::Arc;
 
 const PLOT_BLOCKS_PER_PIXEL_INITIAL: f32 = 1.0;
 /// Horizontal slice (XZ) is square — both axes are XZ-plane axes,
@@ -88,11 +90,20 @@ pub struct CrossSection {
     /// the cross-section's centre + slice to that column so the
     /// freshly-pinned target lands in the middle of the slice.
     last_seen_pin: Option<(i32, i32, i32)>,
+    /// Texture currently being displayed; stays mounted while a new
+    /// render is in flight so the UI never blanks out.
     texture: Option<TextureHandle>,
-    last_key: Option<RenderKey>,
+    /// Key the displayed texture was rendered for. None on first frame.
+    displayed_key: Option<RenderKey>,
+    /// Key of the render in flight, if any. Used to dedup spawns and
+    /// to discard stale results when the user changes a control mid-render.
+    pending_key: Option<RenderKey>,
+    /// Channel back from the rayon sampling task.
+    tx: Sender<RenderResult>,
+    rx: Receiver<RenderResult>,
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct RenderKey {
     orientation: Orientation,
     layer: Layer,
@@ -103,8 +114,18 @@ struct RenderKey {
     config_revision: u64,
 }
 
+/// One async sampling result: the pixel buffer + the key it was
+/// rendered for (so stale results can be dropped on receipt).
+struct RenderResult {
+    key: RenderKey,
+    width: usize,
+    height: usize,
+    pixels: Vec<Color32>,
+}
+
 impl CrossSection {
     pub fn new() -> Self {
+        let (tx, rx) = unbounded();
         Self {
             orientation: Orientation::Xy,
             layer: Layer::Density,
@@ -114,7 +135,10 @@ impl CrossSection {
             blocks_per_pixel: PLOT_BLOCKS_PER_PIXEL_INITIAL,
             last_seen_pin: None,
             texture: None,
-            last_key: None,
+            displayed_key: None,
+            pending_key: None,
+            tx,
+            rx,
         }
     }
 
@@ -158,8 +182,8 @@ impl CrossSection {
         (wx.round() as i32, wy.round() as i32, wz.round() as i32)
     }
 
-    fn regenerate(&mut self, generator: &Generator, ctx: &egui::Context, revision: u64) {
-        let key = RenderKey {
+    fn current_key(&self, revision: u64) -> RenderKey {
+        RenderKey {
             orientation: self.orientation,
             layer: self.layer,
             slice_axis: self.slice_axis,
@@ -167,28 +191,64 @@ impl CrossSection {
             center_b: self.center_b as i32,
             blocks_per_pixel: (self.blocks_per_pixel * 100.0) as i32,
             config_revision: revision,
-        };
-        if self.last_key.as_ref() == Some(&key) && self.texture.is_some() {
-            return;
         }
-        let (w, h) = self.orientation.dimensions();
-        let mut pixels = vec![egui::Color32::TRANSPARENT; w * h];
-        for py in 0..h {
-            for px in 0..w {
-                let (wx, wy, wz) = self.pixel_to_world(px as f32, py as f32);
-                let rgba = sample_pixel(generator, self.layer, wx, wy, wz);
-                pixels[py * w + px] = egui::Color32::from_rgba_premultiplied(
-                    rgba[0], rgba[1], rgba[2], rgba[3],
-                );
+    }
+
+    /// Drain any results that landed on the channel. Stale results
+    /// (whose key no longer matches the desired key) are discarded.
+    fn drain_results(&mut self, ctx: &egui::Context, desired: &RenderKey) {
+        while let Ok(result) = self.rx.try_recv() {
+            if result.key != *desired {
+                // Stale — user has moved on; drop.
+                continue;
             }
+            let img = ColorImage {
+                size: [result.width, result.height],
+                pixels: result.pixels,
+            };
+            self.texture = Some(ctx.load_texture("viz_crosssection", img, TextureOptions::NEAREST));
+            self.displayed_key = Some(result.key);
+            self.pending_key = None;
         }
-        let img = ColorImage {
-            size: [w, h],
-            pixels,
-        };
-        let tex = ctx.load_texture("viz_crosssection", img, TextureOptions::NEAREST);
-        self.texture = Some(tex);
-        self.last_key = Some(key);
+    }
+
+    /// Spawn a sampling task on the global rayon pool. Captures a
+    /// snapshot of the centre / orientation / layer / etc. so the
+    /// worker doesn't need any further state from us.
+    fn spawn_render(&mut self, generator: Arc<Generator>, key: RenderKey) {
+        self.pending_key = Some(key.clone());
+        let (w, h) = self.orientation.dimensions();
+        let center_a = self.center_a;
+        let center_b = self.center_b;
+        let bpp = self.blocks_per_pixel;
+        let orientation = self.orientation;
+        let layer = self.layer;
+        let slice_axis = self.slice_axis;
+        let tx = self.tx.clone();
+        rayon::spawn(move || {
+            let mut pixels = vec![Color32::TRANSPARENT; w * h];
+            for py in 0..h {
+                for px in 0..w {
+                    let a = center_a + (px as f32 - w as f32 * 0.5) * bpp;
+                    let b = center_b - (py as f32 - h as f32 * 0.5) * bpp;
+                    let (wx, wy, wz) = match orientation {
+                        Orientation::Xz => (a, slice_axis as f32, b),
+                        Orientation::Xy => (a, b, slice_axis as f32),
+                        Orientation::Yz => (slice_axis as f32, b, a),
+                    };
+                    let rgba = sample_pixel(
+                        &generator,
+                        layer,
+                        wx.round() as i32,
+                        wy.round() as i32,
+                        wz.round() as i32,
+                    );
+                    pixels[py * w + px] =
+                        Color32::from_rgba_premultiplied(rgba[0], rgba[1], rgba[2], rgba[3]);
+                }
+            }
+            let _ = tx.send(RenderResult { key, width: w, height: h, pixels });
+        });
     }
 
     /// Render UI; returns true if any control mutated. `pin` is the
@@ -199,7 +259,7 @@ impl CrossSection {
     pub fn show(
         &mut self,
         ui: &mut Ui,
-        generator: &Generator,
+        generator: &Arc<Generator>,
         revision: u64,
         pin: Option<(i32, i32, i32)>,
     ) -> bool {
@@ -272,7 +332,26 @@ impl CrossSection {
             .on_hover_text("Zoom. Smaller = more detail per pixel; larger = wider area.")
             .changed();
 
-        self.regenerate(generator, ui.ctx(), revision);
+        // Async render pipeline. Compute the key the *current* UI
+        // state wants; drain anything that just finished; if there's
+        // nothing in flight that matches the desired key, spawn one
+        // on the rayon pool. The old texture stays mounted so the
+        // panel never blanks while a render is in progress.
+        let desired = self.current_key(revision);
+        self.drain_results(ui.ctx(), &desired);
+        let needs_render = self.displayed_key.as_ref() != Some(&desired)
+            && self.pending_key.as_ref() != Some(&desired);
+        if needs_render {
+            self.spawn_render(generator.clone(), desired.clone());
+            // Request a repaint a few hundred ms out so the channel
+            // gets drained even if the user stops poking the UI.
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
+        }
+        // While a render is in flight, keep poking the runtime so
+        // the eventual result drains promptly.
+        if self.pending_key.is_some() {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
+        }
         let (w_px, h_px) = self.orientation.dimensions();
         if let Some(tex) = self.texture.as_ref() {
             // Display at native panel width if it fits, else scale
@@ -283,6 +362,22 @@ impl CrossSection {
             let scale = (panel_w / w_px as f32).min(2.0);
             let size = egui::vec2(w_px as f32 * scale, h_px as f32 * scale);
             ui.image((tex.id(), size));
+        } else {
+            // First-render placeholder — empty rect so the panel
+            // doesn't reflow as soon as the texture arrives.
+            let panel_w = ui.available_width();
+            let scale = (panel_w / w_px as f32).min(2.0);
+            ui.allocate_exact_size(
+                egui::vec2(w_px as f32 * scale, h_px as f32 * scale),
+                egui::Sense::hover(),
+            );
+        }
+        if self.pending_key.is_some() {
+            ui.label(
+                egui::RichText::new("⏳ rendering…")
+                    .small()
+                    .color(egui::Color32::from_rgb(230, 180, 80)),
+            );
         }
         let centre_status = match pin {
             Some(_) => format!(
