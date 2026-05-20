@@ -241,6 +241,13 @@ impl AppState {
 
         let persistence = Persistence::spawn(saves_dir.clone());
 
+        // Surface the world seed in chat so the player can copy it
+        // out of the in-game log (alongside the `world manifest
+        // loaded: seed=…` line in stdout/log file).
+        let mut ui = crate::ui::Ui::new();
+        ui.log
+            .push_system(format!("World seed: {seed}"));
+
         Self {
             window,
             renderer,
@@ -271,7 +278,7 @@ impl AppState {
                 }
             }),
             frame_edit_count: 0,
-            ui: crate::ui::Ui::new(),
+            ui,
         }
     }
 

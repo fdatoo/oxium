@@ -22,6 +22,7 @@ mod ui;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -195,7 +196,16 @@ struct App {
     state: Option<AppState>,
     cli: CliOptions,
     frames_drawn: u32,
+    /// Frame pacing target: the instant at which the next redraw is
+    /// allowed to fire. Initialised on the first frame and advanced
+    /// by [`Self::frame_budget`] each frame. Ignored when
+    /// `cli.uncapped` is set.
+    next_frame_target: Option<Instant>,
 }
+
+/// Target frame budget when the FPS cap is on. 60 FPS = 16.666… ms
+/// per frame; we use exact integer nanos for monotonic advancement.
+const FRAME_BUDGET_60_FPS: Duration = Duration::from_nanos(16_666_667);
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -385,7 +395,30 @@ impl ApplicationHandler for App {
                     return;
                 }
 
-                state.window.request_redraw();
+                // Frame pacing: cap at 60 FPS unless `--uncapped`.
+                // Fifo present mode (vsync) already caps to the
+                // monitor's refresh rate, but high-refresh
+                // (120Hz/ProMotion) displays would otherwise sail
+                // past 60. We compute a monotonic target instant
+                // and ask winit to wait until it (request_redraw
+                // queues the next redraw; WaitUntil delays delivery).
+                if self.cli.uncapped {
+                    state.window.request_redraw();
+                } else {
+                    let now = Instant::now();
+                    let next = self
+                        .next_frame_target
+                        .map(|t| t + FRAME_BUDGET_60_FPS)
+                        .unwrap_or(now + FRAME_BUDGET_60_FPS);
+                    // If we fell behind (e.g. GPU stall), drop the
+                    // missed frames and resync to now — otherwise the
+                    // game would run a burst of catch-up frames after
+                    // any hiccup.
+                    let next = next.max(now);
+                    self.next_frame_target = Some(next);
+                    event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+                    state.window.request_redraw();
+                }
             }
             _ => {}
         }
@@ -526,6 +559,7 @@ fn main() {
         state: None,
         cli,
         frames_drawn: 0,
+        next_frame_target: None,
     };
     event_loop.run_app(&mut app).unwrap();
 }
