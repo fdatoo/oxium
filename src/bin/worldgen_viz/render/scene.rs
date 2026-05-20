@@ -122,7 +122,16 @@ impl SceneRenderer {
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
+                // The viz mesher emits all face quads in CW order
+                // viewed from outside (each face's first-triangle
+                // cross product points INTO the cube). Mark CW as
+                // front-facing and cull back-faces: with cull_mode:
+                // None and both sides drawn, coplanar front+back of
+                // every face fight for the depth test on every
+                // pixel — a pronounced z-fighting that shows up
+                // especially with the cutaway peeled open.
+                front_face: wgpu::FrontFace::Cw,
+                cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
