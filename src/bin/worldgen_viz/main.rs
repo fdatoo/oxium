@@ -27,7 +27,15 @@ struct App {
     cross_texture: Option<egui::TextureHandle>,
     last_regen_ms: Option<f32>,
     auto_regen: bool,
+    /// When the dirty flag was last set (by a slider/preset edit
+    /// or the `R` button). The regen runs only after a debounce
+    /// window of `REGEN_DEBOUNCE` has elapsed since this time, so
+    /// dragging a slider through many values doesn't cause one
+    /// 600ms regen per pixel.
+    dirty_since: Option<std::time::Instant>,
 }
+
+const REGEN_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
 
 impl App {
     fn new() -> Self {
@@ -45,6 +53,7 @@ impl App {
             cross_texture: None,
             last_regen_ms: None,
             auto_regen: true,
+            dirty_since: None,
         }
     }
 }
@@ -144,6 +153,19 @@ impl ApplicationHandler for App {
                 let last_regen_ms = self.last_regen_ms;
                 let mut auto_regen_local = self.auto_regen;
                 let mut force_regen = false;
+                // Status indicator: where are we in the regen lifecycle?
+                let dirty_now = self.dirty;
+                let debounce_remaining_ms = self
+                    .dirty_since
+                    .map(|t| {
+                        let elapsed = t.elapsed();
+                        if elapsed >= REGEN_DEBOUNCE {
+                            0u128
+                        } else {
+                            (REGEN_DEBOUNCE - elapsed).as_millis()
+                        }
+                    })
+                    .unwrap_or(0);
                 let full_output = render.egui_ctx.clone().run(raw_input, |ctx| {
                     egui::SidePanel::left("config_panel")
                         .resizable(true)
@@ -176,6 +198,27 @@ impl ApplicationHandler for App {
                                 cam_info.0, cam_info.1, cam_info.2
                             ));
                             ui.separator();
+                            // State indicator: "idle" | "edit pending (Xms)" | "regenerating…"
+                            let (state_text, state_color) = if dirty_now {
+                                if debounce_remaining_ms > 0 {
+                                    (
+                                        format!("edit pending ({}ms)", debounce_remaining_ms),
+                                        egui::Color32::from_rgb(220, 180, 80),
+                                    )
+                                } else {
+                                    (
+                                        "regenerating…".to_string(),
+                                        egui::Color32::from_rgb(220, 100, 80),
+                                    )
+                                }
+                            } else {
+                                (
+                                    "idle".to_string(),
+                                    egui::Color32::from_rgb(120, 200, 120),
+                                )
+                            };
+                            ui.colored_label(state_color, state_text);
+                            ui.separator();
                             if let Some(ms) = last_regen_ms {
                                 ui.label(format!("last regen: {:.1} ms", ms));
                             }
@@ -204,15 +247,39 @@ impl ApplicationHandler for App {
                         .frame(egui::Frame::none())
                         .show(ctx, |_ui| {});
                 });
+                // Track edit time for debouncing. Any new dirty bit
+                // resets the debounce timer.
+                let was_dirty = self.dirty;
                 self.dirty = dirty_local || force_regen;
+                if self.dirty && !was_dirty {
+                    self.dirty_since = Some(std::time::Instant::now());
+                } else if self.dirty {
+                    // Slider still being dragged — reset debounce so
+                    // we don't regen until the user stops moving it.
+                    if dirty_local {
+                        self.dirty_since = Some(std::time::Instant::now());
+                    }
+                }
+                if force_regen {
+                    // Manual regen bypasses the debounce window.
+                    self.dirty_since = Some(
+                        std::time::Instant::now() - REGEN_DEBOUNCE,
+                    );
+                }
                 self.auto_regen = auto_regen_local;
                 render
                     .egui_state
                     .handle_platform_output(window, full_output.platform_output.clone());
 
                 // Regen mesh if config is dirty AND auto_regen is on
-                // (or the user just pressed [R] / clicked Regen).
-                if self.dirty && self.auto_regen {
+                // AND the debounce window has elapsed since the last
+                // edit. Debouncing keeps slider drags responsive —
+                // we don't kick off a 600ms regen per pixel of drag.
+                let debounce_ready = self
+                    .dirty_since
+                    .map(|t| t.elapsed() >= REGEN_DEBOUNCE)
+                    .unwrap_or(false);
+                if self.dirty && self.auto_regen && debounce_ready {
                     let t0 = std::time::Instant::now();
                     let (verts, idxs) =
                         worldgen_bridge::regen_region_mesh(42, &self.config);
@@ -228,6 +295,7 @@ impl ApplicationHandler for App {
                         idxs.len()
                     );
                     self.dirty = false;
+                    self.dirty_since = None;
                 }
 
                 let scene_ref = self.scene.as_ref().expect("scene");
