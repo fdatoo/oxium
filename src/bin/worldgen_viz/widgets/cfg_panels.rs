@@ -202,10 +202,155 @@ fn nested_spline_panel(
     crate::widgets::nested_spline::show(ui, spline, 0)
 }
 
-pub fn caves_panel(ui: &mut Ui, _cfg: &mut WorldgenConfig) -> bool {
+pub fn caves_panel(ui: &mut Ui, cfg: &mut WorldgenConfig) -> bool {
+    let mut dirty = false;
+    let cave = &mut cfg.cave;
     ui.heading("Caves");
-    ui.label("(Cave tuning — coming in PR 3)");
-    false
+    ui.label(
+        egui::RichText::new(
+            "Noise channels (first_octave + amplitudes) are baked into the Generator \
+             at startup — changing them needs a restart. Everything else here re-reads live.",
+        )
+        .small()
+        .weak(),
+    );
+
+    ui.collapsing("Cheese (blobby pockets)", |ui| {
+        dirty |= slider(
+            ui, &mut cave.cheese_xz_scale, 0.1..=4.0, "cheese_xz_scale",
+            "XZ stretch of the cheese FBM sample point. Larger → wider, smoother pockets; smaller → tighter, more chaotic.",
+        );
+        dirty |= slider(
+            ui, &mut cave.cheese_offset, -1.0..=1.0, "cheese_offset",
+            "Constant added to cheese noise. Positive biases toward solid (fewer caves); negative carves more aggressively.",
+        );
+        ui.label(egui::RichText::new("Surface suppression (raw_density-gated):").small().weak());
+        dirty |= slider(
+            ui, &mut cave.cheese_suppression_offset, -2.0..=2.0, "supp_offset",
+            "Suppression base term. Higher = stronger anti-cheese force at the surface.",
+        );
+        dirty |= slider(
+            ui, &mut cave.cheese_suppression_slope, -2.0..=2.0, "supp_slope",
+            "How quickly suppression decays as raw_density rises. Negative is normal (deeper = less suppression).",
+        );
+        dirty |= slider(
+            ui, &mut cave.cheese_suppression_min, -1.0..=1.0, "supp_min",
+            "Clamp minimum for the suppression term.",
+        );
+        dirty |= slider(
+            ui, &mut cave.cheese_suppression_max, -1.0..=2.0, "supp_max",
+            "Clamp maximum for the suppression term.",
+        );
+        ui.label(egui::RichText::new(format!(
+            "cheese channel: first_octave={} amplitudes={:?} (read-only)",
+            cave.cheese.first_octave, cave.cheese.amplitudes,
+        )).small().weak());
+    });
+
+    ui.collapsing("Spaghetti (worming tubes)", |ui| {
+        dirty |= slider(
+            ui, &mut cave.spaghetti_elevation_min, -32.0..=8.0, "elevation_min",
+            "Lower bound of the per-region elevation remap. Tube centerlines shift up/down by this much.",
+        );
+        dirty |= slider(
+            ui, &mut cave.spaghetti_elevation_max, -8.0..=32.0, "elevation_max",
+            "Upper bound of the per-region elevation remap.",
+        );
+        ui.label(egui::RichText::new("Y-clamped gradient (suppresses tubes outside band):").small().weak());
+        dirty |= slider(
+            ui, &mut cave.spaghetti_gradient_from_y, -128..=200, "from_y",
+            "Y at which the gradient takes the `from_value` (top of the spaghetti band).",
+        );
+        dirty |= slider(
+            ui, &mut cave.spaghetti_gradient_from_value, -8.0..=16.0, "from_value",
+            "Suppression value at from_y. Larger positive = no tubes at this depth.",
+        );
+        dirty |= slider(
+            ui, &mut cave.spaghetti_gradient_to_y, -200..=128, "to_y",
+            "Y at which the gradient takes the `to_value` (bottom of the spaghetti band).",
+        );
+        dirty |= slider(
+            ui, &mut cave.spaghetti_gradient_to_value, -16.0..=8.0, "to_value",
+            "Suppression value at to_y. Negative = tubes carve freely.",
+        );
+        ui.label(egui::RichText::new("Thickness remap:").small().weak());
+        dirty |= slider(
+            ui, &mut cave.spaghetti_thickness_offset, -2.0..=2.0, "thickness_offset",
+            "Base offset for the thickness term. More negative = thicker tube interiors.",
+        );
+        dirty |= slider(
+            ui, &mut cave.spaghetti_thickness_slope, -2.0..=2.0, "thickness_slope",
+            "How thickness reacts to the modulator noise (region-to-region variation).",
+        );
+        ui.label(egui::RichText::new("Output clamp + region modulator:").small().weak());
+        dirty |= slider(
+            ui, &mut cave.spaghetti_clamp_min, -2.0..=0.0, "clamp_min",
+            "Final clamp lower bound. Carves voxels with values below 0; tighter min = stronger carve.",
+        );
+        dirty |= slider(
+            ui, &mut cave.spaghetti_clamp_max, 0.0..=2.0, "clamp_max",
+            "Final clamp upper bound.",
+        );
+        dirty |= slider(
+            ui, &mut cave.spaghetti_cave_noise_offset, -2.0..=2.0, "cave_noise_offset",
+            "Coefficient on the thickness modulator inside the cave noise term.",
+        );
+    });
+
+    ui.collapsing("Pillars (refill stone inside caves)", |ui| {
+        dirty |= slider(
+            ui, &mut cave.pillar_xz_scale, 0.1..=4.0, "pillar_xz_scale",
+            "XZ stretch of the pillar noise. Larger → thicker, sparser pillars.",
+        );
+        dirty |= slider(
+            ui, &mut cave.pillar_y_scale, 0.1..=4.0, "pillar_y_scale",
+            "Y stretch of the pillar noise. Smaller → straighter columns; larger → wobbly.",
+        );
+        dirty |= slider(
+            ui, &mut cave.pillar_cutoff, 0.0..=1.0, "pillar_cutoff",
+            "Threshold the pillar noise must exceed to add material. Lower = more pillars.",
+        );
+        dirty |= slider(
+            ui, &mut cave.pillar_intensity, 0.0..=8.0, "pillar_intensity",
+            "Strength of the pillar add-back. Higher = more solid refill inside caves.",
+        );
+    });
+
+    ui.collapsing("Density threshold", |ui| {
+        dirty |= slider(
+            ui, &mut cave.underground_density_threshold, -1.0..=1.0, "underground_density_threshold",
+            "Raw-density floor below which the noise carvers (cheese + spaghetti) go silent. Keeps near-surface voxels safe from accidental carving.",
+        );
+    });
+
+    ui.collapsing("Surface entrance noise", |ui| {
+        dirty |= slider(
+            ui, &mut cave.surface_entrance_xz_scale, 0.1..=4.0, "xz_scale",
+            "XZ stretch on the entrance noise sample.",
+        );
+        dirty |= slider(
+            ui, &mut cave.surface_entrance_y_scale, 0.1..=4.0, "y_scale",
+            "Y stretch on the entrance noise. Smaller = straight shafts; larger = wobbly bores.",
+        );
+        dirty |= slider(
+            ui, &mut cave.surface_entrance_threshold, 0.0..=1.0, "threshold",
+            "Noise threshold above which an entrance fires. Lower = more entrances.",
+        );
+        dirty |= slider(
+            ui, &mut cave.surface_entrance_intensity, 0.0..=8.0, "intensity",
+            "Carve strength. Translates to a negative density contribution. 0 disables surface entrances entirely.",
+        );
+        dirty |= slider(
+            ui, &mut cave.surface_entrance_y_min, -64..=128, "y_min",
+            "Active Y window low. Outside this band the entrance noise is silent.",
+        );
+        dirty |= slider(
+            ui, &mut cave.surface_entrance_y_max, -32..=200, "y_max",
+            "Active Y window high.",
+        );
+    });
+
+    dirty
 }
 
 pub fn biomes_panel(ui: &mut Ui, cfg: &mut oxium::worldgen::config::BiomesConfig) -> bool {
