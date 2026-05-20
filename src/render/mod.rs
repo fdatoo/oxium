@@ -37,6 +37,7 @@ use crate::render::gpu::{
 };
 use crate::render::hud::HudFrame;
 use crate::render::mesh::{upload_mesh, GpuMesh};
+use crate::render::pipelines::composite::{build as build_composite, CompositePipeline};
 use crate::render::pipelines::cursor::{
     build as build_cursor, make_cursor_bind_group_layout, CursorPipeline,
 };
@@ -184,6 +185,9 @@ pub struct Renderer {
     water_pipe: WaterPipeline,
     /// Sky-gradient pipeline, drawn before opaque each frame.
     sky_pipe: SkyPipeline,
+    /// Composite pipeline: resolves the HDR target to the swapchain.
+    /// Currently passthrough; Tasks 5/6 add tonemap + underwater tint.
+    composite_pipe: CompositePipeline,
     /// Wireframe cursor pipeline + its uniform/bind group. Drawn last
     /// (over the opaque pass) only when `cursor_visible == true`.
     cursor_pipe: CursorPipeline,
@@ -339,6 +343,7 @@ impl Renderer {
             &atlas.bind_group_layout,
         );
         let sky_pipe = build_sky(&gpu.device, gpu.surface_cfg.format, &camera_bgl);
+        let composite_pipe = build_composite(&gpu.device, gpu.surface_cfg.format);
 
         // HUD: build the pipeline + upload the font atlas. The font
         // texture is its own resource (R8-style data but stored
@@ -509,6 +514,7 @@ impl Renderer {
             opaque_pipe_reflection,
             water_pipe,
             sky_pipe,
+            composite_pipe,
             cursor_pipe,
             cursor_buf,
             cursor_bg,
