@@ -304,7 +304,30 @@ impl ApplicationHandler for VizApp {
                 // without holding a SceneRenderer reference.
                 let aspect = render.surface_config.width as f32
                     / render.surface_config.height.max(1) as f32;
-                scene.update_camera(&render.queue, self.state.session.camera(), aspect);
+                let selected_chunk =
+                    self.state.session.probe.pinned.map(|(wx, wz)| {
+                        use oxium::voxel::coords::{ChunkCoord, CHUNK_DIM_U};
+                        let dim = CHUNK_DIM_U as i32;
+                        // Y of the chunk holding the pinned column's surface.
+                        let cy = self
+                            .state
+                            .session
+                            .probe
+                            .snapshot
+                            .as_ref()
+                            .map(|s| s.h_target)
+                            .unwrap_or(70)
+                            .div_euclid(dim);
+                        ChunkCoord(glam::IVec3::new(wx.div_euclid(dim), cy, wz.div_euclid(dim)))
+                    });
+                let time_s = self.state.start_time.elapsed().as_secs_f32();
+                scene.update_camera(
+                    &render.queue,
+                    self.state.session.camera(),
+                    aspect,
+                    selected_chunk,
+                    time_s,
+                );
                 self.state.scene_chunks_total = scene.chunk_count();
                 self.state.scene_chunks_visible = scene.visible_chunk_count();
                 if let Err(e) = render_frame(render, scene, full_output) {

@@ -14,6 +14,10 @@ pub struct AppState {
     pub last_cursor: Option<(f64, f64)>,
     pub last_frame: Instant,
     pub last_regen_ms: Option<f32>,
+    /// Process-start clock anchor. Used by the shader's pinned-chunk
+    /// pulse animation so it ticks against monotonic time, not frame
+    /// dt, and stays smooth across pauses.
+    pub start_time: Instant,
     /// Total chunks resident in the GPU scene HashMap last frame.
     /// Cached from `SceneRenderer::chunk_count()` so the layout can
     /// read it without a SceneRenderer reference.
@@ -31,6 +35,7 @@ impl AppState {
             last_cursor: None,
             last_frame: Instant::now(),
             last_regen_ms: None,
+            start_time: Instant::now(),
             scene_chunks_total: 0,
             scene_chunks_visible: 0,
         }

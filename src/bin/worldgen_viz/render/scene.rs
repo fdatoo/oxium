@@ -18,6 +18,13 @@ pub struct Vertex {
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct CameraUniform {
     view_proj: [[f32; 4]; 4],
+    /// xyz = selected chunk coord (as floats — keeps the uniform
+    /// layout aligned without int-vector padding gymnastics).
+    /// w = 1.0 if a chunk is currently pinned, 0.0 otherwise.
+    selected_chunk: [f32; 4],
+    /// x = elapsed seconds since startup. Drives the pulse on the
+    /// pinned-chunk tint. yzw reserved.
+    time: [f32; 4],
 }
 
 pub struct ChunkGpuBuffers {
@@ -148,9 +155,24 @@ impl SceneRenderer {
         &self.depth_view
     }
 
-    pub fn update_camera(&mut self, queue: &wgpu::Queue, cam: &dyn Camera, aspect: f32) {
+    pub fn update_camera(
+        &mut self,
+        queue: &wgpu::Queue,
+        cam: &dyn Camera,
+        aspect: f32,
+        selected_chunk: Option<ChunkCoord>,
+        time_seconds: f32,
+    ) {
         let vp = cam.view_proj(aspect);
-        let u = CameraUniform { view_proj: vp.to_cols_array_2d() };
+        let selected = match selected_chunk {
+            Some(c) => [c.0.x as f32, c.0.y as f32, c.0.z as f32, 1.0],
+            None => [0.0, 0.0, 0.0, 0.0],
+        };
+        let u = CameraUniform {
+            view_proj: vp.to_cols_array_2d(),
+            selected_chunk: selected,
+            time: [time_seconds, 0.0, 0.0, 0.0],
+        };
         queue.write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[u]));
         self.last_view_proj = vp;
     }
