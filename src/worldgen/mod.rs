@@ -258,6 +258,7 @@ impl Generator {
             coord,
             &self.heightmap,
             &self.macro_cache,
+            &self.fine_cache,
             &mut r,
         );
         caves::build_systems_for_region(self.seed, coord, &self.heightmap, &mut r);

@@ -338,13 +338,67 @@ pub fn build_macro_region(
 /// Build the hydrology layer of a fine region. Requires access to the
 /// macro cache so trunk drainage from outside the fine window can be
 /// injected.
+/// Read-only snapshots of the four cardinal-neighbour fine regions of
+/// a region currently being built. Each entry is `Some` iff the
+/// neighbour is already in the fine cache; `gather_neighbour_edges`
+/// never triggers a build. Names denote the direction *to* the
+/// neighbour. Corner neighbours are omitted — diagonal contact is one
+/// cell and not worth the bookkeeping.
+pub struct NeighbourEdges {
+    pub west: Option<std::sync::Arc<crate::worldgen::region::FineRegion>>,
+    pub east: Option<std::sync::Arc<crate::worldgen::region::FineRegion>>,
+    pub north: Option<std::sync::Arc<crate::worldgen::region::FineRegion>>,
+    pub south: Option<std::sync::Arc<crate::worldgen::region::FineRegion>>,
+}
+
+impl NeighbourEdges {
+    /// All-`None` view. Equivalent to the pre-PR-1 free-edge behaviour.
+    pub fn empty() -> Self {
+        Self {
+            west: None,
+            east: None,
+            north: None,
+            south: None,
+        }
+    }
+}
+
+/// Build a [`NeighbourEdges`] for `coord` by peeking the four cardinal
+/// neighbours in the fine cache. Cold neighbours stay `None`.
+pub fn gather_neighbour_edges(
+    coord: RegionCoord,
+    fine_cache: &crate::worldgen::region::FineCache,
+) -> NeighbourEdges {
+    NeighbourEdges {
+        west: crate::worldgen::region::peek_fine(
+            fine_cache,
+            RegionCoord { x: coord.x - 1, z: coord.z },
+        ),
+        east: crate::worldgen::region::peek_fine(
+            fine_cache,
+            RegionCoord { x: coord.x + 1, z: coord.z },
+        ),
+        north: crate::worldgen::region::peek_fine(
+            fine_cache,
+            RegionCoord { x: coord.x, z: coord.z - 1 },
+        ),
+        south: crate::worldgen::region::peek_fine(
+            fine_cache,
+            RegionCoord { x: coord.x, z: coord.z + 1 },
+        ),
+    }
+}
+
 pub fn build_fine_hydro(
     seed: u64,
     coord: RegionCoord,
     heightmap: &HeightmapNoise,
     macro_cache: &MacroCache,
+    fine_cache: &crate::worldgen::region::FineCache,
     region: &mut FineRegion,
 ) {
+    // PR 1: gather neighbour edges. Task 3 consumes them.
+    let _neighbours = gather_neighbour_edges(coord, fine_cache);
     let halo = FINE_HALO_REGIONS;
     let inner = FINE_CELLS_PER_REGION;
     let n = ((1 + 2 * halo) * inner) as usize;
@@ -739,6 +793,7 @@ mod tests {
         // won't have any; we just need one with land + drainage.
         let hm = HeightmapNoise::new(42);
         let macro_cache = crate::worldgen::region::fresh_macro_cache();
+        let fine_cache = crate::worldgen::region::fresh_fine_cache();
         let mut total_river_cells = 0usize;
         for z in -2..=2 {
             for x in -2..=2 {
@@ -746,7 +801,7 @@ mod tests {
                 let mut region =
                     crate::worldgen::region::build_fine_region_placeholder(coord);
                 region.coord = coord;
-                build_fine_hydro(42, coord, &hm, &macro_cache, &mut region);
+                build_fine_hydro(42, coord, &hm, &macro_cache, &fine_cache, &mut region);
                 let n = (FINE_CELLS_PER_REGION * FINE_CELLS_PER_REGION) as usize;
                 total_river_cells +=
                     (0..n).filter(|&i| bitset_get(&region.is_river, i)).count();
@@ -766,10 +821,11 @@ mod tests {
         // non-decreasing.
         let hm = HeightmapNoise::new(42);
         let macro_cache = crate::worldgen::region::fresh_macro_cache();
+        let fine_cache = crate::worldgen::region::fresh_fine_cache();
         let coord = RegionCoord { x: 0, z: 0 };
         let mut region = crate::worldgen::region::build_fine_region_placeholder(coord);
         region.coord = coord;
-        build_fine_hydro(42, coord, &hm, &macro_cache, &mut region);
+        build_fine_hydro(42, coord, &hm, &macro_cache, &fine_cache, &mut region);
         let n = FINE_CELLS_PER_REGION as usize;
         for iz in 1..n - 1 {
             for ix in 1..n - 1 {
