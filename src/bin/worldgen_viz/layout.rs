@@ -143,6 +143,16 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
                 } else {
                     ui.label("Click the map to pin a column.");
                 }
+                ui.separator();
+
+                // Cross-section panel — collapsed by default so it
+                // doesn't dominate the right column for users who
+                // aren't actively probing density.
+                egui::CollapsingHeader::new("Cross-section")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        app.session.cross.show(ui, &generator, revision);
+                    });
             });
         });
 

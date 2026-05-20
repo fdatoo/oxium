@@ -2,6 +2,7 @@
 
 mod app;
 mod camera;
+mod crosssection;
 mod layout;
 mod overlays;
 mod paint;

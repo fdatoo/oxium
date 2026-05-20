@@ -2,6 +2,7 @@
 //! PR 4 will let the AppState hold two sessions for A/B compare.
 
 use crate::camera::{Camera, FlyCamera, OrbitCamera};
+use crate::crosssection::CrossSection;
 use crate::overlays::MapView;
 use crate::paint::PaintMode;
 use crate::probe::Probe;
@@ -29,6 +30,7 @@ pub struct Session {
     pub invalidator: Invalidator,
     pub probe: Probe,
     pub map: MapView,
+    pub cross: CrossSection,
 }
 
 impl Session {
@@ -52,6 +54,7 @@ impl Session {
             invalidator: Invalidator::new(),
             probe: Probe::new(),
             map: MapView::new(),
+            cross: CrossSection::new(),
         }
     }
 
