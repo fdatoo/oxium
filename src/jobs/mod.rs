@@ -173,9 +173,14 @@ impl Jobs {
     ///
     /// 1. Allocates a fresh `DenseChunk`.
     /// 2. Asks the `Generator` to fill it with terrain.
-    /// 3. Runs the lighting BFS *locally* (no neighbours yet — cross-chunk
-    ///    bleed gets reapplied later when the streaming system queues a
-    ///    relight on the dirty neighbour).
+    /// 3. Runs the lighting BFS using the `neighbours` snapshot supplied
+    ///    by the caller. Chunks generated while their face-adjacent
+    ///    neighbours are already loaded receive correct sky-light
+    ///    column-drop inheritance from the +Y neighbour and lateral
+    ///    block-light seeding from all six, on this single pass — no
+    ///    follow-up relight needed. Chunks generated at the streaming
+    ///    wavefront (neighbours mostly `None`) fall back to a
+    ///    best-effort BFS, same as before.
     /// 4. Compresses it into a `PalettedChunk` (canonical form).
     /// 5. Sends the result through the channel.
     pub fn spawn_gen(
@@ -183,7 +188,7 @@ impl Jobs {
         coord: ChunkCoord,
         generator: Arc<Generator>,
         registry: Arc<BlockRegistry>,
-        _neighbors: [Option<Arc<PalettedChunk>>; 6],
+        neighbors: [Option<Arc<PalettedChunk>>; 6],
     ) {
         let tx = self.tx.clone();
         self.gen_pool.spawn(move || {
@@ -198,8 +203,24 @@ impl Jobs {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut dense = DenseChunk::empty();
                 generator.fill_chunk(coord, &mut dense);
-                let no_neighbors = crate::voxel::chunk::Neighbors { chunks: [None; 6] };
-                crate::lighting::recompute_chunk(&mut dense, &no_neighbors, &registry);
+                // Decompress any neighbours the caller snapshotted so the
+                // initial BFS does column-drop inheritance + lateral
+                // seeding correctly. Matches the spawn_relight pattern at
+                // jobs/mod.rs:232-245.
+                let neighbor_dense: Vec<Option<DenseChunk>> = neighbors
+                    .iter()
+                    .map(|opt| opt.as_ref().map(|p| p.decompress()))
+                    .collect();
+                let n_refs: [Option<&DenseChunk>; 6] = [
+                    neighbor_dense[0].as_ref(),
+                    neighbor_dense[1].as_ref(),
+                    neighbor_dense[2].as_ref(),
+                    neighbor_dense[3].as_ref(),
+                    neighbor_dense[4].as_ref(),
+                    neighbor_dense[5].as_ref(),
+                ];
+                let ns = crate::voxel::chunk::Neighbors { chunks: n_refs };
+                crate::lighting::recompute_chunk(&mut dense, &ns, &registry);
                 PalettedChunk::compress(&dense)
             }));
             match result {
