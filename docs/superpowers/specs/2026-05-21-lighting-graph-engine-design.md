@@ -481,11 +481,27 @@ CI: any PR touching `lighting/`, `voxel/world.rs`, `voxel/chunk.rs`, or `mesh_up
 
 **Convergence pathologies.** Decrease that triggers increase that triggers decrease, etc. The algorithm provably terminates (each cell's level is bounded; each op moves a cell's value monotonically per phase) but worst-case ops per single block change could be high. *Mitigation:* the convergence property test bounds the ratio of ops to changed cells; failures in CI surface algorithmic regressions.
 
+## Frame ordering
+
+`engine.tick(budget)` runs once per frame from `App::update` in this position:
+
+```
+1. Input / movement
+2. Player edits (set_block → engine.on_block_changed enqueues)
+3. drain_jobs (chunk loads → engine.on_chunk_loaded enqueues)
+4. engine.tick(budget)              ← here
+5. upload_dirty_light_volumes
+6. render
+```
+
+This places the tick after every source that can enqueue work this frame (player edits, chunk loads) and before the GPU upload that consumes the engine's writes. The player sees their edit's lighting effect in the same frame — no perceptual lag. Today's `relight_pump` sits at the same point in the frame, so this is a structural drop-in replacement.
+
+## Propagation mask encoding
+
+`QueueEntry::propagation_mask` is **6 bits, one per face**. Bit `i` set means "do not propagate in face `i`'s direction" (i.e., the back-face of the cell we just came from). `mask == 0` means "all 6 faces allowed" and is the value used when enqueuing a source (torch, sky-source cell).
+
+Minecraft uses 7 bits — the extra bit explicitly flags "this is a source, propagate in all directions". We don't need that because `mask == 0` already encodes the same thing unambiguously. Oxium also doesn't have per-face shape-based occlusion (no slabs/stairs), so there is no foreseeable use for the spare bit.
+
 ## Open questions
 
-Two minor questions to resolve during implementation, neither blocking:
-
-1. **Tick position in the frame.** Engine tick before or after `set_block` calls? "After" means lighting is one frame behind edits (matches today). "Before" means the player's last frame's lighting catches up after their current edit lands. Probably "after"; revisit if perceptual lag is annoying.
-2. **`propagation_mask` width.** 6 bits (one per face, "block back-face") or 7 bits (Minecraft uses an extra bit to encode "this is the source, propagate in all directions"). The 7th bit may be unnecessary given how we enqueue sources (mask = 0 = no faces blocked); decide in PR2.
-
-No other open questions. Every decision has a concrete answer.
+None. Every decision has a concrete answer.
