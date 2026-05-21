@@ -43,13 +43,13 @@ be 0 for a true no-visual-change refactor.
 | `baseline_cave.png` | `OXIUM_SCREENSHOT_WARMUP_FRAMES=1800 cargo run --release --bin oxium -- --screenshot-and-exit tests/screenshots/baseline_cave.png --spawn 0,30,0 --look 0,-30 --time 0.5` |
 | `baseline_sunset.png` | `OXIUM_SCREENSHOT_WARMUP_FRAMES=1800 cargo run --release --bin oxium -- --screenshot-and-exit tests/screenshots/baseline_sunset.png --look 90,-10 --time 0.78` |
 | `baseline_fog_horizon.png` | `OXIUM_SCREENSHOT_WARMUP_FRAMES=1800 cargo run --release --bin oxium -- --screenshot-and-exit tests/screenshots/baseline_fog_horizon.png --look 0,0 --time 0.5` |
-| `baseline_sun_in_frame.png` | `OXIUM_SCREENSHOT_WARMUP_FRAMES=1800 cargo run --release --bin oxium -- --screenshot-and-exit tests/screenshots/baseline_sun_in_frame.png --spawn 0,80,0 --look 0,85 --time 0.25` |
+| `baseline_sun_in_frame.png` | `OXIUM_SCREENSHOT_WARMUP_FRAMES=1800 cargo run --release --bin oxium -- --screenshot-and-exit tests/screenshots/baseline_sun_in_frame.png --spawn 0,200,0 --look 0,89 --time 0.25` |
 
 ## Known limitations
 
 - **`baseline_underwater.png` does not currently exercise `underwater_factor > 0`** — the camera spawned above water rather than inside it. Stable as a baseline (same input → same output) but won't catch regressions in the underwater tint code path. Future work: a `--spawn-underwater` helper that locates a deep water column and spawns the camera 4 blocks below the surface.
 - The "noon" baseline at `--time 0.5` and the "sunset" baseline at `--time 0.78` are misnamed — both correspond to dim twilight sun positions per the `sun_state` formula (`sin(t * TAU) + 0.1` ≈ 0.1 at those times). They were kept for continuity with PR1-PR3's regression suite but do not produce HDR-bright pixels and therefore do not exercise the bloom pass.
-- **`baseline_sun_in_frame.png`** (added in PR4) captures `--look 0,85 --time 0.25` (overhead sun at true noon) — this is the scene that visibly exercises the bloom pass. The soft halo around the sun disc is the PR4 visual diff.
+- **`baseline_sun_in_frame.png`** (added in PR4) captures `--spawn 0,200,0 --look 0,89 --time 0.25` — overhead sun at true noon, from 200 blocks up looking near-vertical so only sky is in frame (no terrain → no chunk-streaming variance). The wide soft halo around the sun disc is the PR4 visual diff.
 
 ## PR 4 notes
 
