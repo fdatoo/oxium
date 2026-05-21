@@ -3,6 +3,95 @@ id: 1.7-splines
 title: 1.7 Splines
 ---
 
-import Stub from '@site/src/components/Stub';
+import LazyWidget from '@site/src/widgets/LazyWidget';
+import SplineEditor from '@site/src/widgets/SplineEditor';
 
-<Stub />
+Every chapter so far has been about *generating* random fields — noise, FBM, Voronoi. This one is about *shaping*. You have a continuous input, say a "continentalness" value that ranges from −1 (deep ocean) to +1 (inland plateau), and you need to map it to a continuous output — the target surface height from sea level up to mountain peaks. That mapping should be artist-authorable: smooth where you want it smooth, steep where you want it steep, flat at plateaus. That's what a spline is for.
+
+## Why not a lookup table?
+
+A lookup table works for this job. The downside is that it has 256 (or 1024, or …) slots, each with an independent value. Editing a smooth transition means touching dozens of entries and hoping you don't introduce kinks. A spline gives you a small number of *knots* — say four — and guarantees the curve is smooth between them.
+
+## Why cubic Hermite specifically?
+
+The engine uses **cubic Hermite** splines. Each knot has:
+
+- A **location** (`loc`) — where on the input axis this knot sits.
+- A **value** (`val`) — the output at this input.
+- A **slope** (`slope`) — the derivative dy/dx at this knot.
+
+The slope is *explicit* — you set it in the RON config file as `slope: 0.5`. You are saying "the transition is gradual here". Compare to Catmull-Rom, where the slope is derived from your neighbours (you can't control it independently), or Bezier, where you set it via an off-curve handle (geometrically intuitive but requires converting to/from slope). For terrain authoring the slope model is the cleanest: "this is a sharp cliff → `slope: 3.0`; this is a smooth coast → `slope: 0.2`" is immediately legible in the config.
+
+## The formula
+
+Between two knots $(x_1, y_1, d_1)$ and $(x_2, y_2, d_2)$, the spline evaluates as:
+
+$$
+t = \frac{x - x_1}{x_2 - x_1}
+$$
+
+$$
+a = d_1(x_2 - x_1) - (y_2 - y_1), \quad b = -d_2(x_2 - x_1) + (y_2 - y_1)
+$$
+
+$$
+\text{result} = \underbrace{(1-t)\,y_1 + t\,y_2}_{\text{linear lerp}} + t(1-t)\underbrace{[(1-t)\,a + t\,b]}_{\text{cubic correction}}
+$$
+
+The linear lerp is the straight line from $y_1$ to $y_2$. The cubic correction bends it to match the requested derivatives at the endpoints. When both slopes are zero, $a = b = -(y_2 - y_1)$ and you get the classic smooth S-curve. When both slopes equal $(y_2 - y_1)/(x_2 - x_1)$, $a = b = 0$ and the curve is a straight line (slopes exactly match the secant).
+
+Outside the knot range, evaluation extrapolates *linearly* using the endpoint derivative:
+
+$$
+x < x_0 \Rightarrow y_0 + d_0\,(x - x_0)
+$$
+
+This avoids surprise blow-up when the input strays slightly outside the design range.
+
+## The widget
+
+Drag the **yellow knots** to change position. Drag the **green handles** to change slope. Toggle **"Show linear interpolation"** to see the straight-line baseline that the cubic bends away from.
+
+<LazyWidget fallbackSrc="/oxium/img/figures/spline-default-fallback.png" fallbackAlt="Spline editor with default knots">
+  <SplineEditor />
+</LazyWidget>
+
+Things worth trying:
+
+- Set both endpoint slopes to **0** and a middle knot slope to **0**. You get a smooth S between each pair — the "plateau" shape. Good for height that should be flat at ocean and flat at mountain peak, with a steep continental shelf between.
+- Set a middle knot slope to something large (**3** or **−3**). The curve overshoots: the cubic correction term can push the output above $y_2$ or below $y_1$ within a segment. This is intentional when you want a dip or a bump — it's a feature, not a bug, but it means your output range can exceed the knot value range.
+- Drag a knot very close to its neighbour. The segment gets steep because the same $\Delta y$ now spans a short $\Delta x$.
+
+## In the engine
+
+The engine applies splines in three places in the heightmap pipeline (`src/worldgen/config.rs::HeightmapNoise`):
+
+```
+offset_spline(continentalness, terrain_shape, ridges_pv) → height offset
+factor_spline(continentalness, terrain_shape, ridges_pv)  → height scale factor
+jaggedness_spline(continentalness, terrain_shape, ridges_pv) → jaggedness weight
+```
+
+Each outer spline is keyed on *continentalness* (a plate Voronoi SDF). Its knot *values* are themselves splines keyed on *terrain_shape* or *ridges_pv* — a 2D function implemented as nested 1D splines, a trick from Minecraft 1.18's climate system.
+
+The key insight is that `src/worldgen/spline.rs::CubicSpline` is *1D scalar* — one input, one output. The nested composition lives in `config.rs::NestedSpline::evaluate(c, s, r)`, which does:
+
+```rust
+// outer keyed on c (continentalness)
+let inner = outer_spline.evaluate(c);  // returns an inner CubicSpline
+inner.evaluate(s or r)                  // keyed on terrain_shape or ridges
+```
+
+This lets you say "over ocean (`c ≈ −1`), use an inner spline that keeps height near sea level regardless of terrain_shape; over inland plateau (`c ≈ 0.8`), use a different inner spline that varies height strongly with terrain_shape". A 2D lookup table of similar expressiveness would need hundreds of rows.
+
+## What you can now do in the code
+
+You can read:
+
+- `src/worldgen/spline.rs` — the full `CubicSpline::evaluate` implementation. The formula in the code matches exactly what's above.
+- `src/worldgen/config.rs::HeightmapNoise` — the three spline fields and their `_at` methods. Note that `NestedSpline` wraps an outer `CubicSpline<InnerSpline>` — the generic machinery that lets knot values be splines rather than scalars.
+- The RON configs in `assets/worldgen/` — search for `offset_spline` to see real authored knot tables with `loc`, `val`, and `slope` fields.
+
+## Next
+
+→ [1.8 Signed Distance Functions](./1.8-sdfs.mdx)

@@ -4,5 +4,10 @@
     {"fn":"fbm","args":{"seed":42,"octaves":4,"persistence":0.5,"x":0.5,"y":0.5},"out":-0.06878646014483951},
     {"fn":"fbm","args":{"seed":42,"octaves":1,"persistence":0.5,"x":0.5,"y":0.5},"out":-0.217591680723256},
     {"fn":"fbm","args":{"seed":42,"octaves":6,"persistence":0.6,"x":0.123,"y":0.789},"out":-0.06944942729986964},
-    {"fn":"fbm","args":{"seed":1337,"octaves":4,"persistence":0.5,"x":0,"y":0},"out":0}
+    {"fn":"fbm","args":{"seed":1337,"octaves":4,"persistence":0.5,"x":0,"y":0},"out":0},
+    {"fn":"spline","args":{"name":"ramp","knots":[[0,0,1],[1,1,1]],"input":0.5},"out":0.5},
+    {"fn":"spline","args":{"name":"plateau","knots":[[0,0,0],[1,1,0]],"input":0.5},"out":0.5},
+    {"fn":"spline","args":{"name":"plateau","knots":[[0,0,0],[1,1,0]],"input":0.25},"out":0.15625},
+    {"fn":"spline","args":{"name":"dip","knots":[[0,1,-2],[0.5,0,0],[1,1,2]],"input":0.5},"out":0},
+    {"fn":"spline","args":{"name":"dip","knots":[[0,1,-2],[0.5,0,0],[1,1,2]],"input":0.25},"out":0.375}
 ]

@@ -51,6 +51,31 @@ pub fn run(args: &[String]) -> Result<(), String> {
         ));
     }
 
+    // -- spline --
+    {
+        use oxium::worldgen::spline::{CubicSpline, Knot};
+        let spline_cases: &[(&str, &[(f32, f32, f32)], f32)] = &[
+            // (name, knots [(loc, val, slope), ...], input)
+            ("ramp",    &[(0.0, 0.0, 1.0), (1.0, 1.0, 1.0)], 0.5),
+            ("plateau", &[(0.0, 0.0, 0.0), (1.0, 1.0, 0.0)], 0.5),
+            ("plateau", &[(0.0, 0.0, 0.0), (1.0, 1.0, 0.0)], 0.25),
+            ("dip",     &[(0.0, 1.0, -2.0), (0.5, 0.0, 0.0), (1.0, 1.0, 2.0)], 0.5),
+            ("dip",     &[(0.0, 1.0, -2.0), (0.5, 0.0, 0.0), (1.0, 1.0, 2.0)], 0.25),
+        ];
+        for (name, knots_raw, input) in spline_cases {
+            let s = CubicSpline::Multipoint(
+                knots_raw.iter().map(|&(loc, val, slope)| Knot { loc, val, slope }).collect(),
+            );
+            let v = s.evaluate(*input);
+            let knots_json: Vec<String> = knots_raw.iter()
+                .map(|(loc, val, slope)| format!("[{loc},{val},{slope}]")).collect();
+            entries.push(format!(
+                "    {{\"fn\":\"spline\",\"args\":{{\"name\":\"{name}\",\"knots\":[{}],\"input\":{input}}},\"out\":{v}}}",
+                knots_json.join(",")
+            ));
+        }
+    }
+
     // Write as JSON array. We hand-build the JSON so we don't pull
     // in serde_json just for this (the schema is simple and stable).
     let json = format!("[\n{}\n]\n", entries.join(",\n"));

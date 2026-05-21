@@ -2,13 +2,11 @@ import React, { useEffect, useState } from 'react';
 import Layout from '@theme/Layout';
 import useBaseUrl from '@docusaurus/useBaseUrl';
 import { makeFbm2D } from '../math/fbm';
+import { evaluateSpline } from '../math/spline';
 
 type Entry =
-  | {
-      fn: 'fbm';
-      args: { seed: number; octaves: number; persistence: number; x: number; y: number };
-      out: number;
-    };
+  | { fn: 'fbm';    args: { seed: number; octaves: number; persistence: number; x: number; y: number }; out: number }
+  | { fn: 'spline'; args: { name: string; knots: [number, number, number][]; input: number }; out: number };
 
 type Row = {
   fn: string;
@@ -25,9 +23,12 @@ type Row = {
 // 6 reference cases (max observed delta ~0.74) but still tight enough to
 // catch algorithmic mistakes such as wrong octave count, missing /maxAmp
 // normalization, or a flipped sign (which would produce delta ≈ 2.0).
-const TOLERANCE = 1.5;
+const TOLERANCES: Record<string, number> = {
+  fbm: 1.5,      // PRNG gap between noise crate and simplex-noise + alea
+  spline: 1e-5,  // pure math, no PRNG involved
+};
 
-function runFbm(e: Entry): number {
+function runFbm(e: Extract<Entry, { fn: 'fbm' }>): number {
   const fbm = makeFbm2D({
     seed: e.args.seed,
     octaves: e.args.octaves,
@@ -36,6 +37,11 @@ function runFbm(e: Entry): number {
     frequency: 1.0,
   });
   return fbm(e.args.x, e.args.y);
+}
+
+function runSpline(e: Extract<Entry, { fn: 'spline' }>): number {
+  const knots = e.args.knots.map(([loc, val, slope]) => ({ loc, val, slope }));
+  return evaluateSpline(knots, e.args.input);
 }
 
 export default function ParityPage() {
@@ -48,15 +54,19 @@ export default function ParityPage() {
       .then((r) => r.json())
       .then((entries: Entry[]) => {
         const rs = entries.map((e) => {
-          const ts = e.fn === 'fbm' ? runFbm(e) : NaN;
+          let ts: number;
+          if (e.fn === 'fbm')         ts = runFbm(e);
+          else if (e.fn === 'spline') ts = runSpline(e);
+          else                        ts = NaN;
           const delta = Math.abs(ts - e.out);
+          const tol = TOLERANCES[e.fn] ?? 1e-5;
           return {
             fn: e.fn,
             args: JSON.stringify(e.args),
             rust: e.out,
             ts,
             delta,
-            ok: delta < TOLERANCE,
+            ok: delta < tol,
           };
         });
         setRows(rs);
