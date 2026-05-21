@@ -2,9 +2,9 @@
 //! for the documentation book. Pure on `(seed, center, zoom, stage)`.
 //!
 //! Usage:
-//!   doc_render --seed <u64> --center <wx>,<wz> --zoom <N> \
-//!              --stage <stage> --width <px> --output <path>
-//!   doc_render --dump-parity --output <path>
+//!   doc_render snapshot --seed <u64> --center <wx>,<wz> --zoom <N> \
+//!                       --stage <stage> --width <px> --output <path>
+//!   doc_render parity   --output <path>
 //!   doc_render --help
 
 use std::process::ExitCode;

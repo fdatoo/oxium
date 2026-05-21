@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import Layout from '@theme/Layout';
+import useBaseUrl from '@docusaurus/useBaseUrl';
 import { makeFbm2D } from '../math/fbm';
 
 type Entry =
@@ -40,9 +41,10 @@ function runFbm(e: Entry): number {
 export default function ParityPage() {
   const [rows, setRows] = useState<Row[]>([]);
   const [err, setErr] = useState<string | null>(null);
+  const parityUrl = useBaseUrl('/parity.json');
 
   useEffect(() => {
-    fetch('/oxium/parity.json')
+    fetch(parityUrl)
       .then((r) => r.json())
       .then((entries: Entry[]) => {
         const rs = entries.map((e) => {
@@ -60,7 +62,7 @@ export default function ParityPage() {
         setRows(rs);
       })
       .catch((e) => setErr(String(e)));
-  }, []);
+  }, [parityUrl]);
 
   const allOk = rows.every((r) => r.ok);
 
