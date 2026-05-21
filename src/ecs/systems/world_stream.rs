@@ -81,18 +81,25 @@ pub fn world_stream(
     let pos = q.get().unwrap();
     let pc = player_chunk(pos.0);
 
-    // Build the candidate list and sort by Euclidean (squared)
-    // distance from the player. Pure radial — every direction at
-    // the same distance gets the same dispatch priority.
+    // Build the candidate list and sort. Two-level priority:
     //
-    // A previous version added a "forward bonus" that subtracted a
-    // chunk's projection along the camera look vector from the
-    // priority key, on the theory that chunks the player is looking
-    // at should load first. In practice that made the load
-    // asymmetric: perpendicular and behind chunks consistently
-    // arrived seconds after forward chunks, so any small camera
-    // movement revealed unloaded voids. Pure radial is more
-    // forgiving when the world is still streaming in.
+    //   1. Horizontal distance² (dx² + dz²) — primary.
+    //   2. Vertical distance² (dy²) — tiebreak within a horizontal
+    //      ring.
+    //
+    // Pure 3-D Euclidean (`dx² + dy² + dz²`) put mountain peaks at
+    // dy=1 ahead of their bases at dy=3+ when both were at the same
+    // horizontal distance, so the player saw floating mountain tops
+    // hanging in midair while the columns beneath them streamed in.
+    // Horizontal-first dispatches every Y in a column at the same
+    // primary priority, so a mountain at distance D arrives as a
+    // coherent column instead of top-first.
+    //
+    // The forward-bonus experiment from an even earlier design is
+    // still ruled out — direction-asymmetric priority made every
+    // camera turn reveal unloaded voids. Horizontal-first preserves
+    // direction symmetry: only horizontal *distance* matters, not
+    // bearing.
     //
     // The candidate set + sort order is a pure function of `pc`, so
     // we cache it and only rebuild when the player crosses a chunk
@@ -110,28 +117,32 @@ pub fn world_stream(
         }
         cache.targets.sort_by_key(|c| {
             let d = c.0 - pc.0;
-            // Euclidean squared as the primary key.
-            let dist_sq =
-                (d.x as i64).pow(2) + (d.y as i64).pow(2) + (d.z as i64).pow(2);
-            // Symmetric tie-breaker. Without it, equidistant chunks
-            // resolve in iteration order (dy → dz → dx), which puts the
-            // +X+Z corner of every distance ring at the very tail of
-            // the rayon queue. With ~10 000 chunks to dispatch on
-            // spawn, those tail chunks waited multiple seconds to even
-            // *start* gen — visible as a whole quadrant of the load
-            // radius staying blank long after the others filled in.
-            // A small Wang-style coord hash spreads ties evenly across
-            // all 8 spatial octants. `dist_sq * 1024` keeps the
-            // distance term dominant; only the low 10 bits of the hash
-            // contribute, so two chunks at different distances never
-            // swap order — only ties.
+            // Bounds at the current radii: h_dist_sq ∈ [0, 288]
+            // (RENDER_RADIUS=12 → 144 each axis), v_dist_sq ∈ [0, 64]
+            // (VERTICAL_RADIUS=8). The 100 000 multiplier on h_dist_sq
+            // dwarfs everything below it so no horizontal ring ever
+            // swaps with another — vertical and the hash only order
+            // within a ring.
+            let h_dist_sq = (d.x as i64).pow(2) + (d.z as i64).pow(2);
+            let v_dist_sq = (d.y as i64).pow(2);
+            // Symmetric tie-breaker for chunks that share both
+            // horizontal and vertical distance. Without it,
+            // equidistant chunks resolve in iteration order
+            // (dy → dz → dx), which puts the +X+Z corner of every
+            // ring at the very tail of the rayon queue. The
+            // Wang-style coord hash spreads ties evenly across all
+            // 8 spatial octants. Only the low 10 bits of the hash
+            // contribute (max 1023), so v_dist_sq's 1024 multiplier
+            // and h_dist_sq's 100 000 multiplier both keep the hash
+            // strictly sub-ordinal — two chunks at different
+            // distances can never swap, only ties do.
             let hash = c
                 .0
                 .x
                 .wrapping_mul(73856093)
                 .wrapping_add(c.0.y.wrapping_mul(19349663))
                 .wrapping_add(c.0.z.wrapping_mul(83492791));
-            dist_sq * 1024 + ((hash & 1023) as i64)
+            h_dist_sq * 100_000 + v_dist_sq * 1024 + ((hash & 1023) as i64)
         });
         cache.last_player_chunk = Some(pc);
     }
@@ -153,12 +164,14 @@ pub fn world_stream(
     // workers are always servicing the player's actual current
     // priority order.
     //
-    // 32 = roughly 2 frames of worker output at the post-trilerp
-    // ~250 chunks/sec throughput across 3-5 gen threads. Big enough
-    // that workers never run dry between dispatches; small enough
-    // that the front of the queue is always within ~120 ms of
-    // current player priority.
-    const DISPATCH_CAP: usize = 32;
+    // 64 ≈ a frame of worker output at 7 gen workers × ~10 ms/chunk
+    // = ~90 ms of buffered work — enough that workers never idle
+    // between frames, small enough that the front of the queue
+    // stays within ~90 ms of current player priority. Started at
+    // 32 but that left high-core-count machines noticeably
+    // under-fed; 64 keeps everyone busy without re-introducing the
+    // stale-priority symptom.
+    const DISPATCH_CAP: usize = 64;
     let pending_count = world
         .chunks
         .values()
