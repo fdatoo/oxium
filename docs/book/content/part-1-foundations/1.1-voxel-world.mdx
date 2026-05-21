@@ -3,6 +3,98 @@ id: 1.1-voxel-world
 title: 1.1 The Voxel World
 ---
 
-import Stub from '@site/src/components/Stub';
+We're going to spend a lot of time talking about what the worldgen produces. So let's start with the thing it produces: a **chunk**.
 
-<Stub />
+## The picture
+
+The world is a 3D grid of unit cubes called **blocks**. Each block has a kind — `Grass`, `Stone`, `Sand`, `Water`, `Air`, and so on. The grid is enormous and conceptually infinite, so the engine doesn't store it as one big array. It stores it in **chunks**: cubes of $32 \times 32 \times 32$ blocks.
+
+Every block in the world is identified by its global `(x, y, z)` integer coordinates. Each chunk's bottom-south-west corner sits at a position that is a multiple of 32 on each axis — so the chunk at `ChunkCoord(0, 0, 0)` covers world coordinates `[0..32] × [0..32] × [0..32]`, the chunk at `ChunkCoord(1, 0, 0)` covers `[32..64] × [0..32] × [0..32]`, and so on.
+
+## Build it
+
+A `Block` is a `#[repr(u16)]` enum. The `repr` matters: the discriminant is the on-disk wire format, so the order of variants is fixed. The actual definition in `src/voxel/block.rs`:
+
+```rust
+// src/voxel/block.rs
+#[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Block {
+    Air = 0,  // fixed sentinel — the "nothing" block
+    Stone,
+    Dirt,
+    Grass,
+    Sand,
+    Water,
+    Wood,
+    Leaves,
+    Torch,
+    Snow,
+    Lava,
+}
+```
+
+A `ChunkCoord` is a thin newtype over a glam `IVec3` of integer chunk indices:
+
+```rust
+// src/voxel/coords.rs
+pub const CHUNK_DIM: i32 = 32;
+pub const CHUNK_DIM_U: u32 = 32;
+
+/// Chunk grid coordinates — BlockPos.div_euclid(32).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ChunkCoord(pub IVec3);
+```
+
+And a `DenseChunk` is, at its heart, a $32^3$ flat array of `Block`:
+
+```rust
+// src/voxel/chunk.rs
+pub const CHUNK_VOL: usize = 32 * 32 * 32;  // 32 768
+
+pub struct DenseChunk {
+    /// Flat 32³ block array, indexed by LocalPos::to_index().
+    pub blocks: Box<[Block; CHUNK_VOL]>,
+    // (plus two light arrays — sky_light and block_rgb — discussed in the lighting chapter)
+}
+
+impl DenseChunk {
+    pub fn get(&self, p: LocalPos) -> Block { self.blocks[p.to_index()] }
+    pub fn set(&mut self, p: LocalPos, b: Block) { self.blocks[p.to_index()] = b; }
+}
+```
+
+The worldgen pipeline's whole job is: given a `ChunkCoord`, produce a `DenseChunk`. Every subsequent chapter is "how do we decide which `Block` to put in each of the $32^3 = 32\,768$ cells?"
+
+## In the engine
+
+The real long-term storage is *not* `DenseChunk`. Storing 32 768 × 2 bytes = 64 KB of `Block` per chunk for every loaded chunk would burn gigabytes at realistic render distances, and most chunks contain only a handful of distinct block kinds. The engine therefore keeps chunks on disk and in idle memory as a `PalettedChunk`:
+
+```rust
+// src/voxel/chunk.rs — the on-disk / long-term form
+pub struct PalettedChunk {
+    /// Distinct block kinds in this chunk (typically 1–6 entries).
+    pub palette: Vec<Block>,
+    /// 4 bits per voxel — an index into palette. Packed two per byte.
+    pub indices: Packed4Bit,
+    // (plus packed light arrays)
+}
+```
+
+A chunk with only `Air` and `Stone` needs a palette of two entries and 4 bits per voxel rather than 16 — a 4× reduction. Before the mesher or lighting pass touches a chunk, it calls `PalettedChunk::compress` / the inverse to get a `DenseChunk` for fast random access during the hot work.
+
+This is transparent to worldgen code. The generator writes `Block` values; the engine decides how to pack them. We'll come back to `PalettedChunk` in **Phase 3 (Persistence)** when we look at region files and serialization.
+
+## What you can now do in the code
+
+You can read:
+
+- `src/voxel/block.rs` — every block kind and the `BlockInfo` registry (solid, opaque, emission, color).
+- `src/voxel/chunk.rs` — both the dense and paletted storage layouts.
+- `src/voxel/coords.rs` — `BlockPos`, `ChunkCoord`, and `LocalPos`, plus the coordinate conversions between them.
+
+These three files are the language the rest of the book speaks. From here on out, when a chapter says "the worldgen writes `Water` at this voxel," you know exactly what that means.
+
+## Next
+
+→ [1.2 Deterministic Randomness](./1.2-determinism.mdx) — the hash mixer that makes the entire engine pure on `(seed, coord)`.
