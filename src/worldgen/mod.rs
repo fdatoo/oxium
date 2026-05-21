@@ -1029,6 +1029,16 @@ impl Generator {
                 }
             },
         );
+        // Same trick for the noise-carver layers: build a 9³ corner
+        // lattice once and trilerp per voxel. Roughly 13 FBM samples
+        // per voxel become 13 per corner — a ~45× reduction in
+        // Simplex calls inside the inner loop.
+        let carver_eval = caves::CarverEvaluator::new(
+            &self.noise_carvers,
+            &self.wormhole_noise,
+            &cfg.cave,
+            origin,
+        );
         for z in 0..CHUNK_DIM_U {
             for x in 0..CHUNK_DIM_U {
                 let wx = origin.x + x as i32;
@@ -1131,7 +1141,7 @@ impl Generator {
                     }
                     if approx_depth > CAVE_SURFACE_BUFFER
                         && wy > CAVE_FLOOR_Y
-                        && self.wormhole_noise.carve(wx, wy, wz)
+                        && carver_eval.wormhole_carve_at(wx, wy, wz)
                     {
                         composed = composed.min(-CAVE_SDF_INTENSITY);
                     }
@@ -1142,19 +1152,11 @@ impl Generator {
                         && wy > CAVE_FLOOR_Y
                         && raw_density >= cfg.cave.underground_density_threshold
                     {
-                        let cheese = caves::cheese_contribution(
-                            wx, wy, wz, raw_density,
-                            &self.noise_carvers, &cfg.cave,
-                        );
+                        let cheese = carver_eval.cheese_at(wx, wy, wz, raw_density, &cfg.cave);
                         composed = composed.min(cheese);
 
-                        let spag = caves::spaghetti_contribution(
-                            wx, wy, wz,
-                            &self.noise_carvers, &cfg.cave,
-                        );
-                        let roughness = caves::spaghetti_roughness(
-                            wx, wy, wz, &self.noise_carvers,
-                        );
+                        let spag = carver_eval.spaghetti_at(wx, wy, wz, &cfg.cave);
+                        let roughness = carver_eval.spaghetti_roughness_at(wx, wy, wz);
                         composed = composed.min(spag + roughness);
                     }
 
@@ -1163,9 +1165,7 @@ impl Generator {
                     // whole point: punch holes through the
                     // heightmap to create natural cave openings.
                     if wy > CAVE_FLOOR_Y {
-                        let ent = caves::surface_entrance_contribution(
-                            wx, wy, wz, &self.noise_carvers, &cfg.cave,
-                        );
+                        let ent = carver_eval.surface_entrance_at(wx, wy, wz, &cfg.cave);
                         composed = composed.min(ent);
                     }
 
@@ -1185,10 +1185,7 @@ impl Generator {
                     // Pillars: positive density component refilling
                     // any carved voxel where pillars are present.
                     if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
-                        let pillar = caves::pillar_contribution(
-                            wx, wy, wz,
-                            &self.noise_carvers, &cfg.cave,
-                        );
+                        let pillar = carver_eval.pillar_at(wx, wy, wz, &cfg.cave);
                         if pillar > 0.0 {
                             composed = composed.max(pillar);
                         }
@@ -1800,11 +1797,14 @@ mod tests {
     /// future runs catch unintentional behavioural drift.
     #[test]
     fn golden_seed42_chunk_0_2_0() {
-        // Hash re-baselined for PR A: 3D density evaluator inside
-        // SURFACE_BAND. The surface is now fuzz-jittered by 3D
-        // relief noise instead of being column-quantised, so the
-        // chevron-staircase artifact on moderate slopes is gone.
-        const GOLDEN_42_002: u64 = 0xD906_D86A_4CE6_F47C;
+        // Hash re-baselined for the carver-trilerp pass: the noise
+        // carvers (cheese / spaghetti / pillar / wormhole /
+        // surface_entrance) now run through a 9³ corner lattice +
+        // trilerp instead of per-voxel FBM. Voxels near a cave
+        // sign-boundary can resolve differently from the pre-trilerp
+        // implementation; cave shapes are visually equivalent. Same
+        // precedent as the PR-5 hash bump for the base density.
+        const GOLDEN_42_002: u64 = 0x19514458A1149A0E;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);
