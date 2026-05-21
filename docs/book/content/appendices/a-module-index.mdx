@@ -3,6 +3,48 @@ id: a-module-index
 title: "Appendix A: Module Index"
 ---
 
-import Stub from '@site/src/components/Stub';
+A cross-reference from engine source files to the chapters that explain them. Files are grouped by crate directory; chapters link to the relevant MDX source. A dash (—) means the file is infrastructure or tooling that is not covered as a dedicated topic.
 
-<Stub />
+## src/voxel/
+
+| File | Chapter | Brief |
+|---|---|---|
+| `block.rs` | [1.1](../part-1-foundations/1.1-voxel-world.mdx) | `Block` enum — the complete set of placeable voxel types |
+| `chunk.rs` | [1.1](../part-1-foundations/1.1-voxel-world.mdx) | `DenseChunk` and `PalettedChunk`; 32³ storage layouts |
+| `coords.rs` | [1.1](../part-1-foundations/1.1-voxel-world.mdx) | `ChunkCoord`, `LocalPos`, coordinate arithmetic helpers |
+| `mod.rs` | [1.1](../part-1-foundations/1.1-voxel-world.mdx) | Crate root; re-exports and module-level docs for the voxel layer |
+| `packed.rs` | [1.1](../part-1-foundations/1.1-voxel-world.mdx) | Bit-packed dense arrays; 4-bit sky/block light storage |
+| `raycast.rs` | [1.1](../part-1-foundations/1.1-voxel-world.mdx) | Amanatides–Woo voxel DDA raycast along an arbitrary ray |
+| `world.rs` | [1.1](../part-1-foundations/1.1-voxel-world.mdx) | `VoxelWorld` — sparse, infinite `ChunkCoord → DenseChunk` map |
+
+## src/worldgen/
+
+| File | Chapter | Brief |
+|---|---|---|
+| `aquifer.rs` | [4.7](../part-4-chunk-fill/4.7-aquifers.mdx) | Jittered 16×12×16 cell grid; pressure model selects water vs. lava |
+| `carver.rs` | [4.5](../part-4-chunk-fill/4.5-procedural-carvers.mdx) | Minecraft-style tunnel system; the active procedural cave generator |
+| `caves.rs` | [3.6](../part-3-region-build/3.6-cave-systems.mdx) | Graph-based regional cave systems; rolls 1–4 systems per fine region |
+| `climate.rs` | [3.2](../part-3-region-build/3.2-climate.mdx) | Temperature and humidity fields derived from plate and elevation data |
+| `config.rs` | [5.3](../part-5-engineering/5.3-config-hot-reload.mdx) | Hot-reloadable worldgen configuration; loads all tunable parameters at startup |
+| `density_graph.rs` | [4.1](../part-4-chunk-fill/4.1-density-graph.mdx), [4.2](../part-4-chunk-fill/4.2-cell-evaluator.mdx) | Density-function graph and sparse cell-grid evaluator (Minecraft 1.18+ `NoiseChunk` analogue) |
+| `flat_cache.rs` | [5.2](../part-5-engineering/5.2-region-cache.mdx) | Per-chunk quart-resolution 2D cache; `QUART_PER_CHUNK²` cells |
+| `fluid.rs` | [4.8](../part-4-chunk-fill/4.8-fluid-settle.mdx) | Connected-component flood-fill that settles aquifer-placed fluid blocks |
+| `hash.rs` | [1.2](../part-1-foundations/1.2-determinism.mdx) | Deterministic 64-bit `(seed, coord, salt)` mixer used throughout worldgen |
+| `heightmap.rs` | [3.3](../part-3-region-build/3.3-heightmap.mdx) | Continental and local heightmap generation from plate and climate data |
+| `hydrology.rs` | [3.4](../part-3-region-build/3.4-hydrology.mdx) | Flow-accumulation, drainage basins, and watershed computation |
+| `mod.rs` | [2.1](../part-2-overview/2.1-big-picture.mdx) | Worldgen crate root; exposes the pure `(seed, ChunkCoord) → DenseChunk` interface |
+| `noise_channel.rs` | [1.4](../part-1-foundations/1.4-fbm.mdx) | Builds `Fbm<Simplex>` instances from `(first_octave, amplitudes[])` channel descriptors |
+| `plates.rs` | [3.1](../part-3-region-build/3.1-plates.mdx) | Tectonic plate simulation; coarse region stress and elevation seeds |
+| `probe.rs` | [5.4](../part-5-engineering/5.4-visualizer.mdx) | `ColumnProbe` snapshot — every pipeline value for a given column, used by the visualizer |
+| `region.rs` | [5.2](../part-5-engineering/5.2-region-cache.mdx) | Region cache: lazy, deterministic, two-level memoization of per-region precomputes |
+| `spline.rs` | [1.7](../part-1-foundations/1.7-splines.mdx) | Generic cubic Hermite spline with nested-value support (`CubicSpline`) |
+| `surface.rs` | [4.6](../part-4-chunk-fill/4.6-surface-rules.mdx) | Surface rules DSL; replaces inline `if/else` surface-block selectors |
+| `trees.rs` | [4.9](../part-4-chunk-fill/4.9-trees.mdx) | Docstring stub only — actual tree placement logic lives in `mod.rs`; `TreeKind` enum and palm-shape stamping introduced in PR 5 |
+| `tuning.rs` | [Appendix C](./c-constants-catalog.mdx) | All numeric constants in one place; see the Constants Catalog rather than any single chapter |
+
+## src/bin/
+
+| File | Chapter | Brief |
+|---|---|---|
+| `worldgen_viz/` | [5.4](../part-5-engineering/5.4-visualizer.mdx) | egui-on-wgpu debug visualizer: camera, cross-section, overlays, probe display, presets |
+| `doc_render/` | — | Image generation and screenshot parity tooling; not a worldgen module |
