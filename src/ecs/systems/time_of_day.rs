@@ -29,12 +29,19 @@ pub fn sun_state(ecs: &GameEcs) -> ([f32; 3], f32) {
     let mut sun_dir = [1.0, 0.0, 0.0];
     let mut intensity = 0.0;
     for (_, (_, tod)) in ecs.world.query::<(&Sun, &TimeOfDay)>().iter() {
-        // The sun sweeps a circle in the XY plane (Z fixed at a slight
-        // tilt for visual warmth). t=0 puts the sun at +X (technically
-        // below horizon as sin(0)=0, but the intensity clamp handles that).
+        // The sun sweeps a circle in the XY plane. t=0 puts the sun at
+        // +X (technically below horizon as sin(0)=0, but the intensity
+        // clamp handles that).
+        //
+        // The Z component is held at 0 so the sun stays in the X/Y
+        // plane. A previous "slight Z tilt for visual warmth" (0.2)
+        // produced a permanent +Z bias that visibly brightened +Z-
+        // facing walls relative to -Z-facing walls at every time of
+        // day — two walls both "parallel to the sun" ended up with
+        // 0.43 vs 0.286 wrap values from the n·L kink at zero.
         let angle = tod.t * std::f32::consts::TAU;
         let (s, c) = angle.sin_cos();
-        sun_dir = [c, s, 0.2];
+        sun_dir = [c, s, 0.0];
         // Intensity = clamp(sin(angle) + 0.1, 0, 1).
         // The +0.1 gives a tiny pre-dawn / post-dusk twilight glow so the
         // world doesn't pop suddenly from black to lit at the horizon.
