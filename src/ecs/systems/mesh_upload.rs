@@ -358,8 +358,11 @@ pub fn drain_persistence(
                 }
                 None => {
                     // Region file existed but the slot was empty —
-                    // fall back to procedural gen.
-                    jobs.spawn_gen(coord, generator.clone(), registry.clone());
+                    // fall back to procedural gen. Snapshot neighbours
+                    // so the gen worker's initial BFS uses real
+                    // boundary data instead of all-`None` sentinels.
+                    let neighbors = gather_neighbors(world, coord);
+                    jobs.spawn_gen(coord, generator.clone(), registry.clone(), neighbors);
                 }
             },
             PersistResult::Saved { coord } => {

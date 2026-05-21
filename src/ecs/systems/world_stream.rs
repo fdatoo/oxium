@@ -13,6 +13,7 @@
 
 use crate::ecs::components::Position;
 use crate::ecs::GameEcs;
+use crate::ecs::systems::mesh_upload::gather_neighbors;
 use crate::jobs::Jobs;
 use crate::persistence::thread::{PersistRequest, Persistence};
 use crate::persistence::SaveIndex;
@@ -216,7 +217,8 @@ pub fn world_stream(
             if save_index.has(saves_dir, c) {
                 let _ = persistence.req_tx.send(PersistRequest::Load { coord: c });
             } else {
-                jobs.spawn_gen(c, generator.clone(), registry.clone());
+                let neighbors = gather_neighbors(world, c);
+                jobs.spawn_gen(c, generator.clone(), registry.clone(), neighbors);
             }
             budget -= 1;
         }
