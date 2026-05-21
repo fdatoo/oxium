@@ -1,8 +1,9 @@
 # Modern Lighting Overhaul — Design Spec
 
 **Date:** 2026-05-20
-**Status:** Approved, ready for implementation planning
+**Status:** Partially superseded — PRs 1-4 merged; PRs 5-8 deferred until after the graph-engine rewrite ships.
 **Supersedes:** lighting section of `2026-05-18-oxium-design.md`
+**Partly superseded by:** [`2026-05-21-lighting-graph-engine-design.md`](2026-05-21-lighting-graph-engine-design.md) — the CPU-propagation portion (the "CPU light propagation" section and parts of "Module shape" / "Data model") is replaced by the graph-engine design. The GPU/visual portion (HDR, light_volume sampling, shadow map, bloom, ambient bounce, volumetrics, day/night colors) is unaffected and PRs 5-8 still apply once the engine lands.
 
 ## Summary
 
