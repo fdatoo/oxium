@@ -344,6 +344,15 @@ pub fn mesh_lod(
             }
         }
     }
+    // Mark the mesh as containing water if any LOD column's surface or
+    // bulk block is water. The renderer reads this to skip the planar-
+    // reflection pass when no visible chunk has water — at LOD distance
+    // we still want reflections if a far-away ocean is in view.
+    mesh.has_water = lod
+        .surface_block
+        .iter()
+        .chain(lod.bulk_block.iter())
+        .any(|b| *b == Block::Water);
     mesh
 }
 

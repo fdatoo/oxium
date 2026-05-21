@@ -174,6 +174,11 @@ pub fn mesh_greedy(
         greedy_one_face(face, chunk, &block_at, &light_at, reg, &mut mesh);
     }
     emit_water_tops_per_block(chunk, &block_at, &light_at, reg, &mut mesh);
+    // Single linear pass over the 32³ dense grid to set the water flag.
+    // The renderer reads it to decide whether the planar-reflection pass
+    // can be skipped. Cost is negligible compared to the mesh itself, and
+    // it only runs at mesh time — not per frame.
+    mesh.has_water = chunk.blocks.iter().any(|b| *b == Block::Water);
     mesh
 }
 
