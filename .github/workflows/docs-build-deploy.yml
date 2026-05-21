@@ -1,0 +1,80 @@
+name: Build and deploy docs book
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/book/**'
+      - 'src/bin/doc_render/**'
+      - 'src/viz_render/**'
+      - 'src/worldgen/**'
+      - 'src/voxel/**'
+      - '.github/workflows/docs-build-deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build doc_render
+        run: cargo build --release --bin doc_render
+
+      - name: Regenerate images
+        run: bash docs/book/tools/gen-images.sh
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: docs/book/package-lock.json
+
+      - name: Install npm deps
+        run: npm ci
+        working-directory: docs/book
+
+      - name: Build site
+        run: npm run build
+        working-directory: docs/book
+
+      - name: Verify parity (stub)
+        # The /parity page uses client-side fetch + useEffect, so its
+        # PASS/FAIL only renders in a real browser. CI verification of
+        # the parity table requires a headless browser (Playwright,
+        # Puppeteer) which is over-engineered for one test. The page
+        # remains useful as a local debugging tool — visit /parity in
+        # any browser to see the table.
+        run: echo "parity check is browser-only; skipping in CI"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/book/build
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
