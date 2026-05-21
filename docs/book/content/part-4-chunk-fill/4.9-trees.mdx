@@ -3,6 +3,277 @@ id: 4.9-trees
 title: 4.9 Trees
 ---
 
-import Stub from '@site/src/components/Stub';
+Every chapter in Part IV has built toward the same question: what block is at this voxel? Density shaped the terrain. Caves chiselled its interior. Aquifers flooded the low pockets. Surface rules capped every column with the right material. Trees are the final touch — vegetation stamped on top of the surface after all of that is settled. They are biome-driven, per-cell deterministic, and they reach directly back to the hash mixer from [1.2 Deterministic Randomness](../part-1-foundations/1.2-determinism.mdx). There is no R-tree, no spatial index, no overlap detection: just a hash, a threshold check, and a stamp.
 
-<Stub />
+## Why per-cell, not per-column
+
+A tree occupies several blocks in X and Z. If placement were decided per-column — one roll per trunk candidate — two nearby columns could both decide to spawn a tree, producing trunks jammed up against each other or canopies merged into an indistinguishable mass. Managing inter-trunk minimum distances would require a spatial query across columns, which gets complicated fast.
+
+The engine avoids the problem with a grid. The world is partitioned into `TREE_CELL_SIZE × TREE_CELL_SIZE` cells (8 × 8 blocks). Each cell is either empty or contains exactly one tree. That tree's trunk is placed at a hash-derived offset within the cell interior, ensuring a deterministic minimum spacing equal to the cell margin. At most one tree origin per cell; no collision resolution needed.
+
+The cell grid is not stored anywhere. It exists only as a mathematical mapping from world coordinates to cell coordinates:
+
+```rust
+// src/worldgen/tuning.rs
+pub const TREE_CELL_SIZE: i32 = 8;
+pub const TREE_MARGIN: i32 = 5;
+```
+
+`TREE_MARGIN` is how many extra blocks of world-space the tree placer scans beyond the chunk boundary when stamping — enough to catch neighbouring cells whose canopy overhangs into this chunk.
+
+## The hash function
+
+Tree placement uses its own dedicated mixer rather than the general-purpose `mix` from `hash.rs`. The reason is practical: the tree placement loop must be fast per cell, and the version in `mod.rs` is inlined and direct:
+
+```rust
+// src/worldgen/mod.rs
+fn tree_hash(seed: u64, x: i32, z: i32, salt: u32) -> u32 {
+    let mut h = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    h ^= (x as i64 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    h = h.rotate_left(13);
+    h ^= (z as i64 as u64).wrapping_mul(0x1656_67B1_9E37_79F9);
+    h = h.rotate_left(17);
+    h ^= (salt as u64).wrapping_mul(0xCC9E_2D51_1B87_3593);
+    ((h ^ (h >> 33)) as u32) ^ ((h >> 16) as u32)
+}
+```
+
+The multipliers are the same large primes the general hash mixer uses, ensuring good avalanche across the integer space. The `salt` parameter distinguishes different roles at the same cell coordinate:
+
+| Salt | Use |
+|------|-----|
+| 0 | Density roll: `% 100 < rate_percentile?` |
+| 1 | Trunk X offset within the cell |
+| 2 | Trunk Z offset within the cell |
+| 3 | Trunk height randomisation |
+
+Salting like this means four entirely different-looking numbers come out of the same `(seed, cell_x, cell_z)` triple, with no correlation between them.
+
+## Per-cell rolls: `tree_in_cell`
+
+```rust
+// src/worldgen/mod.rs
+fn tree_in_cell(&self, cell_x: i32, cell_z: i32) -> Option<Tree>
+```
+
+This function is the core of the whole system. It is a pure function of `(self.seed, cell_x, cell_z)` — no mutable state, no IO. Two calls with the same arguments produce the same result, which is exactly what makes cross-chunk tree stamping work. Every call proceeds through the same series of gates:
+
+**Step 1 — pick the trunk column.**
+
+```rust
+let wx = cell_x * TREE_CELL_SIZE
+    + (tree_hash(self.seed, cell_x, cell_z, 1) % 6) as i32
+    + 1;
+let wz = cell_z * TREE_CELL_SIZE
+    + (tree_hash(self.seed, cell_x, cell_z, 2) % 6) as i32
+    + 1;
+```
+
+The offset `% 6 + 1` places the trunk in columns 1–6 within the 8-block cell, keeping at least one block of margin on each side. No two trunks in adjacent cells will share a column.
+
+**Step 2 — sample the column.**
+
+The biome, surface height, lake rim, and cliff flag for that `(wx, wz)` column are fetched from the pre-computed `ColumnData`. This is where the tree system is coupled to everything that came before: biome (from the climate pipeline), surface height (from the heightmap and density scan), lakes (from hydrology), and cliffs (from slope thresholds).
+
+**Step 3 — environment vetos.**
+
+Several conditions return `None` immediately:
+
+- The column is a cliff (`col.is_cliff`). Tree trunks would float in mid-air or sink into bare stone faces.
+- The column's surface is at or above `SNOW_LINE = 110`. Alpine elevation is too cold.
+- The column sits below a lake's water surface (`col.height < col.lake_rim`). Even palms do not grow submerged.
+- The column is in the beach band (`SEA_LEVEL − 1` to `SEA_LEVEL + 2`) and the biome's tree kind is not `Palm`. Oaks do not grow on sand; palms do, but only the tropical biome produces palms.
+
+**Step 4 — density roll.**
+
+```rust
+let rate = col.biome.tree_rate_percentile()?;
+let effective_rate = if on_beach { rate / 4 } else { rate };
+let roll = tree_hash(self.seed, cell_x, cell_z, 0) % 100;
+if roll >= effective_rate {
+    return None;
+}
+```
+
+If the biome has `None` as its rate (Tundra, Desert), the `?` returns immediately. Otherwise the roll is a straightforward percentile check. Beach palms are quartered — `rate / 4` — so tropical beaches read as scattered silhouettes, not dense groves.
+
+**Step 5 — build the `Tree`.**
+
+The engine finds the actual topmost solid block for the trunk column by running a density walk rather than trusting the heightmap target directly. With 3D density, the surface can deviate from `col.height` by up to `±SURFACE_BAND` blocks; the trunk needs to land on the real surface, not the nominal one. Then the trunk height is rolled:
+
+```rust
+let trunk_h = match kind {
+    TreeKind::Oak  => 4 + (tree_hash(self.seed, cell_x, cell_z, 3) % 3) as i32,
+    TreeKind::Palm => 7 + (tree_hash(self.seed, cell_x, cell_z, 3) % 3) as i32,
+};
+```
+
+Oak trunks are 4–6 blocks; Palm trunks are 7–9 blocks.
+
+## Biome rate table
+
+The `tree_rate_percentile` method on `Biome` drives the density decision:
+
+```rust
+// src/worldgen/mod.rs — impl Biome
+fn tree_rate_percentile(self) -> Option<u32> {
+    match self {
+        Biome::Tundra | Biome::Desert => None,
+        Biome::Plains       => Some(TREE_RATE_PLAINS),
+        Biome::Forest
+        | Biome::SnowyForest => Some(TREE_RATE_FOREST),
+        Biome::Tropical      => Some(TREE_RATE_TROPICAL),
+    }
+}
+```
+
+With the constants from `tuning.rs`:
+
+| Biome | Rate (%) | Notes |
+|-------|----------|-------|
+| Tundra | — | No trees; `None` short-circuits the roll |
+| Desert | — | No trees; `None` short-circuits the roll |
+| Plains | 12 | Roughly 1-in-8 cells spawn a tree — open fields |
+| Forest | 55 | Just over half of all cells — dense canopy cover |
+| SnowyForest | 55 | Same density as Forest; taiga / boreal feel |
+| Tropical | 65 | Densest biome; beach palms additionally halved to 16 % |
+
+These are **per-cell** rates, not per-column. Each cell is 8 × 8 = 64 columns. A 12 % rate therefore means roughly 1 tree per 533 columns in Plains, and a 65 % rate means roughly 1 tree per 98 columns in Tropical — much denser, but never a continuous wall because the cell grid enforces minimum spacing.
+
+## Tree shapes: `TreeKind`
+
+```rust
+// src/worldgen/mod.rs
+enum TreeKind { Oak, Palm }
+```
+
+`Biome::tree_kind` assigns the shape:
+
+```rust
+fn tree_kind(self) -> TreeKind {
+    match self {
+        Biome::Tropical => TreeKind::Palm,
+        _ => TreeKind::Oak,
+    }
+}
+```
+
+All non-tropical biomes that host trees get Oaks. Tropical gets Palms. The `TreeKind` flows into the `Tree` struct alongside the trunk position and height:
+
+```rust
+// src/worldgen/mod.rs
+struct Tree {
+    wx: i32,      // world X of trunk
+    wz: i32,      // world Z of trunk
+    base_y: i32,  // world Y of the surface block under the trunk
+    trunk_h: i32, // number of Wood blocks above the surface
+    kind: TreeKind,
+}
+```
+
+## Stamping: `stamp_tree`
+
+Once `tree_in_cell` returns a `Some(Tree)`, `stamp_tree` writes the block geometry. The trunk is always a vertical run of `Wood`:
+
+```rust
+for dy in 1..=tree.trunk_h {
+    try_set_air(coord, out, tree.wx, tree.base_y + dy, tree.wz, Block::Wood);
+}
+let top_y = tree.base_y + tree.trunk_h;
+```
+
+`try_set_air` only writes to `Block::Air` slots within the chunk volume. Blocks outside the chunk boundary are ignored; existing non-air voxels are preserved. This means the trunk does not carve through hills, and multiple adjacent chunks can call `stamp_tree` for the same tree without clobbering each other.
+
+**Oak canopy.** A roughly spherical shell of `Leaves` blocks centred just above the trunk top, with radius² threshold 6 to clip the corners:
+
+```rust
+for dy in -1..=2 {
+    for dz in -2..=2 {
+        for dx in -2..=2 {
+            let r2 = dx * dx + dy * dy + dz * dz;
+            if r2 > 6 { continue; }
+            try_set_air(coord, out, tree.wx + dx, top_y + dy, tree.wz + dz, Block::Leaves);
+        }
+    }
+}
+```
+
+The sphere's Y range is asymmetric (`-1..=2` rather than `-2..=2`) to give Oaks a slightly taller crown than base.
+
+**Palm canopy.** A flat-radiating frond pattern rather than a sphere. Five fronds evenly spaced around the trunk top, each extending 3 blocks outward. Outer frond tips drop 1 block in Y, giving the characteristic drooping silhouette:
+
+```rust
+try_set_air(coord, out, tree.wx, top_y + 1, tree.wz, Block::Leaves); // centre cap
+let arm_count = 5;
+for a in 0..arm_count {
+    let theta = a as f32 * std::f32::consts::TAU / arm_count as f32;
+    for step in 1..=3i32 {
+        let dx = (theta.cos() * step as f32).round() as i32;
+        let dz = (theta.sin() * step as f32).round() as i32;
+        let dy = if step >= 3 { -1 } else { 0 };
+        try_set_air(coord, out, tree.wx + dx, top_y + dy, tree.wz + dz, Block::Leaves);
+    }
+}
+```
+
+The frond arms are 3 blocks long. The outer tip (`step >= 3`) droops one block down. With 5 arms radiating at 72° intervals, the palm reads clearly as distinct from the Oak blob at any view distance.
+
+## The dual-stamp problem
+
+An Oak canopy extends 2 blocks in every direction from the trunk. A tree whose trunk sits near the edge of its chunk can have leaves that extend into the neighbouring chunk. If each chunk only stamped trees whose trunk cell falls within its own boundary, the overhanging leaves would simply never be written — leaving half-canopied trees at chunk edges.
+
+The solution is `add_trees`, which expands the cell scan by `TREE_MARGIN` in every direction before iterating:
+
+```rust
+// src/worldgen/mod.rs — Generator::add_trees
+let xmin = cmin.x - TREE_MARGIN;   // TREE_MARGIN = 5
+let xmax = cmax.x + TREE_MARGIN;
+let zmin = cmin.z - TREE_MARGIN;
+let zmax = cmax.z + TREE_MARGIN;
+let cell_xmin = xmin.div_euclid(TREE_CELL_SIZE);
+let cell_xmax = (xmax - 1).div_euclid(TREE_CELL_SIZE);
+let cell_zmin = zmin.div_euclid(TREE_CELL_SIZE);
+let cell_zmax = (zmax - 1).div_euclid(TREE_CELL_SIZE);
+for cell_x in cell_xmin..=cell_xmax {
+    for cell_z in cell_zmin..=cell_zmax {
+        if let Some(tree) = self.tree_in_cell(cell_x, cell_z) {
+            self.stamp_tree(tree, coord, out);
+        }
+    }
+}
+```
+
+For a 32-block chunk with `TREE_CELL_SIZE = 8` and `TREE_MARGIN = 5`, the scan covers cells in a ring that extends up to 5 blocks beyond the chunk boundary in every direction. A tree whose trunk is in that ring may have canopy blocks within the chunk. `stamp_tree`'s `try_set_air` then silently drops any writes that fall outside the chunk volume, so the overhanging slices are written once, by the chunk they land in.
+
+Because `tree_in_cell` is deterministic, every chunk that queries a given cell gets the same `Tree` back. The 5-block margin is enough to cover the widest canopy (Oak radius 2 = 2 blocks from trunk, plus up to 7 blocks of trunk offset within the cell = at most 9 blocks total, well within `TREE_MARGIN + TREE_CELL_SIZE`).
+
+`add_trees` is called at the end of `fill_chunk`, after terrain, caves, fluid, and surface rules are all settled:
+
+```rust
+// src/worldgen/mod.rs — Generator::fill_chunk (abridged)
+fluid::settle_fluid(out, &aquifer_mask);
+// After the terrain pass, lay trees on top. Cross-chunk trees
+// are placed too, because we scan every cell in a TREE_MARGIN-block
+// ring around the chunk.
+self.add_trees(coord, out);
+```
+
+Trees stamp on top of finished terrain. They cannot undo surface block selection, cannot re-open caves, and cannot flood or drain aquifers. They are strictly additive in the direction that finished block slots are available.
+
+## What you can now do
+
+Read `tree_in_cell` and `stamp_tree` in `src/worldgen/mod.rs` starting around line 1335. The full tree placement pipeline — hash, gate, roll, stamp — is under 120 lines. The biome rate constants are in `src/worldgen/tuning.rs` starting at line 189.
+
+Tuning options (recompile required for constant changes; biome method changes are in `mod.rs`):
+
+- **`TREE_RATE_PLAINS`** (default 12): raise toward 30 for a significantly busier grassland; lower toward 0 for a near-treeless prairie.
+- **`TREE_RATE_FOREST`** / **`TREE_RATE_SNOWY_FOREST`** (both default 55): these are already close to their practical maximum given the 8-block cell grid. Lowering to 25 gives open boreal parkland.
+- **`TREE_RATE_TROPICAL`** (default 65): the densest biome. The beach quartering (`rate / 4 = 16 %`) is hardcoded in `tree_in_cell`; to change it, edit that expression.
+- **`TREE_CELL_SIZE`** (default 8): shrinking to 4 doubles tree density limits but can produce tight clusters; expanding to 16 forces sparser, more spaced-out groves.
+- **Adding a `TreeKind`**: add a variant to `enum TreeKind`, extend `Biome::tree_kind`, extend the `trunk_h` match in `tree_in_cell`, and add a match arm in `stamp_tree`'s canopy section. The infrastructure is already structured for it.
+
+## Next
+
+This is the last chapter of Part IV — the per-voxel runtime hot path is now fully covered. Part V zooms out to the engineering scaffolding that makes the whole pipeline deterministic, cache-friendly, and hot-reloadable.
+
+→ [5.1 Determinism Everywhere](../part-5-engineering/5.1-determinism.mdx)

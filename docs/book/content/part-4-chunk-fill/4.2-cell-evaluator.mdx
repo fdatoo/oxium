@@ -3,6 +3,130 @@ id: 4.2-cell-evaluator
 title: 4.2 The Cell Evaluator
 ---
 
-import Stub from '@site/src/components/Stub';
+import LazyWidget from '@site/src/widgets/LazyWidget';
+import CellGridSlice from '@site/src/widgets/CellGridSlice';
 
-<Stub />
+Chapter 4.1 walked the `DensityFn` tree that computes a single density value at a single world coordinate. That call is expensive — it touches three spline evaluations, a 3-octave FBM, and several arithmetic nodes. A chunk is 32×32×32 = 32 768 voxels. Evaluating the full tree once per voxel would cost 32 768 density evaluations per chunk. The engine instead evaluates it **729 times** — once per corner of a 9×9×9 lattice — then trilinearly interpolates the interior from those 729 samples. The ratio is roughly 45×, but the engine's module comment reports **~134× fewer expensive density evaluations** because the interpolated subtree (wrapped in `Marker(Interpolated)`) includes the three spline lookups that dominate wall-clock cost; the remaining per-voxel additions and the cave SDF are cheap by comparison.
+
+This chapter covers the data layout, the build loop, the per-column climate cache, and the honest cost of approximation.
+
+## The 9×9×9 corner lattice
+
+The geometry is straightforward. Each chunk spans 32 blocks on every axis. The engine divides that span into 8 equal cells of 4 blocks each (`CELL_SIZE = 4`), giving `CELL_COUNT = 8` cells per axis. Each cell needs corners on both sides and shares corners with its neighbours, so the lattice needs `CORNER_COUNT = CELL_COUNT + 1 = 9` corners per axis. Total: 9³ = **729 corner samples** per chunk.
+
+```
+CELL_SIZE    = 4          // block width of one cell
+CELL_COUNT   = 8          // 32 / 4
+CORNER_COUNT = 9          // CELL_COUNT + 1
+```
+
+Corners are stored flat in a `Vec<f32>` with the layout:
+
+```
+corners[cx + cy * CORNER_COUNT + cz * CORNER_COUNT²]
+```
+
+where `cx, cy, cz ∈ [0..CORNER_COUNT)`. X varies fastest, Z slowest — the same axis order as the fill loop that consumes the corners.
+
+## The build loop
+
+`CellEvaluator::new` fills the lattice in a single triply-nested loop:
+
+```rust
+// src/worldgen/density_graph.rs — CellEvaluator::new (abridged)
+for cz in 0..CORNER_COUNT {
+    for cy in 0..CORNER_COUNT {
+        for cx in 0..CORNER_COUNT {
+            let wx = chunk_origin.0 + (cx as i32) * CELL_SIZE;
+            let wy = chunk_origin.1 + (cy as i32) * CELL_SIZE;
+            let wz = chunk_origin.2 + (cz as i32) * CELL_SIZE;
+            let idx = cx + cy * CORNER_COUNT + cz * CORNER_COUNT * CORNER_COUNT;
+            let climate_idx = cx + cz * CORNER_COUNT;
+            // ... climate_cache lookup (see below) ...
+            corners[idx] = graph.evaluate(wx, wy, wz, climate, density, cfg);
+        }
+    }
+}
+```
+
+Each corner maps to a world coordinate via `origin + corner_index * CELL_SIZE`, so corners land on 4-block-aligned world positions. `graph.evaluate` runs the full `DensityFn` tree at that coordinate — all three splines, the FBM, and the arithmetic nodes. This is the only place the expensive tree runs; everything else in chunk fill is a table lookup or a handful of multiplies.
+
+## The per-column climate cache
+
+The three climate channels (`continentalness`, `terrain_shape`, `ridges_pv`) are 2D — they vary horizontally but not vertically. Calling the `column_climate` closure once per corner would invoke it 81 times per Y-column per chunk, but the result for a given `(cx, cz)` pair is the same for all 9 Y-levels. The evaluator maintains a flat cache indexed by `cx + cz * CORNER_COUNT` (64 entries = 8×8 column corners) and calls `column_climate` only on the first corner of each column:
+
+```rust
+let climate = match climate_cache[climate_idx] {
+    Some(c) => c,
+    None => {
+        let c = column_climate(wx, wz);
+        climate_cache[climate_idx] = Some(c);
+        c
+    }
+};
+```
+
+The cache reduces climate invocations from 729 to at most 81 — one per `(cx, cz)` pair, regardless of how many Y-levels the inner loop visits. In practice the climate closure itself hits the `FlatCache` spline marker from 4.1 and may already be cached at a coarser quart-block resolution, but this column cache is the first line of defence and operates purely within the evaluator.
+
+## Per-voxel cost: the trilerp
+
+Once the lattice is filled, `CellEvaluator::evaluate` answers any coordinate inside the chunk in five steps:
+
+1. Convert world coordinates to chunk-local coordinates.
+2. Identify the cell: `(cx, cy, cz) = floor(local / CELL_SIZE)`, clamped to `[0, CELL_COUNT-1]`.
+3. Compute the fractional position inside the cell: `(tx, ty, tz) = frac(local / CELL_SIZE)`.
+4. Load the 8 surrounding corners from the flat `Vec<f32>`.
+5. Trilinear interpolation — three nested lerps.
+
+The interpolation hierarchy mirrors Minecraft's `NoiseInterpolator` (lerp Y first, then X, then Z):
+
+```rust
+// Y-lerp at each of the 4 (x, z) pairs
+let xz00 = c000 + (c010 - c000) * ty;
+let xz10 = c100 + (c110 - c100) * ty;
+let xz01 = c001 + (c011 - c001) * ty;
+let xz11 = c101 + (c111 - c101) * ty;
+// X-lerp
+let z0 = xz00 + (xz10 - xz00) * tx;
+let z1 = xz01 + (xz11 - xz01) * tx;
+// Z-lerp
+z0 + (z1 - z0) * tz
+```
+
+That is 7 multiplies and 7 adds — around a nanosecond on modern hardware. Against the hundreds of nanoseconds the spline tree costs, the per-voxel overhead is negligible.
+
+## The interactive widget
+
+The widget below shows a **2D slice** of the same idea: a 9×9 grid of corner values (analogous to a single Y-level of the 9×9×9 lattice) with the bilerp field rendered across the 256×256 canvas. Each cell is 4 pixels wide (32 px / 8 cells = 4 blocks/cell, scaled to fill). Use the preset dropdown to load different corner patterns and observe how the bilerp field relates to the underlying exact function.
+
+<LazyWidget>
+  <CellGridSlice />
+</LazyWidget>
+
+Select **show error** with the **cliff** preset to see the key failure mode: a hard discontinuity at x = 4 becomes a smooth diagonal gradient in the bilerp output. The density functions in 4.1 are smooth and continuous everywhere — the cliff pattern is not a realistic density field — but knowing the failure mode matters when you encounter a sharp feature (for example, a biome border that a custom density tree tries to model with a step function).
+
+Switch to **noisy** and compare **bilerp** versus **exact**: for smooth fields the bilerp error is small. The corner grid captures enough of the frequency content to reconstruct the interior without visible artefacts. This is the fundamental reason the lattice approach works for terrain density: terrain density is a band-limited signal whose features span tens of blocks, well above the 4-block cell size.
+
+## The ~134× speedup
+
+The module's opening doc comment states the ratio:
+
+```
+~98k voxels per chunk  →  ~729 corner samples  ≈  134× fewer expensive evaluations
+```
+
+The arithmetic `32³ / 9³ ≈ 45` accounts for the voxel-to-corner count ratio alone. The 134× figure is larger because the `Marker(Interpolated)` wrapper encloses the entire default density tree, including the three spline evaluations that are by far the most expensive nodes. The splines read from cached height-map channels, run nested Hermite evaluations, and in the real implementation involve multiple indirections through `Arc`-ref-counted nodes. Replacing 32 768 such calls with 729 — and filling the remaining 31 768 voxels with three multiplies and three adds each — produces the observed speedup.
+
+Caves and aquifers are intentionally excluded from this optimisation. Cave SDFs need per-block precision to carve clean-edged tunnels; interpolating at 4-block granularity would produce lumpy, tile-visible cave walls. Those features subtract from the interpolated density at chunk-fill time, after `CellEvaluator::evaluate` has returned.
+
+## What you can now do
+
+To inspect a real corner lattice, run the engine with `WORLDGEN_DEBUG_DUMP=1` (when enabled, the generator serialises the 729 `f32` corners for the first generated chunk to a file). Each corner sits on a world position that is a multiple of 4 in all three axes.
+
+To tune the tradeoff between accuracy and cost, change `CELL_SIZE` in `density_graph.rs`. Halving it to 2 quadruples the corner count (9³ → 17³ ≈ 5000) and halves the approximation error; doubling it to 8 reduces corners to 5³ = 125 but noticeably degrades surface quality at terrain boundaries. The default `CELL_SIZE = 4` matches Minecraft's NoiseChunk.
+
+See [1.9 Trilerp](../part-1-foundations/1.9-trilerp.mdx) for the full derivation of bilinear and trilinear interpolation from first principles, including the error bound for smooth functions.
+
+## Next
+
+→ [4.3 Composing Caves](./4.3-composing-caves.mdx) — how the cave SDF is subtracted from the interpolated density field after `CellEvaluator` returns, and why caves stay per-voxel.

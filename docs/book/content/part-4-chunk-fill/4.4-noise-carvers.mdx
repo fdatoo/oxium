@@ -3,6 +3,241 @@ id: 4.4-noise-carvers
 title: 4.4 Noise Carvers
 ---
 
-import Stub from '@site/src/components/Stub';
+Every Minecraft-descended terrain engine eventually defines the same split: a *base density* that sculpts the mountain silhouettes and flat plains, plus a separate layer of noise-driven cave channels that chisel the interior. This engine uses four channels from `NoiseCarvers` to do that chiselling. Each channel produces a distinct cave morphology — rounded chambers, thin winding tubes, standing columns, or vertical surface shafts — and each reduces to the same signed-density pattern: return a value below zero where you want to carve, above zero (or one) where you don't. The `min` / `max` operations in `fill_chunk` handle the rest.
 
-<Stub />
+This chapter reads each channel's source in `src/worldgen/caves.rs` and explains both the underlying math and the config knobs that control it. For the noise primitive all four channels build on, see [1.4 FBM](../part-1-foundations/1.4-fbm.mdx).
+
+## The channels at a glance
+
+| Channel | `NoiseCarvers` fields | Composition | Morphology |
+|---|---|---|---|
+| Cheese | `cheese`, `cave_layer` | `min(cheese)` — carves | Smooth rounded chambers, vertically elongated |
+| Spaghetti | `spaghetti_2d`, `spaghetti_2d_modulator`, `spaghetti_2d_elevation`, `spaghetti_2d_thickness`, `spaghetti_roughness` | `min(spag + roughness)` — carves | Narrow winding tubes, varying in density across the map |
+| Surface entrance | `surface_entrance` | `min(surface_entrance)` — carves | Vertical shafts near sea level (currently disabled: `intensity = 0.0`) |
+| Pillar | `pillar`, `pillar_rareness`, `pillar_thickness` | `max(pillar)` — refills | Standing rock columns inside otherwise-carved cave space |
+
+All channels are constructed in `NoiseCarvers::new` by the shared `build_channel` function. Each gets a unique seed salt (1001–1011) so the fields are uncorrelated even when they come from the same world seed.
+
+```rust
+// src/worldgen/caves.rs
+pub struct NoiseCarvers {
+    // Cheese
+    pub cheese: Fbm<Simplex>,
+    pub cave_layer: Fbm<Simplex>,
+    // Spaghetti
+    pub spaghetti_2d: Fbm<Simplex>,
+    pub spaghetti_2d_modulator: Fbm<Simplex>,
+    pub spaghetti_2d_elevation: Fbm<Simplex>,
+    pub spaghetti_2d_thickness: Fbm<Simplex>,
+    pub spaghetti_roughness: Fbm<Simplex>,
+    // Pillars
+    pub pillar: Fbm<Simplex>,
+    pub pillar_rareness: Fbm<Simplex>,
+    pub pillar_thickness: Fbm<Simplex>,
+    // Surface entrance
+    pub surface_entrance: Fbm<Simplex>,
+}
+```
+
+## Build it — cheese
+
+Cheese uses one primary FBM channel (`cheese`) and one gating channel (`cave_layer`). Its return value is a signed density: negative means "carve this voxel to air", positive means "leave solid."
+
+```rust
+// src/worldgen/caves.rs — cheese_contribution (abridged)
+pub fn cheese_contribution(
+    wx: i32, wy: i32, wz: i32,
+    raw_density: f32,
+    carvers: &NoiseCarvers,
+    cfg: &CaveConfig,
+) -> f32 {
+    let cheese = carvers.cheese.get([
+        wx as f64 * cfg.cheese_xz_scale as f64,
+        wy as f64 * cfg.cheese_y_scale as f64,
+        wz as f64 * cfg.cheese_xz_scale as f64,
+    ]) as f32;
+    let term1 = (cfg.cheese_offset + cheese).clamp(-1.0, 1.0);
+
+    let supp = (cfg.cheese_suppression_offset
+        + cfg.cheese_suppression_slope * raw_density)
+        .clamp(cfg.cheese_suppression_min, cfg.cheese_suppression_max);
+
+    let layer = carvers.cave_layer.get([
+        wx as f64 * cfg.cave_layer_xz_scale as f64,
+        wy as f64 * cfg.cave_layer_y_scale as f64,
+        wz as f64 * cfg.cave_layer_xz_scale as f64,
+    ]) as f32;
+    let layerized = cfg.cave_layer_intensity * layer * layer;
+
+    term1 + supp + layerized
+}
+```
+
+**The three additive components:**
+
+`term1 = clamp(cheese_offset + cheese, -1, 1)` is the core carver. With `cheese_offset = 0.27`, the distribution shifts so that roughly a third of all sample points produce a negative `term1` (the "carve" region). The FBM octaves `[0.5, 1.0, 2.0, 1.0, 2.0, 1.0, 0.0, 2.0, 0.0]` favour mid-to-high frequencies, giving the chambers a characteristically bumpy, rounded edge rather than perfectly smooth blobs.
+
+`supp = clamp(suppression_offset + suppression_slope * raw_density, 0, 0.5)` is a surface-suppression term. With `cheese_suppression_offset = 1.5` and `cheese_suppression_slope = -0.64`, the suppression is large and positive near the surface (where `raw_density ≈ 0`) and falls toward zero deep underground (as `raw_density` grows). Adding a large positive `supp` to `term1` makes it harder to go negative — which is exactly what you want near the surface, where cheese pockets would otherwise erode the terrain above them. Deep underground, `supp` shrinks and lets `term1` drive the density.
+
+`layerized = cave_layer_intensity * layer²` is a regional gating term. `cave_layer` is a low-octave FBM sampled at `y_scale = 8.0` — Y advances eight times faster than XZ, producing horizontal bands. Squaring the output means `layerized` is always non-negative. Where `|layer| ≈ 0` (near a zero crossing of the layer noise), `layerized ≈ 0` and cheese carves freely. Where `|layer|` is large, `layerized` can reach `cave_layer_intensity = 6.0`, pushing the total far positive and suppressing cheese in that horizontal stratum. Without this term, the clamp at −1 would make roughly 50 % of all deep voxels carve regardless of position, producing uniform Swiss cheese.
+
+**The scale knobs** — `cheese_xz_scale = 1.0` and `cheese_y_scale = 0.6667` — deliberately stretch the noise in Y. A voxel at (0, 1, 0) samples at a different Y coordinate than (0, 1.5, 0) would in isotropic sampling. This makes the chambers taller than wide, giving them the vertical cavern silhouette instead of the flat donut pockets produced by isotropic Simplex.
+
+## Build it — spaghetti
+
+Spaghetti uses five channels. Its math is the most involved of the four, but the key insight is simple: *a cubed absolute value is enormous almost everywhere, and near-zero only along a thin curve*. That thin curve is the tube.
+
+```rust
+// src/worldgen/caves.rs — spaghetti_contribution (abridged)
+// 1. Elevation noise maps [-1,1] → [elev_min, elev_max]
+let elev = map_from_unit_to(elev_unit, cfg.spaghetti_elevation_min,
+                             cfg.spaghetti_elevation_max);
+// 2. Y-clamped gradient: linear ramp from (from_y, from_value) to (to_y, to_value)
+let y_grad = y_clamped_gradient(wy, ...);
+// 3. slopedSpaghetti = |elev + y_grad|
+let sloped = (elev + y_grad).abs();
+// 4. Thickness modulator
+let thickness_mod = cfg.spaghetti_thickness_offset
+    + cfg.spaghetti_thickness_slope * thickness_noise;
+// 5. layerRidged = (sloped + thickness_mod)^3
+let layer_ridged = (sloped + thickness_mod).powi(3);
+// 6. caveNoise = weird_scaled(modulator, sp2d) + cave_noise_offset * thickness_mod
+let cave_noise = weird_scaled_sample(&carvers.spaghetti_2d, modulator, ...) 
+    + cfg.spaghetti_cave_noise_offset * thickness_mod;
+// 7. clamp(max(cave_noise, layer_ridged), clamp_min, clamp_max)
+cave_noise.max(layer_ridged).clamp(cfg.spaghetti_clamp_min, cfg.spaghetti_clamp_max)
+```
+
+**Step by step:**
+
+`elev` is a 2D noise sample (Y = 0, so it is constant in Y for any XZ column) mapped to `[-8, 8]`. This value represents where a tube wants to sit in Y — it is the tube's "preferred elevation" wobble.
+
+`y_grad` is a piecewise-linear ramp in world Y. From `spaghetti_gradient_from_y = 80` (value −6) to `spaghetti_gradient_to_y = -120` (value +9), this produces a gradually falling value as Y increases. At around Y = −50, the gradient crosses zero; at the surface (Y = 70), it is approximately −5.25.
+
+`sloped = |elev + y_grad|` is near zero only where `elev ≈ -y_grad` — where the elevation noise happens to match the inverted Y gradient. Since `elev` is constant in Y, this condition describes a *horizontal curve* in XZ space. Because `y_grad` varies with depth, each depth level sees a different demand on `elev`, producing a tube that meanders in elevation as XZ changes.
+
+`thickness_mod = spaghetti_thickness_offset + spaghetti_thickness_slope * thickness_noise`. With `spaghetti_thickness_offset = -0.15` and `spaghetti_thickness_slope = -0.2`, this is a small negative value. Adding a negative `thickness_mod` to `sloped` shifts the range where `(sloped + thickness_mod)` is near zero, which is the carved region. A smaller (more negative) `thickness_offset` widens the carved band; a less negative value narrows it.
+
+`layer_ridged = (sloped + thickness_mod)^3`. Cubing the inner term amplifies any deviation from zero extremely quickly. The result is enormous and positive almost everywhere, and negative (or near-zero) only in a narrow band around the tube curve where `sloped ≈ -thickness_mod`. Where `layer_ridged` is large, `max(cave_noise, layer_ridged)` returns solid density. Where both `layer_ridged` and `cave_noise` are small enough, the `clamp` to `[-1, 1]` produces a negative result and the tube carves.
+
+`weird_scaled_sample` is the region-modulation step. It evaluates a separate modulator noise to get a *rarity* value (one of {0.5, 0.75, 1.0, 2.0, 3.0}), then samples `spaghetti_2d` at coordinates divided by that rarity and multiplies the output by the rarity. This means: in rare-factor-3 regions, the sample coordinate is compressed and the output amplitude is tripled — tubes in those regions are wider and pack more density into each interval. In rare-factor-0.5 regions, tubes are finer and denser. The effect is a natural variation in tube character across the map without an explicit zone mask.
+
+**Roughness** is a separate function applied in `fill_chunk`:
+
+```rust
+// spaghetti_roughness — applied as: composed = composed.min(spag + roughness)
+-0.05 * v.abs()
+```
+
+It takes the absolute value of a high-frequency FBM (`first_octave: -5`) and negates it. The output is always `<= 0`. Adding a small negative roughness to `spag` before the `min` means the effective density near tube walls is pushed slightly lower, carving a little farther into the wall and giving it a chiselled texture rather than a mathematically smooth surface.
+
+**Tuning spaghetti width:** `spaghetti_thickness_offset` (default `−0.15`) is the primary lever. The current default is deliberately thin — with the procedural carver ([4.5](./4.5-procedural-carvers.mdx)) providing the main tunnel network, spaghetti is tuned to add texture (faint cracks and natural wall irregularities) rather than generate primary passage geometry. Set it to `−0.5` for tubes about 8 blocks across horizontally; set it to `0.0` to disable spaghetti entirely.
+
+## Build it — surface entrance
+
+Surface entrance is conceptually the simplest channel: one 3D FBM, a threshold check, and a Y-band gate with soft fades. Its distinctive property is that `fill_chunk` applies it **without** the `raw_density >= underground_density_threshold` guard — it operates where cheese and spaghetti cannot, carving through the thin surface band.
+
+```rust
+// src/worldgen/caves.rs — surface_entrance_contribution (abridged)
+let fade = surface_entrance_y_fade(wy, cfg);  // 0 outside the Y band
+let v = carvers.surface_entrance.get([
+    wx as f64 * cfg.surface_entrance_xz_scale as f64,
+    wy as f64 * cfg.surface_entrance_y_scale as f64,  // 0.0: constant in Y
+    wz as f64 * cfg.surface_entrance_xz_scale as f64,
+]) as f32;
+let above = v - cfg.surface_entrance_threshold;
+if above <= 0.0 { return 1.0; }  // no carving
+let t = (above / 0.10).clamp(0.0, 1.0);
+let depth = t * t * (3.0 - 2.0 * t);  // smoothstep
+-cfg.surface_entrance_intensity * depth * fade
+```
+
+`surface_entrance_y_scale = 0.0` means Y is fixed at zero when sampling, so the noise value is constant through the entire Y column for any given XZ coordinate. This is intentional: where the noise crosses `surface_entrance_threshold = 0.35`, the result is a *vertical shaft* from the top of the active band all the way to the bottom, rather than a localized 3D pocket that might be disconnected from the underground.
+
+The `y_fade` function applies two soft edges: a smoothstep ramp over the top `surface_entrance_fade_blocks = 6` blocks of the active band, and a linear depth taper from `y_max` down to `y_min`. The depth taper makes the carving contribution weakest near the bottom of the band — so the shaft carves cleanly through the surface but loses force before it reaches the deep cave zone, preventing blind shafts that end in solid bedrock.
+
+**Currently disabled:** `surface_entrance_intensity = 0.0` in `assets/worldgen/default.ron`. When `intensity <= 0`, the function returns `1.0` immediately (a sentinel positive density — no carving). The design was shelved because a 2D-shaft carver with no knowledge of the underground cave network would produce craters that dead-end in rock. Spaghetti tubes, whose gradient is tuned so they can surface at around 5 % density near Y = 70, now provide natural cave entrances organically — they reach the surface on their own without requiring a dedicated shaft channel.
+
+## Build it — pillar
+
+Pillar is the only channel that *adds* density. It composes as `max(pillar)` rather than `min`, so a positive pillar value can pull a previously-carved (negative) density back above zero, leaving solid rock standing inside an open cave.
+
+```rust
+// src/worldgen/caves.rs — pillar_contribution
+// MC formula:
+//   pillar_raw  = 2 * noise(pillar)            — doubled range
+//   pillar_rare = -1 - noise(pillar_rareness)  — always ≤ -1
+//   thickness   = (0.55 + 0.55 * noise(pillar_thickness))^3
+//   raw         = (pillar_raw + pillar_rare) * thickness
+//   if raw >= pillar_cutoff: scale to [0, pillar_intensity]
+let pillar_raw = 2.0 * carvers.pillar.get([p_x, p_y, p_z]) as f32;
+let pillar_rare = -1.0 - carvers.pillar_rareness.get([wx, wy, wz]) as f32;
+let thickness = (0.55 + 0.55 * thickness_noise).powi(3);
+let raw = (pillar_raw + pillar_rare) * thickness;
+if raw < cfg.pillar_cutoff { return 0.0; }
+let depth = (raw - cfg.pillar_cutoff).clamp(0.0, 1.0);
+cfg.pillar_intensity * depth
+```
+
+`pillar_rare = -1 - pillar_rareness_noise` is always in `(-2, -1]` because `pillar_rareness_noise ∈ (-1, 1)`. Adding it to `pillar_raw ∈ (-2, 2)` means `raw` before the thickness multiply is in `(-4, 1]`. Only a small fraction of points (where `pillar_raw` is near its maximum) survive the threshold check at `pillar_cutoff = 0.03`. The rarity noise therefore gates *which* XZ columns ever produce a pillar, not the shape of each pillar once it fires.
+
+`thickness = (0.55 + 0.55 * t)^3` maps the thickness noise `t ∈ (-1, 1)` through a range-preserving linear remap then cubes it. Cubing makes the output strongly non-uniform: a modest `t = 0.5` gives `(0.55 + 0.275)^3 ≈ 0.56`, while `t = 1.0` gives `(1.1)^3 ≈ 1.33`. The cube biases toward thinner pillars (most thickness values produce a small multiplier) with occasional wide ones.
+
+`pillar_xz_scale = 25.0` and `pillar_y_scale = 0.3` produce large-wavelength features in XZ and slow variation in Y, giving pillars a tall, narrow column shape. `pillar_intensity = 4.0` is the maximum refill density returned, which exceeds the typical `raw_density` magnitude and can override any cave layer's negative contribution.
+
+## In the engine
+
+The four contribution functions have these signatures and config dependencies:
+
+```rust
+// src/worldgen/caves.rs
+pub fn cheese_contribution(
+    wx: i32, wy: i32, wz: i32,
+    raw_density: f32,      // used for surface suppression
+    carvers: &NoiseCarvers,
+    cfg: &CaveConfig,
+) -> f32;
+
+pub fn spaghetti_contribution(
+    wx: i32, wy: i32, wz: i32,
+    carvers: &NoiseCarvers,
+    cfg: &CaveConfig,
+) -> f32;
+
+pub fn spaghetti_roughness(
+    wx: i32, wy: i32, wz: i32,
+    carvers: &NoiseCarvers,
+) -> f32;
+
+pub fn surface_entrance_contribution(
+    wx: i32, wy: i32, wz: i32,
+    carvers: &NoiseCarvers,
+    cfg: &CaveConfig,
+) -> f32;
+
+pub fn pillar_contribution(
+    wx: i32, wy: i32, wz: i32,
+    carvers: &NoiseCarvers,
+    cfg: &CaveConfig,
+) -> f32;
+```
+
+All config knobs live under the `cave:` key in `assets/worldgen/default.ron` and reload without recompilation.
+
+## What you can now do
+
+Read `cheese_contribution`, `spaghetti_contribution`, and `pillar_contribution` in `src/worldgen/caves.rs`. Every formula above is a direct paraphrase of those ~60-line functions. The config knobs that control each channel's behavior are documented inline in `assets/worldgen/default.ron` under `cave:`.
+
+Tuning options (`.ron` values, no recompilation):
+
+- **`cheese_offset`** (default `0.27`): raise toward `0.5` for fewer cheese pockets (only strong noise excursions carve); lower toward `0.0` for more aggressive carving.
+- **`cave_layer_intensity`** (default `6.0`): controls how strongly the horizontal strata gate cheese. At `0.0` the layer term is inactive and cheese carves uniformly at depth; raise to `10.0` or above for tighter, better-separated cave bands.
+- **`spaghetti_thickness_offset`** (default `−0.15`): the primary tube-width lever. `−0.5` gives ~8-block-wide tunnels; `0.0` disables spaghetti.
+- **`spaghetti_gradient_from_value` / `spaghetti_gradient_to_value`**: adjust the Y ramp endpoints to push tubes shallower or deeper. The asymmetric defaults are tuned so tubes occasionally surface around Y = 70 without flooding every surface column.
+- **`pillar_cutoff`** (default `0.03`): lower toward `0.0` for more frequent pillars; raise toward `0.1` for rare, isolated columns.
+- **`pillar_intensity`** (default `4.0`): raise to make pillars override more aggressive cave subtraction.
+- **`surface_entrance_intensity`** (default `0.0`, disabled): raise to re-enable the shaft carver; pair with `surface_entrance_threshold` to control shaft density.
+
+## Next
+
+→ [4.5 Procedural Carvers](./4.5-procedural-carvers.mdx)
