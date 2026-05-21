@@ -3,6 +3,92 @@ id: 1.6-domain-warping
 title: 1.6 Vector Fields & Domain Warping
 ---
 
-import Stub from '@site/src/components/Stub';
+import LazyWidget from '@site/src/widgets/LazyWidget';
+import WarpToggle from '@site/src/widgets/WarpToggle';
 
-<Stub />
+Plain FBM looks like a topographic map of rolling hills — pleasant but uniformly blobby. Real terrain has features that *bend*: rivers carve curved valleys, mountain ridges fold in long arcs, coastlines have jagged peninsulas. The trick that gets you from "blobby" to "bent" is **domain warping**.
+
+## The picture
+
+Domain warping is one move with two words: *perturb the input to your noise function before you sample it*.
+
+Instead of `noise(x, y)`, you call `noise(x + dx(x, y), y + dy(x, y))`, where `dx` and `dy` are themselves smooth random fields — usually low-frequency FBMs. The output looks like the original noise after running it through a soft, swirling distortion: peaks bend, valleys curl, axis-aligned features rotate.
+
+Drag the warp amplitude up:
+
+<LazyWidget>
+  <WarpToggle />
+</LazyWidget>
+
+At amplitude 0, the right canvas matches the left exactly — same FBM, same seed, no perturbation. As you increase amplitude, the right canvas develops the characteristic "fingered" pattern you recognise from terrain art. The warp frequency slider controls how rapidly the perturbation field itself varies: a low frequency produces broad continental-scale curls, a high frequency produces tighter texture.
+
+## Build it
+
+```rust
+// simplified for exposition.
+fn warped_noise(x: f64, y: f64) -> f64 {
+    // The warp field is a vector-valued noise function — two
+    // independently-seeded FBMs, one for each output axis.
+    let dx = WARP_AMPLITUDE * warp_x.sample(x, y);
+    let dy = WARP_AMPLITUDE * warp_y.sample(x, y);
+    // Sample the base noise at the *perturbed* position.
+    base_noise.sample(x + dx, y + dy)
+}
+```
+
+The two key tunables are:
+
+- **Warp amplitude.** How far the input shifts, in the same units as `x` and `y`. Small = subtle bending; large = unrecognisable swirls.
+- **Warp frequency.** How quickly the perturbation field itself varies. Low-frequency warp produces broad shaping; high-frequency warp produces fine texture distortion.
+
+The warp FBM itself is usually kept at 1–2 octaves — you want the perturbation to be smooth, not noisy. Also important: seed the two warp FBMs differently from each other *and* from the base noise. If they share a seed, the perturbation is correlated and the warp reduces to a diagonal smear rather than a swirl. The engine seeds each noise field with a different integer offset on the world seed — a convention covered in [1.2 Determinism](./1.2-determinism.mdx).
+
+## In the engine
+
+The current surface-height pipeline (`src/worldgen/heightmap.rs`) does **not** use classical 2D domain warping. An earlier version of the engine derived surface height directly from `plate_shelf + ridge_lift + warped_fbm * plate_roughness`; that formula was replaced in PR 3 by spline-driven heightmaps (three climate inputs — continentalness, terrain shape, ridges — feed nested cubic Hermite splines). The spline approach gives explicit control over the shape of the output: you can say "at high continentalness and low terrain-shape, produce mountains" by editing knot tables, rather than by tuning noise amplitudes and hoping. The `heightmap.rs` module-level comment spells this out:
+
+> "the world's surface height is no longer derived from plate-mosaic primitives (shelf_base + ridge_lift + warped FBM). Instead, three 2D inputs feed nested cubic Hermite splines whose output is the offset term in the density composition."
+
+The technique hasn't gone away, though — it shows up in two other places where *bending* something is the right tool.
+
+### River meanders (`src/worldgen/hydrology.rs`)
+
+River segments are polylines between drainage-grid cell centres. A straight polyline looks artificial. `perpendicular_distance()` adds a domain-warped perpendicular offset to the projected point on each segment before measuring distance, so the effective centreline bends:
+
+```rust
+// hydrology.rs::perpendicular_distance (simplified)
+let amp = (seg.width * MEANDER_AMP_PER_WIDTH).min(MAX_MEANDER_AMP);
+// A smooth 1D hash-noise along the parametric arc length plays the
+// role of a warp FBM — it perturbs the projected centreline point
+// in the perpendicular direction.
+let offset = interpolated_hash(along_world) * amp;
+let perturbed = proj + perp * offset;
+```
+
+The amplitude scales with river width — wide trunk rivers meander hard while narrow streams stay nearly straight. This is the same trade-off as in real hydrology.
+
+### Cave tunnel shaping (`src/worldgen/caves.rs`)
+
+Graph-based cave systems connect chambers with spline tunnels. Without perturbation, every tunnel is a straight capsule. The engine perturbs the two interior Catmull-Rom control points in the perpendicular plane before rasterising, producing curved, winding passages:
+
+```rust
+// caves.rs (simplified)
+// Two orthogonal axes perpendicular to the tunnel axis.
+let p1 = pa.lerp(pb, 0.33) + perp1 * off1_u + perp2 * off1_v;
+let p2 = pa.lerp(pb, 0.66) + perp1 * off2_u + perp2 * off2_v;
+tunnels.push(Tunnel { control_points: vec![pa, p1, p2, pb], radius });
+```
+
+The offsets are drawn from a deterministic hash keyed on the segment's coordinates rather than a continuous noise field, but the principle is the same: perturb the input (control-point positions) before sampling the output (capsule SDF).
+
+## What you can now do in the code
+
+You can read:
+
+- `src/worldgen/hydrology.rs::perpendicular_distance` — the meander warp in full. Note how `MEANDER_AMP_PER_WIDTH` and `MAX_MEANDER_AMP` (in `tuning.rs`) cap the amplitude.
+- `src/worldgen/caves.rs` around line 243 — the perpendicular-offset block for tunnel control points. The four seeded `mix_range` calls are the warp "field".
+- `src/worldgen/heightmap.rs` lines 1–34 (module doc) — the description of what *replaced* warped FBM in the surface pipeline, and why.
+
+## Next
+
+→ [1.7 Splines](./1.7-splines.mdx) — the engine's tool for mapping continuous climate inputs (continentalness, terrain shape, ridges) onto target outputs (height, factor, jaggedness). This is what replaced domain warping as the primary terrain-shaping primitive.
