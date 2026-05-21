@@ -105,7 +105,10 @@ This is the value `column_data` returns. Every downstream stage — surface bloc
 
 With `h_target` known, the engine assembles the full 6-axis climate vector: `(temperature, humidity, continentalness, terrain_shape, depth, weirdness)`. A small Voronoi jitter (from the hash mixer of [1.2](../part-1-foundations/1.2-determinism.mdx)) perturbs the query point before an R-tree biome lookup selects the nearest biome by Euclidean distance in climate space. The jitter breaks up the perfectly smooth noise-contour boundaries, giving biome edges an organic, hand-drawn feel.
 
-The `biome-id` snapshot stage has a known limitation in the visualizer: the categorical colormap's `fract()` normalization maps all integer biome IDs to the same hue, producing a uniform-color image. The biome system itself is correct — see the in-game visualizer (`worldgen_viz`) for a working biome overlay. The limitation is noted here rather than silently omitting the stage. [Chapter 3.2](../part-3-region-build/3.2-climate.mdx) covers biome assignment in full.
+![Biome map at the book seed](/oxium/img/generated/biome-id-s42-0_0-z8-w256.png)
+*Biome assignment. Each colour is one biome — Tundra, SnowyForest, Plains, Forest, Desert, Tropical (six categorical buckets). The boundaries are where the 6-axis climate vector crosses an R-tree decision boundary; the per-block hash jitter from [1.5](../part-1-foundations/1.5-voronoi.mdx) makes the edges look organic rather than smoothly contoured. 2048 blocks across (zoom 8).*
+
+The map shows broad geographic patterns: arid regions cluster toward the edges of the continental mass where continentalness and humidity align for Desert and Tropical biomes, while colder variants (Tundra, SnowyForest) occupy elevated or high-latitude columns where the temperature axis dips. Plains and Forest fill the temperate middle ground. The irregular patchwork at biome edges — rather than smooth noise-contour isobands — is the Voronoi jitter in action, making boundaries read as natural rather than algorithmic. [Chapter 3.2](../part-3-region-build/3.2-climate.mdx) covers the full climate-to-biome lookup, the R-tree structure, and the 6-axis parameterisation.
 
 ## Stage 10: Density graph and cell evaluator
 
