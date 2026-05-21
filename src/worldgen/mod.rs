@@ -479,9 +479,14 @@ impl Generator {
         // Reuse column_data for the values it already produces.
         let col = self.column_data(wx, wz);
 
-        // Plate + continentalness.
+        // Plate + continentalness. The smooth blend matches what
+        // climate() feeds the offset spline; the raw 2-nearest
+        // signed_continentalness has a step discontinuity at
+        // second-rank-flip lines and is no longer authoritative.
         let plate = crate::worldgen::plates::plate_at(self.seed, wx, wz);
-        let continentalness = crate::worldgen::heightmap::signed_continentalness(&plate);
+        let (continentalness, _) = crate::worldgen::heightmap::smooth_plate_contribution(
+            self.seed, wx, wz, &cfg.climate,
+        );
 
         // Pre-carve height.
         let h_pre = self
@@ -609,8 +614,11 @@ impl Generator {
         use probe::Stage;
         match stage {
             Stage::Continentalness => {
-                let plate = crate::worldgen::plates::plate_at(self.seed, wx, wz);
-                crate::worldgen::heightmap::signed_continentalness(&plate)
+                let cfg = self.config.load();
+                let (c, _) = crate::worldgen::heightmap::smooth_plate_contribution(
+                    self.seed, wx, wz, &cfg.climate,
+                );
+                c
             }
             Stage::PlateId => {
                 let plate = crate::worldgen::plates::plate_at(self.seed, wx, wz);
@@ -1804,7 +1812,7 @@ mod tests {
         // sign-boundary can resolve differently from the pre-trilerp
         // implementation; cave shapes are visually equivalent. Same
         // precedent as the PR-5 hash bump for the base density.
-        const GOLDEN_42_002: u64 = 0x19514458A1149A0E;
+        const GOLDEN_42_002: u64 = 0xE4E964788BEB26DD;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);
@@ -1958,10 +1966,15 @@ mod tests {
             42,
             crate::worldgen::config::ConfigHolder::new(base),
         );
-        // Chunk Y=3 → world Y in [96, 127], well above sea level,
-        // raw_density there is comfortably below the underground
-        // threshold so carvers should stay silent.
-        let coord = ChunkCoord(IVec3::new(0, 3, 0));
+        // Chunk Y=4 → world Y in [128, 159]. MAX_TERRAIN_Y is 140
+        // and the test seed has no plate seam pushing peaks above
+        // that, so raw_density across this chunk stays comfortably
+        // below the underground threshold and the gate must keep
+        // carvers silent regardless of `cheese_offset`. The chunk
+        // was Y=3 before the smooth-plate-blend fix, but that fix
+        // lets some columns near plate boundaries reach into Y≥96,
+        // which made `(0, 3, 0)` no longer guaranteed-above-terrain.
+        let coord = ChunkCoord(IVec3::new(0, 4, 0));
         let mut chunk_a = DenseChunk::empty();
         let mut chunk_b = DenseChunk::empty();
         g_permissive.fill_chunk(coord, &mut chunk_a);

@@ -36,6 +36,7 @@
 use crate::worldgen::config::{ClimateConfig, DensityConfig};
 use crate::worldgen::plates::{plate_at, Plate, PlateKind, PlateLookup};
 use crate::worldgen::tuning::*;
+use glam::Vec2;
 use noise::{Fbm, MultiFractal, NoiseFn, Simplex};
 
 /// Bundle of noise fields needed for the spline pipeline. Built once
@@ -84,10 +85,9 @@ impl HeightmapNoise {
         cfg: &ClimateConfig,
     ) -> (f32, f32, f32, PlateLookup) {
         let look = plate_at(seed, wx as i32, wz as i32);
-        let cont = signed_continentalness(&look);
+        let (cont, bias) = smooth_plate_contribution(seed, wx as i32, wz as i32, cfg);
         let shape_noise =
             (self.terrain_shape.get([wx as f64, wz as f64]) as f32) * cfg.terrain_shape_amplitude;
-        let bias = plate_roughness_bias(&look.a, cfg);
         let shape = (shape_noise + bias).clamp(-1.0, 1.0);
         let ridges = (self.ridges_raw.get([wx as f64, wz as f64]) as f32) * cfg.ridges_amplitude;
         let ridges_pv = peaks_and_valleys(ridges);
@@ -243,6 +243,79 @@ pub fn plate_roughness_bias(plate: &Plate, cfg: &ClimateConfig) -> f32 {
     let (bmin, bmax) = cfg.plate_roughness_bias_range;
     // Invert the mapping so high roughness → negative bias (mountains).
     bmax + (bmin - bmax) * t
+}
+
+/// Smooth N-plate blend over the 3×3 Voronoi cell window. Returns
+/// `(signed_continentalness, terrain_shape_bias)` computed by
+/// weighting every candidate plate with a quadratic falloff in
+/// `d_i - d_min`.
+///
+/// Why this exists: the 2-nearest scheme used by [`PlateLookup`]
+/// embeds a hidden step discontinuity — `look.b` is the
+/// second-nearest plate, and as the query point moves the
+/// second-nearest *identity* can flip from one plate to another at a
+/// line locus. When the two competing b candidates have different
+/// `kind` or different `roughness`, [`signed_continentalness`] and
+/// [`plate_roughness_bias`] step at that locus, which the offset
+/// spline at c≈±1 turns into a 30-50 block vertical cliff (see the
+/// `probe_cliff` example).
+///
+/// The smooth blend below weights every plate seed in the 3×3 window
+/// by `(1 - (d_i - d_min)/scale)^2`. A plate that's about to take over
+/// the second slot enters the blend continuously from weight 0;
+/// likewise a plate falling out leaves continuously to 0. `scale =
+/// max(d_min, 64)` keeps the blend width finite at plate centres
+/// (where `d_min → 0`) and proportional to local plate spacing
+/// elsewhere. Plates with `d_i > d_min + scale` contribute exactly
+/// zero, so in plate interiors a single plate dominates and behaviour
+/// matches the old `look.t = 1` case.
+pub fn smooth_plate_contribution(
+    seed: u64,
+    wx: i32,
+    wz: i32,
+    cfg: &ClimateConfig,
+) -> (f32, f32) {
+    let q = Vec2::new(wx as f32, wz as f32);
+    let qcx = wx.div_euclid(PLATE_CELL_SIZE);
+    let qcz = wz.div_euclid(PLATE_CELL_SIZE);
+
+    let mut samples: [Option<(Plate, f32)>; 9] = [None; 9];
+    let mut d_min = f32::INFINITY;
+    let mut k = 0;
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            let p = Plate::of(seed, qcx + dx, qcz + dz);
+            let d = (p.seed_xz - q).length();
+            if d < d_min {
+                d_min = d;
+            }
+            samples[k] = Some((p, d));
+            k += 1;
+        }
+    }
+    let scale = d_min.max(64.0);
+
+    let mut weighted_sign = 0.0_f32;
+    let mut weighted_bias = 0.0_f32;
+    let mut total = 0.0_f32;
+    for slot in samples.iter() {
+        let (p, d) = slot.expect("3×3 window always fills all 9 slots");
+        let t = ((d - d_min) / scale).clamp(0.0, 1.0);
+        let w = (1.0 - t).powi(2);
+        if w <= 0.0 {
+            continue;
+        }
+        let sign = match p.kind {
+            PlateKind::Continental => 1.0_f32,
+            PlateKind::Oceanic => -1.0_f32,
+        };
+        weighted_sign += sign * w;
+        weighted_bias += plate_roughness_bias(&p, cfg) * w;
+        total += w;
+    }
+    let cont = (weighted_sign / total * 1.1).clamp(-1.1, 1.1);
+    let bias = weighted_bias / total;
+    (cont, bias)
 }
 
 /// Peaks-and-valleys triangle fold on a raw ridge value `w ∈ [-1, 1]`.
