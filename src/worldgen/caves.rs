@@ -13,11 +13,6 @@
 //! refusing to carve within `CAVE_SURFACE_BUFFER` blocks of `h_pre`,
 //! except where an explicit entrance feature punches through.
 //!
-//! Below `WORMHOLE_BAND_Y` a thin 3D-noise band carves scattered
-//! "wormhole" passages independent of any system — the classic
-//! "dig deep, occasionally hit a passage" reward loop, restricted
-//! to the deep band so shallow caves stay coherent.
-
 use crate::worldgen::hash::{mix_range, mix_u32, mix_unit};
 use crate::worldgen::heightmap::HeightmapNoise;
 use crate::worldgen::region::{
@@ -25,7 +20,7 @@ use crate::worldgen::region::{
 };
 use crate::worldgen::tuning::*;
 use glam::{IVec3, Vec3};
-use noise::{Fbm, MultiFractal, NoiseFn, Simplex};
+use noise::{Fbm, NoiseFn, Simplex};
 
 /// Depth band a system belongs to. Drives bounding-box Y placement
 /// and entrance-roll probability.
@@ -667,74 +662,28 @@ fn system_bb_contains(sys: &CaveSystem, wx: i32, wy: i32, wz: i32) -> bool {
         && wz <= sys.bb_max.z
 }
 
-// ── Deep-band wormhole filler ────────────────────────────────────────
-
-/// Sparse 3D-noise wormholes layered only in the deep band. Built
-/// once per `Generator` (low cost).
-pub struct WormholeNoise {
-    a: Fbm<Simplex>,
-    b: Fbm<Simplex>,
-}
-
-impl WormholeNoise {
-    pub fn new(seed: u64) -> Self {
-        let a = Fbm::<Simplex>::new(seed.wrapping_add(301) as u32)
-            .set_octaves(2)
-            .set_frequency(1.0 / 40.0)
-            .set_persistence(0.5);
-        let b = Fbm::<Simplex>::new(seed.wrapping_add(302) as u32)
-            .set_octaves(2)
-            .set_frequency(1.0 / 40.0)
-            .set_persistence(0.5);
-        Self { a, b }
-    }
-
-    /// True if the cell at `(wx, wy, wz)` lies inside a deep-band
-    /// wormhole.
-    pub fn carve(&self, wx: i32, wy: i32, wz: i32) -> bool {
-        if wy >= WORMHOLE_BAND_Y {
-            return false;
-        }
-        let p = [wx as f64, wy as f64, wz as f64];
-        // Two zero-crossing sheets that intersect: classic tunnel
-        // geometry. `WORMHOLE_BAND` controls width.
-        self.a.get(p).abs() < WORMHOLE_BAND && self.b.get(p).abs() < WORMHOLE_BAND
-    }
-}
-
-// ── Noise carver layers (PR 8) ───────────────────────────────────────
+// ── Noise carver layers ──────────────────────────────────────────────
 //
-// Cheese / spaghetti / pillars: MC-style ambient noise-based cave
-// density. Live alongside the graph cave systems and wormholes above.
-// The three contributions wire into fill_chunk's `cave_contribution`
-// composition (cheese + spaghetti subtract from density; pillars add
-// back).
+// Cheese / pillars: MC-style ambient noise-based cave density.
+// Live alongside the graph cave systems.
+// The contributions wire into fill_chunk's `cave_contribution`
+// composition (cheese subtracts from density; pillars add back).
 
 use crate::worldgen::config::CaveConfig;
-use crate::worldgen::noise_channel::{
-    build_channel, map_from_unit_to, weird_scaled_sample, y_clamped_gradient,
-};
+use crate::worldgen::noise_channel::build_channel;
 
-/// All MC-derived noise channels needed for the cheese, spaghetti,
-/// and pillar carvers. Built once per Generator.
+/// All MC-derived noise channels needed for the cheese and pillar
+/// carvers. Built once per Generator.
 pub struct NoiseCarvers {
     // Cheese.
     pub cheese: Fbm<Simplex>,
     /// `cave_layer` — the regional gating noise added to cheese as
     /// `intensity * layer²`. See [`CaveConfig::cave_layer`].
     pub cave_layer: Fbm<Simplex>,
-    // Spaghetti.
-    pub spaghetti_2d: Fbm<Simplex>,
-    pub spaghetti_2d_modulator: Fbm<Simplex>,
-    pub spaghetti_2d_elevation: Fbm<Simplex>,
-    pub spaghetti_2d_thickness: Fbm<Simplex>,
-    pub spaghetti_roughness: Fbm<Simplex>,
     // Pillars.
     pub pillar: Fbm<Simplex>,
     pub pillar_rareness: Fbm<Simplex>,
     pub pillar_thickness: Fbm<Simplex>,
-    // Surface entrance noise.
-    pub surface_entrance: Fbm<Simplex>,
 }
 
 impl NoiseCarvers {
@@ -744,86 +693,11 @@ impl NoiseCarvers {
         Self {
             cheese: build_channel(&cfg.cheese, seed, 1001),
             cave_layer: build_channel(&cfg.cave_layer, seed, 1011),
-            spaghetti_2d: build_channel(&cfg.spaghetti_2d, seed, 1002),
-            spaghetti_2d_modulator: build_channel(&cfg.spaghetti_2d_modulator, seed, 1003),
-            spaghetti_2d_elevation: build_channel(&cfg.spaghetti_2d_elevation, seed, 1009),
-            spaghetti_2d_thickness: build_channel(&cfg.spaghetti_2d_thickness, seed, 1004),
-            spaghetti_roughness: build_channel(&cfg.spaghetti_roughness, seed, 1005),
             pillar: build_channel(&cfg.pillar, seed, 1006),
             pillar_rareness: build_channel(&cfg.pillar_rareness, seed, 1007),
             pillar_thickness: build_channel(&cfg.pillar_thickness, seed, 1008),
-            surface_entrance: build_channel(&cfg.surface_entrance, seed, 1010),
         }
     }
-}
-
-/// Signed-density surface entrance contribution. Returns a strongly
-/// negative value where the noise crosses threshold inside the
-/// Y-band, ramping smoothly to zero outside; composed via
-/// `min(other_caves, surface_entrance)` like the rest.
-///
-/// Unlike cheese and spaghetti, this carver is NOT gated by the
-/// underground density threshold — that's the whole point: it
-/// fires in the surface band specifically, punching small holes
-/// through the heightmap.
-pub fn surface_entrance_contribution(
-    wx: i32,
-    wy: i32,
-    wz: i32,
-    carvers: &NoiseCarvers,
-    cfg: &CaveConfig,
-) -> f32 {
-    // Hard disable when intensity is non-positive — otherwise the
-    // `intensity * depth * fade` product is 0, and `min(composed,
-    // 0)` still flips any positive density to 0 (= not solid).
-    if cfg.surface_entrance_intensity <= 0.0 {
-        return 1.0;
-    }
-    let fade = surface_entrance_y_fade(wy, cfg);
-    if fade <= 0.0 {
-        return 1.0; // sentinel positive (no cave)
-    }
-    let v = carvers.surface_entrance.get([
-        wx as f64 * cfg.surface_entrance_xz_scale as f64,
-        wy as f64 * cfg.surface_entrance_y_scale as f64,
-        wz as f64 * cfg.surface_entrance_xz_scale as f64,
-    ]) as f32;
-    // Smooth ramp above threshold — a wider band (0.10) gives the
-    // shaft a softer lateral edge instead of a stamped-cookie hole.
-    let above = v - cfg.surface_entrance_threshold;
-    if above <= 0.0 {
-        return 1.0;
-    }
-    let t = (above / 0.10).clamp(0.0, 1.0);
-    let depth = t * t * (3.0 - 2.0 * t); // smoothstep
-    // Return a strongly negative signed value; magnitude scaled by
-    // both the smoothstep and the Y-band fade so edges are soft.
-    -cfg.surface_entrance_intensity * depth * fade
-}
-
-fn surface_entrance_y_fade(wy: i32, cfg: &CaveConfig) -> f32 {
-    if wy < cfg.surface_entrance_y_min || wy > cfg.surface_entrance_y_max {
-        return 0.0;
-    }
-    // Soft top edge: smoothstep up from 0 at y_max to 1 a few
-    // blocks below it, so the surface opening fades in rather
-    // than appearing as a hard cliff.
-    let from_top = (cfg.surface_entrance_y_max - wy) as f32;
-    let fade_w = cfg.surface_entrance_fade_blocks.max(1) as f32;
-    let top_fade = {
-        let t = (from_top / fade_w).clamp(0.0, 1.0);
-        t * t * (3.0 - 2.0 * t)
-    };
-    // Bottom taper: linear ramp from 1 at y_max down to 0 at
-    // y_min. Multiplied by the base intensity, this means the
-    // shaft is strong near the surface and weak at depth — by
-    // the time it reaches the underground cave network, the
-    // carving contribution is small enough that any solid rock
-    // below the cave overrides it (no continuing-into-bedrock).
-    let band_height = (cfg.surface_entrance_y_max - cfg.surface_entrance_y_min).max(1) as f32;
-    let from_bottom = (wy - cfg.surface_entrance_y_min) as f32;
-    let depth_taper = (from_bottom / band_height).clamp(0.0, 1.0);
-    top_fade * depth_taper
 }
 
 /// Signed-density cheese contribution.
@@ -878,117 +752,6 @@ pub fn cheese_contribution(
     term1 + supp + layerized
 }
 
-/// Signed-density spaghetti tube contribution.
-///
-/// ```text
-///   elev_mod        = map_from_unit_to(elev_noise, elev_min, elev_max)
-///   sloped_spag     = abs(elev_mod + y_clamped_gradient(...))
-///   thickness_mod   = thickness_offset
-///                     + thickness_slope * thickness_noise
-///   layer_ridged    = (sloped_spag + thickness_mod) ^ 3
-///   cave_noise      = weird_scaled(modulator, sp2d)
-///                     + cave_noise_offset * thickness_mod
-///   spaghetti       = clamp(max(cave_noise, layer_ridged),
-///                           clamp_min, clamp_max)
-/// ```
-///
-/// The cube term `layer_ridged` is the secret to thin meandering
-/// tubes: it's hugely positive (= solid) almost everywhere except
-/// along a thin curve where `sloped_spag ≈ 0` — i.e., where the
-/// elevation noise happens to cross `-y_gradient`. Inside that
-/// curve the cube goes negative, defining the tube path. The cave
-/// noise (region-modulated via [`weird_scaled_sample`]) further
-/// gates the carving so different regions get different tube
-/// scales.
-///
-/// Returns a signed density in roughly `[-1, 1]`. The caller
-/// composes via `min(other_caves, spaghetti)`.
-pub fn spaghetti_contribution(
-    wx: i32,
-    wy: i32,
-    wz: i32,
-    carvers: &NoiseCarvers,
-    cfg: &CaveConfig,
-) -> f32 {
-    // 1. Elevation modulator: noise[-1,1] → [elev_min, elev_max].
-    let elev_unit = carvers.spaghetti_2d_elevation.get([
-        wx as f64,
-        0.0,             // MC: y_scale=0 — sample independent of Y
-        wz as f64,
-    ]) as f32;
-    let elev = map_from_unit_to(
-        elev_unit,
-        cfg.spaghetti_elevation_min,
-        cfg.spaghetti_elevation_max,
-    );
-
-    // 2. Y-clamped gradient.
-    let y_grad = y_clamped_gradient(
-        wy,
-        cfg.spaghetti_gradient_from_y,
-        cfg.spaghetti_gradient_from_value,
-        cfg.spaghetti_gradient_to_y,
-        cfg.spaghetti_gradient_to_value,
-    );
-
-    // 3. slopedSpaghetti = abs(elev + ygrad).
-    let sloped = (elev + y_grad).abs();
-
-    // 4. Thickness modulator: linear remap of noise[-1,1].
-    let thickness_noise = carvers.spaghetti_2d_thickness.get([
-        wx as f64 * 2.0, // MC: xz_scale=2.0 on thickness
-        wy as f64,
-        wz as f64 * 2.0,
-    ]) as f32;
-    let thickness_mod =
-        cfg.spaghetti_thickness_offset + cfg.spaghetti_thickness_slope * thickness_noise;
-
-    // 5. layerRidged = (sloped + thickness_mod) ^ 3.
-    let inner = sloped + thickness_mod;
-    let layer_ridged = inner * inner * inner;
-
-    // 6. caveNoise = weird_scaled(modulator, sp2d) + offset * thickness_mod.
-    let modulator = carvers.spaghetti_2d_modulator.get([
-        wx as f64 * 2.0, // MC: xz_scale=2.0 on modulator
-        wy as f64,
-        wz as f64 * 2.0,
-    ]) as f32;
-    let ws = weird_scaled_sample(
-        &carvers.spaghetti_2d,
-        modulator,
-        wx as f64,
-        wy as f64,
-        wz as f64,
-    );
-    let cave_noise = ws + cfg.spaghetti_cave_noise_offset * thickness_mod;
-
-    // 7. clamp(max(caveNoise, layerRidged), clamp_min, clamp_max).
-    cave_noise
-        .max(layer_ridged)
-        .clamp(cfg.spaghetti_clamp_min, cfg.spaghetti_clamp_max)
-}
-
-/// Per-voxel spaghetti-roughness perturbation. Added to
-/// [`spaghetti_contribution`] before composing with the rest of the
-/// cave components — a tiny signed value that gives tube walls a
-/// chiseled feel instead of mathematically-smooth boundaries.
-pub fn spaghetti_roughness(
-    wx: i32,
-    wy: i32,
-    wz: i32,
-    carvers: &NoiseCarvers,
-) -> f32 {
-    // -0.05 * abs(noise): negative sign means roughness pushes
-    // density *down*, slightly enlarging carved volumes along
-    // their edges.
-    let v = carvers.spaghetti_roughness.get([
-        wx as f64,
-        wy as f64,
-        wz as f64,
-    ]) as f32;
-    -0.05 * v.abs()
-}
-
 /// Per-voxel pillar contribution. Returns a non-negative value in
 /// `[0, pillar_intensity]` that is ADDED to density (not subtracted)
 /// in `fill_chunk`'s composition. Composition order matters:
@@ -1038,12 +801,9 @@ pub fn pillar_contribution(
 
 // ── Carver evaluator (corner-lattice trilerp) ────────────────────────
 //
-// The per-voxel `cheese_contribution`, `spaghetti_contribution`,
-// `pillar_contribution`, `wormhole_noise.carve`, and
-// `surface_entrance_contribution` each issue several FBM samples per
-// voxel — ~13 in total. With 32³ voxels per chunk and 2-octave FBM,
-// that's ~850k Simplex evaluations per chunk and dominates the
-// chunk-fill cost (release-mode bench: ~22 ms / underground chunk).
+// The per-voxel `cheese_contribution` and `pillar_contribution` each
+// issue several FBM samples per voxel. With 32³ voxels per chunk and
+// 2-octave FBM, that dominates the chunk-fill cost.
 //
 // `CarverEvaluator` mirrors `density_graph::CellEvaluator`: sample
 // each underlying noise on a 9³ corner lattice (4-block spacing,
@@ -1060,32 +820,17 @@ const CARVER_CORNER_COUNT: usize = CARVER_CELL_COUNT + 1; // 9
 const CARVER_CORNER_CUBE: usize =
     CARVER_CORNER_COUNT * CARVER_CORNER_COUNT * CARVER_CORNER_COUNT; // 729
 
-/// One corner's worth of pre-sampled noise. Keeping the 12 channels
+/// One corner's worth of pre-sampled noise. Keeping the channels
 /// AoS means each voxel touches 8 contiguous corner structs instead
-/// of striding 12 separate `Vec<f32>` arenas — better cache behavior
+/// of striding separate `Vec<f32>` arenas — better cache behavior
 /// in the per-voxel inner loop.
 #[derive(Default, Clone, Copy)]
 struct CarverCorner {
     cheese: f32,
     cave_layer: f32,
-    /// `spaghetti_2d_elevation` is a 2D-in-XZ noise (y_scale=0). We
-    /// still store it per 3D corner so the trilerp formula stays
-    /// uniform; the Y axis simply lerps between identical samples.
-    spag_elev: f32,
-    spag_thick: f32,
-    /// `weird_scaled_sample(spaghetti_2d, modulator, ...)` evaluated
-    /// at this corner using the corner's modulator. The rarity
-    /// step-function lives inside this scalar — interpolating it is
-    /// the same "smooth the discontinuity" tradeoff trilerp makes for
-    /// every other clamped channel.
-    spag_weird_scaled: f32,
-    spag_rough: f32,
     pillar: f32,
     pillar_rare: f32,
     pillar_thick: f32,
-    wormhole_a: f32,
-    wormhole_b: f32,
-    surface_entrance: f32,
 }
 
 /// Pre-sampled noise lattice for the carver layers. Built once per
@@ -1099,7 +844,6 @@ pub struct CarverEvaluator {
 impl CarverEvaluator {
     pub fn new(
         carvers: &NoiseCarvers,
-        wormhole: &WormholeNoise,
         cfg: &CaveConfig,
         chunk_origin: IVec3,
     ) -> Self {
@@ -1123,32 +867,6 @@ impl CarverEvaluator {
                         wz as f64 * cfg.cave_layer_xz_scale as f64,
                     ]) as f32;
 
-                    // Spaghetti — match scales from `spaghetti_contribution`.
-                    let spag_elev = carvers
-                        .spaghetti_2d_elevation
-                        .get([wx as f64, 0.0, wz as f64]) as f32;
-                    let spag_thick = carvers.spaghetti_2d_thickness.get([
-                        wx as f64 * 2.0,
-                        wy as f64,
-                        wz as f64 * 2.0,
-                    ]) as f32;
-                    let modulator = carvers.spaghetti_2d_modulator.get([
-                        wx as f64 * 2.0,
-                        wy as f64,
-                        wz as f64 * 2.0,
-                    ]) as f32;
-                    let spag_weird_scaled = weird_scaled_sample(
-                        &carvers.spaghetti_2d,
-                        modulator,
-                        wx as f64,
-                        wy as f64,
-                        wz as f64,
-                    );
-                    let spag_rough = carvers
-                        .spaghetti_roughness
-                        .get([wx as f64, wy as f64, wz as f64])
-                        as f32;
-
                     let pillar = carvers.pillar.get([
                         wx as f64 * cfg.pillar_xz_scale as f64,
                         wy as f64 * cfg.pillar_y_scale as f64,
@@ -1163,30 +881,12 @@ impl CarverEvaluator {
                         .get([wx as f64, wy as f64, wz as f64])
                         as f32;
 
-                    let wormhole_a =
-                        wormhole.a.get([wx as f64, wy as f64, wz as f64]) as f32;
-                    let wormhole_b =
-                        wormhole.b.get([wx as f64, wy as f64, wz as f64]) as f32;
-
-                    let surface_entrance = carvers.surface_entrance.get([
-                        wx as f64 * cfg.surface_entrance_xz_scale as f64,
-                        wy as f64 * cfg.surface_entrance_y_scale as f64,
-                        wz as f64 * cfg.surface_entrance_xz_scale as f64,
-                    ]) as f32;
-
                     corners[idx] = CarverCorner {
                         cheese,
                         cave_layer,
-                        spag_elev,
-                        spag_thick,
-                        spag_weird_scaled,
-                        spag_rough,
                         pillar,
                         pillar_rare,
                         pillar_thick,
-                        wormhole_a,
-                        wormhole_b,
-                        surface_entrance,
                     };
                 }
             }
@@ -1250,44 +950,6 @@ impl CarverEvaluator {
         term1 + supp + layerized
     }
 
-    /// Same shape as `spaghetti_contribution`. `y_clamped_gradient` is
-    /// pure arithmetic on `wy` so it stays per-voxel.
-    pub fn spaghetti_at(&self, wx: i32, wy: i32, wz: i32, cfg: &CaveConfig) -> f32 {
-        let lc = self.lerp_coords(wx, wy, wz);
-        let elev_unit = self.trilerp(&lc, |c| c.spag_elev);
-        let thickness_noise = self.trilerp(&lc, |c| c.spag_thick);
-        let ws = self.trilerp(&lc, |c| c.spag_weird_scaled);
-
-        let elev = map_from_unit_to(
-            elev_unit,
-            cfg.spaghetti_elevation_min,
-            cfg.spaghetti_elevation_max,
-        );
-        let y_grad = y_clamped_gradient(
-            wy,
-            cfg.spaghetti_gradient_from_y,
-            cfg.spaghetti_gradient_from_value,
-            cfg.spaghetti_gradient_to_y,
-            cfg.spaghetti_gradient_to_value,
-        );
-        let sloped = (elev + y_grad).abs();
-        let thickness_mod =
-            cfg.spaghetti_thickness_offset + cfg.spaghetti_thickness_slope * thickness_noise;
-        let inner = sloped + thickness_mod;
-        let layer_ridged = inner * inner * inner;
-        let cave_noise = ws + cfg.spaghetti_cave_noise_offset * thickness_mod;
-        cave_noise
-            .max(layer_ridged)
-            .clamp(cfg.spaghetti_clamp_min, cfg.spaghetti_clamp_max)
-    }
-
-    /// Same shape as `spaghetti_roughness`.
-    pub fn spaghetti_roughness_at(&self, wx: i32, wy: i32, wz: i32) -> f32 {
-        let lc = self.lerp_coords(wx, wy, wz);
-        let v = self.trilerp(&lc, |c| c.spag_rough);
-        -0.05 * v.abs()
-    }
-
     /// Same shape as `pillar_contribution`. The cutoff gate runs per voxel.
     pub fn pillar_at(&self, wx: i32, wy: i32, wz: i32, cfg: &CaveConfig) -> f32 {
         let lc = self.lerp_coords(wx, wy, wz);
@@ -1305,37 +967,6 @@ impl CarverEvaluator {
         cfg.pillar_intensity * depth
     }
 
-    /// Same shape as `WormholeNoise::carve`. Y-band gate runs per voxel.
-    pub fn wormhole_carve_at(&self, wx: i32, wy: i32, wz: i32) -> bool {
-        if wy >= WORMHOLE_BAND_Y {
-            return false;
-        }
-        let lc = self.lerp_coords(wx, wy, wz);
-        let a = self.trilerp(&lc, |c| c.wormhole_a);
-        let b = self.trilerp(&lc, |c| c.wormhole_b);
-        (a as f64).abs() < WORMHOLE_BAND && (b as f64).abs() < WORMHOLE_BAND
-    }
-
-    /// Same shape as `surface_entrance_contribution`. The Y-band fade
-    /// and intensity gates are exact (no noise), so they run per voxel.
-    pub fn surface_entrance_at(&self, wx: i32, wy: i32, wz: i32, cfg: &CaveConfig) -> f32 {
-        if cfg.surface_entrance_intensity <= 0.0 {
-            return 1.0;
-        }
-        let fade = surface_entrance_y_fade(wy, cfg);
-        if fade <= 0.0 {
-            return 1.0;
-        }
-        let lc = self.lerp_coords(wx, wy, wz);
-        let v = self.trilerp(&lc, |c| c.surface_entrance);
-        let above = v - cfg.surface_entrance_threshold;
-        if above <= 0.0 {
-            return 1.0;
-        }
-        let t = (above / 0.10).clamp(0.0, 1.0);
-        let depth = t * t * (3.0 - 2.0 * t);
-        -cfg.surface_entrance_intensity * depth * fade
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -1481,7 +1112,7 @@ mod tests {
         panic!("no chambers across 4×4 regions — graph caves disabled?");
     }
 
-    // ── PR 8: noise carver tests ─────────────────────────────────
+    // ── Noise carver tests ───────────────────────────────────────
 
     #[test]
     fn noise_carvers_builds_from_config_without_panicking() {
@@ -1496,7 +1127,6 @@ mod tests {
         let b = NoiseCarvers::new(42, &cfg.cave);
         let p = [10.0, 5.0, -3.0];
         assert_eq!(a.cheese.get(p), b.cheese.get(p));
-        assert_eq!(a.spaghetti_2d.get(p), b.spaghetti_2d.get(p));
         assert_eq!(a.pillar.get(p), b.pillar.get(p));
     }
 
@@ -1506,39 +1136,6 @@ mod tests {
         let a = NoiseCarvers::new(42, &cfg.cave);
         let b = NoiseCarvers::new(43, &cfg.cave);
         assert_ne!(a.cheese.get([10.0, 5.0, -3.0]), b.cheese.get([10.0, 5.0, -3.0]));
-    }
-
-    #[test]
-    #[ignore = "diagnostic only"]
-    fn probe_surface_entrance_noise_distribution() {
-        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
-        let nc = NoiseCarvers::new(42, &cfg.cave);
-        let mut samples = vec![];
-        for wx in (-200..200).step_by(7) {
-            for wz in (-200..200).step_by(7) {
-                for wy in 42..=82 {
-                    let v = nc.surface_entrance.get([
-                        wx as f64 * cfg.cave.surface_entrance_xz_scale as f64,
-                        wy as f64 * cfg.cave.surface_entrance_y_scale as f64,
-                        wz as f64 * cfg.cave.surface_entrance_xz_scale as f64,
-                    ]) as f32;
-                    samples.push(v);
-                }
-            }
-        }
-        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let n = samples.len();
-        eprintln!("surface_entrance distribution over {} samples:", n);
-        eprintln!("  min={:.4}  p10={:.4}  p50={:.4}  p90={:.4}  p99={:.4}  max={:.4}",
-            samples[0], samples[n / 10], samples[n / 2],
-            samples[9 * n / 10], samples[99 * n / 100], samples[n - 1]);
-        let above = samples
-            .iter()
-            .filter(|&&v| v > cfg.cave.surface_entrance_threshold)
-            .count();
-        eprintln!("  threshold={}  above={} ({:.2}%)",
-            cfg.cave.surface_entrance_threshold, above,
-            100.0 * above as f32 / n as f32);
     }
 
     #[test]
@@ -1613,45 +1210,6 @@ mod tests {
     }
 
     #[test]
-    fn spaghetti_signed_density_is_finite_and_clamped() {
-        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
-        let nc = NoiseCarvers::new(42, &cfg.cave);
-        for wx in (-200..200).step_by(13) {
-            for wz in (-200..200).step_by(13) {
-                for wy in (-100..=80).step_by(7) {
-                    let v = spaghetti_contribution(wx, wy, wz, &nc, &cfg.cave);
-                    assert!(v.is_finite(), "spaghetti non-finite at ({wx},{wy},{wz})");
-                    assert!(
-                        (cfg.cave.spaghetti_clamp_min - 1e-4..=cfg.cave.spaghetti_clamp_max + 1e-4)
-                            .contains(&v),
-                        "spaghetti out of clamp band: {v}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn spaghetti_carves_negative_somewhere_underground() {
-        // Sanity check: signed-density spaghetti should hit
-        // negative values somewhere in a wide deep-band sweep.
-        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
-        let nc = NoiseCarvers::new(42, &cfg.cave);
-        let mut any_carve = false;
-        'outer: for y in (-100..=80).step_by(10) {
-            for wx in (-256..256).step_by(4) {
-                for wz in (-256..256).step_by(4) {
-                    if spaghetti_contribution(wx, y, wz, &nc, &cfg.cave) < 0.0 {
-                        any_carve = true;
-                        break 'outer;
-                    }
-                }
-            }
-        }
-        assert!(any_carve, "no spaghetti carving across a wide underground sweep");
-    }
-
-    #[test]
     fn pillar_contribution_is_non_negative_and_bounded() {
         let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
         let nc = NoiseCarvers::new(42, &cfg.cave);
@@ -1685,32 +1243,6 @@ mod tests {
         assert!(frac_zero >= 0.7, "expected ≥70% zero, got {frac_zero}");
     }
 
-    #[test]
-    fn y_clamped_gradient_endpoint_values() {
-        // Helper accepts either (lo,hi) ordering. Probe both orientations.
-        assert!((y_clamped_gradient(-120, 140, 8.0, -120, -40.0) - (-40.0)).abs() < 1e-4);
-        assert!((y_clamped_gradient(140, 140, 8.0, -120, -40.0) - 8.0).abs() < 1e-4);
-        // Above the higher end → clamped to the higher Y's value.
-        assert!((y_clamped_gradient(200, 140, 8.0, -120, -40.0) - 8.0).abs() < 1e-4);
-        assert!((y_clamped_gradient(-200, 140, 8.0, -120, -40.0) - (-40.0)).abs() < 1e-4);
-    }
-
-    #[test]
-    fn wormhole_noise_does_not_carve_above_band() {
-        let w = WormholeNoise::new(42);
-        // Above WORMHOLE_BAND_Y, never carve.
-        for wx in (-100..=100).step_by(7) {
-            for wy in (WORMHOLE_BAND_Y..=80).step_by(5) {
-                for wz in (-100..=100).step_by(7) {
-                    assert!(
-                        !w.carve(wx, wy, wz),
-                        "unexpected wormhole at ({wx},{wy},{wz}) — above the band"
-                    );
-                }
-            }
-        }
-    }
-
     // Carver evaluator parity: at corner positions (multiples of 4 from
     // the chunk origin), trilerp degenerates to the corner sample, so
     // `*_at` must reproduce the direct contribution function exactly.
@@ -1721,9 +1253,8 @@ mod tests {
     fn carver_evaluator_exact_at_corners() {
         let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
         let nc = NoiseCarvers::new(42, &cfg.cave);
-        let wn = WormholeNoise::new(42);
         let origin = IVec3::new(0, -64, 32);
-        let eval = CarverEvaluator::new(&nc, &wn, &cfg.cave, origin);
+        let eval = CarverEvaluator::new(&nc, &cfg.cave, origin);
 
         // Sweep every cell-corner inside the chunk. CARVER_CELL_SIZE=4
         // → corner offsets 0,4,...,28 (the +32 boundary corner is the
@@ -1746,38 +1277,11 @@ mod tests {
                         assert!(d < 1e-5, "cheese mismatch at ({wx},{wy},{wz}) rd={raw_density}: direct={direct} lerp={lerped} d={d}");
                     }
 
-                    let direct = spaghetti_contribution(wx, wy, wz, &nc, &cfg.cave);
-                    let lerped = eval.spaghetti_at(wx, wy, wz, &cfg.cave);
-                    assert!(
-                        (direct - lerped).abs() < 1e-4,
-                        "spaghetti mismatch at ({wx},{wy},{wz}): direct={direct} lerp={lerped}"
-                    );
-
-                    let direct = spaghetti_roughness(wx, wy, wz, &nc);
-                    let lerped = eval.spaghetti_roughness_at(wx, wy, wz);
-                    assert!(
-                        (direct - lerped).abs() < 1e-5,
-                        "roughness mismatch at ({wx},{wy},{wz}): direct={direct} lerp={lerped}"
-                    );
-
                     let direct = pillar_contribution(wx, wy, wz, &nc, &cfg.cave);
                     let lerped = eval.pillar_at(wx, wy, wz, &cfg.cave);
                     assert!(
                         (direct - lerped).abs() < 1e-5,
                         "pillar mismatch at ({wx},{wy},{wz}): direct={direct} lerp={lerped}"
-                    );
-
-                    assert_eq!(
-                        wn.carve(wx, wy, wz),
-                        eval.wormhole_carve_at(wx, wy, wz),
-                        "wormhole carve mismatch at ({wx},{wy},{wz})"
-                    );
-
-                    let direct = surface_entrance_contribution(wx, wy, wz, &nc, &cfg.cave);
-                    let lerped = eval.surface_entrance_at(wx, wy, wz, &cfg.cave);
-                    assert!(
-                        (direct - lerped).abs() < 1e-5,
-                        "surface_entrance mismatch at ({wx},{wy},{wz}): direct={direct} lerp={lerped}"
                     );
                 }
             }
@@ -1792,15 +1296,12 @@ mod tests {
         // wrong corner index) but loose enough to permit smoothing.
         let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
         let nc = NoiseCarvers::new(42, &cfg.cave);
-        let wn = WormholeNoise::new(42);
         let origin = IVec3::new(0, -64, 32);
-        let eval = CarverEvaluator::new(&nc, &wn, &cfg.cave, origin);
+        let eval = CarverEvaluator::new(&nc, &cfg.cave, origin);
         // Off-corner sweep using prime strides so we hit non-multiples
         // of 4 across the whole chunk.
         let mut max_cheese: f32 = 0.0;
-        let mut max_spag: f32 = 0.0;
         let mut max_pillar: f32 = 0.0;
-        let mut max_surf: f32 = 0.0;
         for ly in (1..32).step_by(3) {
             for lz in (1..32).step_by(5) {
                 for lx in (1..32).step_by(5) {
@@ -1813,19 +1314,9 @@ mod tests {
                             - eval.cheese_at(wx, wy, wz, raw_density, &cfg.cave))
                         .abs(),
                     );
-                    max_spag = max_spag.max(
-                        (spaghetti_contribution(wx, wy, wz, &nc, &cfg.cave)
-                            - eval.spaghetti_at(wx, wy, wz, &cfg.cave))
-                        .abs(),
-                    );
                     max_pillar = max_pillar.max(
                         (pillar_contribution(wx, wy, wz, &nc, &cfg.cave)
                             - eval.pillar_at(wx, wy, wz, &cfg.cave))
-                        .abs(),
-                    );
-                    max_surf = max_surf.max(
-                        (surface_entrance_contribution(wx, wy, wz, &nc, &cfg.cave)
-                            - eval.surface_entrance_at(wx, wy, wz, &cfg.cave))
                         .abs(),
                     );
                 }
@@ -1837,9 +1328,7 @@ mod tests {
         // differences in the 0.05-0.3 range. Pillar can spike when
         // the cutoff gate flips between corners.
         assert!(max_cheese < 0.5, "cheese off-corner max delta {max_cheese}");
-        assert!(max_spag < 1.0, "spaghetti off-corner max delta {max_spag}");
         assert!(max_pillar < 1.0, "pillar off-corner max delta {max_pillar}");
-        assert!(max_surf < 1.5, "surface_entrance off-corner max delta {max_surf}");
     }
 
 }
