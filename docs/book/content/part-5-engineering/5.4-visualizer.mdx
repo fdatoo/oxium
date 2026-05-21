@@ -3,6 +3,194 @@ id: 5.4-visualizer
 title: 5.4 The Visualizer
 ---
 
-import Stub from '@site/src/components/Stub';
+Every image in this book was produced by one of two tools: `doc_render` (the headless snapshot binary that generated the pipeline maps in Part II and Part III) and `worldgen_viz` (the interactive visualizer). Both tools call the same colormapping code. Every diagram you have seen of continentalness gradients, height-map isolines, or aquifer Y floors is engine-authoritative — not a diagram drawn by hand, but an actual sample of `Generator::sample_stage` run through the colourmap.
 
-<Stub />
+This chapter closes the book by explaining `worldgen_viz` — how it is structured, what each panel shows, and why it is the most useful single tool in the repository for tuning worldgen. It is a developer tool. It is not the game UI. But if you are going to spend an afternoon working on the pipeline, open it first.
+
+## The picture
+
+`worldgen_viz` is a windowed application: a wgpu 3D viewport on the right showing a live chunk mesh, and egui panels on the left and top carrying configuration sliders, a stage-selector map, a column probe, a cross-section slice, and a preset library. Everything in the egui layer reads directly from a single live `Generator`. There is no intermediate data model to keep in sync — the generator is the source of truth, and every panel samples it on demand.
+
+The binary lives at `src/bin/worldgen_viz/`. Build and run it with:
+
+```
+cargo build --release --bin worldgen_viz
+cargo run  --release --bin worldgen_viz -- --seed 42
+```
+
+Optional flags: `--radius-xz <N>` (default 3; controls how many chunks out from centre the initial region covers), `--radius-y <N>` (default 4; controls vertical extent), and `--check` (renders one frame and exits, for CI smoke testing).
+
+## Architecture: one generator, many views
+
+The top-level struct in `src/bin/worldgen_viz/app.rs` is `AppState`. It holds a `Session`, egui-layer state, and frame-timing bookkeeping. `Session` (`session.rs`) is the conceptual core:
+
+```rust
+pub struct Session {
+    pub seed: u64,
+    pub config: ConfigHolder,
+    pub generator: Arc<Generator>,
+    pub world: World,
+    pub fly: FlyCamera,
+    pub orbit: OrbitCamera,
+    pub cam_kind: CamKind,
+    pub paint: PaintMode,
+    pub invalidator: Invalidator,
+    pub probe: Probe,
+    pub map: MapView,
+    pub cross: CrossSection,
+}
+```
+
+`ConfigHolder` is the hot-reload handle from chapter 5.3. The `Generator` is constructed from it; the generator and the config holder share the same `Arc<RwLock<WorldgenConfig>>` internally. Editing a `.ron` file on disk triggers the file watcher, the config swaps atomically, and the generator begins using the new values on the next call.
+
+`World` wraps the chunk cache and mesh buffers. `Probe`, `MapView`, and `CrossSection` are the three independent view modes that interpret the generator's output. `PaintMode` controls how faces in the 3D viewport are coloured (block type, biome, plate, height delta, or slope).
+
+The event loop lives in `main.rs` (winit + wgpu setup). Panel layout — which egui panels appear in which docked positions — is handled by `layout.rs`. The `dashboard` function there reads `AppState` and returns a `LayoutResult` flagging whether the config changed (`dirty`), whether a camera reset was requested, and whether the region bounds need updating.
+
+## The map view
+
+`overlays/mod.rs` implements `MapView` — a 2D top-down raster of the world at configurable zoom and scroll. A 256 × 256 pixel texture is redrawn whenever the camera pans, the zoom changes, or the config swaps.
+
+The stage selector chooses which pipeline value to display. Every variant of `worldgen::probe::Stage` is available:
+
+| Stage | What it shows |
+|---|---|
+| `Continentalness` | Continental shelf signal; divergent blue–red colormap |
+| `PlateId` | Tectonic plate identity; categorical hue per plate |
+| `Temperature` | Climate temperature field |
+| `Humidity` | Climate humidity field |
+| `Desertness` | Derived aridity axis |
+| `Weirdness` | Biome variant axis |
+| `HPre` | Pre-carve height target from the spline; terrain colormap |
+| `ValleyCarve` | Valley carve depth; hot colormap |
+| `HTarget` | Final column height target after carving |
+| `FlowAccum` | River flow accumulation, log-scaled |
+| `BiomeId` | Resolved biome; categorical hue per biome |
+| `AquiferY` | Aquifer cell Y ceiling |
+| `AquiferSubstance` | Aquifer fluid kind (water/lava/dry); categorical |
+
+Each stage has a colormap defined in `src/viz_render/stages.rs`. That file belongs to the `oxium::viz_render` library crate, not to the binary — which is why `doc_render` can import and use the same `viz_render::render_pixel` function. Every book image and every live-viz frame are produced by the same `pixel(stage, raw_value) → [u8; 4]` code path. When a colormap is tweaked for the book, the change automatically appears in the interactive tool the next build, and vice versa.
+
+Pan and zoom work with middle-mouse drag and scroll wheel. The map recentres itself around the 3D camera position when the camera moves far enough that the map centre is stale.
+
+This is the primary data-flow inspector. Most engine bugs become obvious here. A cliff threshold set too low shows as a thin band of anomalous colour at a specific continentalness value. A spline with a discontinuous knee shows as a sharp stripe across the `HTarget` map. Look at this view first.
+
+## The column probe
+
+Click anywhere in the 3D viewport or the map to pin a column. The probe panel then shows every value the pipeline computed for that `(wx, wz)`:
+
+```
+Plate: 7  (oceanic)
+Continentalness:  -0.42
+h_pre:             58.0
+Valley carve:       3.2
+h_target:          54
+is_cliff:         false
+slope:             0.08
+
+Temperature:       0.31
+Humidity:          0.55
+Desertness:       -0.12
+Weirdness:         0.07
+Biome:            ColdBeach
+
+Flow accumulation: 312
+Lake rim:          none
+
+Aquifer Y top:     48
+Aquifer fluid:     Water
+
+Cave systems intersecting: 2
+```
+
+The probe re-evaluates on every config swap. Edit a spline knot in `assets/worldgen/default.ron`, save, and the column's `h_pre` and `h_target` values update within the file-watcher debounce window — about 100 ms in practice. You do not need to restart the process.
+
+The probe is implemented in `probe.rs`. Its state is a `Probe` struct carrying the pinned coordinate, the last `ColumnProbe` snapshot, the current density-inspection Y level, and the last `DensityBreakdown`. The `Probe::pin` method calls two generator methods: `generator.probe_column(wx, wz)` for the column snapshot, and `generator.evaluate_density_breakdown(wx, probe_y, wz)` for the per-voxel density decomposition at the current Y.
+
+## The density breakdown
+
+For a pinned column, the probe panel has a "sliding Y" mode. A slider lets you pick any `wy` in the world's vertical range. The panel then shows the density decomposition at that exact point — every contributing term, separated:
+
+| Term | Description |
+|---|---|
+| `bias` | Vertical bias ramp: large negative at the top, large positive at the bottom |
+| `base_3d` | The base 3D FBM terrain contribution |
+| `cave_sdf` | Cave carve contribution (negative = excavated) |
+| `cheese` | Cheese-cave porosity |
+| `spaghetti` | Spaghetti-cave tube contribution |
+| `pillar` | Pillar restoration (re-fills isolated cheese voids) |
+| `final_density` | Composed result |
+| `block` | The `Block` the engine places at this voxel given `final_density` |
+
+This is the answer to "why is this voxel air / water / lava?" It makes every decision from chapters 4.1 through 4.7 legible at a specific point in space. Use it when you change a density threshold and a surface looks wrong at a specific location: pin the column, slide Y to the problem voxel, and read which term produced the anomalous density.
+
+## The cross-section view
+
+The right-panel tab bar has a "Cross-section" tab alongside the default map view. The cross-section renders a 2D slice through the world on one of three orientations:
+
+- **XZ (horizontal):** A top-down slice at constant world Y. Shows the block distribution at one altitude — useful for inspecting where cave openings appear at a given depth.
+- **XY (vertical):** A slice at constant world Z. Shows a vertical cut through the terrain from west to east.
+- **YZ (vertical):** A slice at constant world X. Shows a vertical cut from south to north.
+
+The vertical slices use a 128 × 256 pixel canvas (portrait) to respect the world's asymmetric extent — roughly 256 blocks of usable vertical range versus a much wider horizontal span. The horizontal slice uses a 160 × 160 square.
+
+Pixel colour in the cross-section reflects density: air is dark, stone is medium grey, water and lava use their canonical colours, and biome-surface blocks carry a tint. Overlays (density iso-contours, aquifer pressure surface) are composited on top.
+
+The cross-section samples the generator directly on a background thread via a channel pair (`crossbeam_channel`) so the UI stays responsive while it re-renders. The `CrossSection` struct in `crosssection.rs` debounces re-renders on config changes to avoid spawning a new render task on every character typed in a slider.
+
+## Config hot-reload integration
+
+`worldgen_viz` participates in the same `ConfigHolder` mechanism described in chapter 5.3. The `Session` creates a `ConfigHolder` from the initial config, passes it to the `Generator`, and also passes a clone to the file watcher. When a change arrives:
+
+1. The watcher validates and deserialises the new `.ron` file.
+2. The swap is written into the shared `Arc<RwLock<WorldgenConfig>>`.
+3. The `Invalidator` marks all cached regions and chunks as dirty.
+4. The next frame triggers a region rebuild and chunk re-mesh.
+
+Visible effect: tweaking a spline control point in `assets/worldgen/default.ron` reshapes the height map within a second. The 3D mesh updates, the map view redraws, and the pinned probe re-evaluates.
+
+One caveat: not every config change triggers an immediate full-world update. Region-cached values (plate assignments, coarse continentalness averages) require the affected region to be evicted before the new config takes effect; regions are only evicted when the camera moves out of their bounds or when a force-regen is requested from the toolbar. Some changes only manifest on newly generated chunks. The same safe-vs-unsafe table from chapter 5.3 applies here.
+
+## Presets
+
+`preset.rs` manages a small library of named worldgen states saved to `assets/worldgen/presets/`. Each preset is a `<name>.ron` file holding the full `WorldgenConfig`. An optional `<name>.notes.md` sibling can carry freeform commentary — what made this configuration interesting, what to try next.
+
+The preset panel in the egui UI lists all discovered presets, lets you load one (replacing the current in-memory config and triggering a full regen), save the current config under a new name, and delete entries. The factory baseline (`assets/worldgen/default.ron`) sits one directory up from the presets folder and is never overwritten by the viz.
+
+This is useful for cross-seed comparison — save a config that produces an interesting archipelago under seed 42, then reload it under seed 1337 to see whether the feature is seed-specific or a structural property of the config.
+
+## Paint modes
+
+The 3D viewport's face colours are not fixed. `paint.rs` defines five `PaintMode` variants, selectable from the toolbar:
+
+| Mode | Face colour source |
+|---|---|
+| `Block` | Block type (default; stone, water, dirt, etc.) |
+| `Biome` | Categorical hue keyed on the column's resolved biome |
+| `PlateId` | Categorical hue keyed on the column's tectonic plate |
+| `HeightDelta` | Divergent gradient on `h_target − h_pre`; red = valley carved, blue = ridge |
+| `Slope` | Hot gradient on `∥∇h_pre∥`; bright = steep |
+
+Biome and plate modes make the 3D mesh into an equivalent of the map view's `BiomeId` and `PlateId` stages — useful when you want spatial context that the flat 2D map doesn't give you (the underside of an overhang, a cave biome transition visible inside the mesh).
+
+## An honest note
+
+`worldgen_viz` is a developer tool, built with egui (an immediate-mode UI library) because egui is excellent for debug panels and tolerates rapid structural change without layout engineering. It does not share styling or any component with the game's in-game UI, which is a separate system outside Phase 1 scope.
+
+A future game-facing debug mode — world-inspection overlays accessible from within the running game, without a separate process — is a Phase 3 consideration. Phase 1's contract is: the tool exists, it works, it covers all the pipeline stages, and it hot-reloads the config.
+
+## What you can now do
+
+Run `worldgen_viz`. Pan around. Find something interesting — a peninsula with a narrow isthmus, a cave opening at the shoreline, a lake fed by a river. Click the column. Read every pipeline value. Slide Y through the cave and watch each density term appear and disappear. Switch the map to `FlowAccum` and trace the river network upstream. Switch to `AquiferSubstance` and see where the lava pockets hide.
+
+Then open `assets/worldgen/default.ron` in an editor. Drag one continentalness spline knot. Save. Watch the coastline shift.
+
+That feedback loop — config edit, save, observe — is how the engine's current parameter set was tuned. The visualizer makes it fast enough to be useful.
+
+## End of Part V
+
+Part V has covered the four infrastructure systems that hold the pipeline together: the determinism conventions that make generation reproducible (5.1), the region cache that amortises per-column cost (5.2), the hot-reload config mechanism that makes iteration practical (5.3), and this tool, which makes the pipeline's internal state legible (5.4).
+
+*Phase 1 of How Oxium Builds a World is complete.* The appendices that follow are reference material.
+
+→ [Appendix A — Module Index](../appendices/a-module-index.mdx)
