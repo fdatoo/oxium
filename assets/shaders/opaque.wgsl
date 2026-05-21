@@ -281,7 +281,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let sky_level    = lvol.a;          // 0..1 (sky_light / 15)
 
     // ── Wrap-diffuse directional sun with sky-channel occlusion.
-    let n_dot_l = max(dot(in.v_face_normal, -camera.sun_dir.xyz), 0.0);
+    //
+    // `camera.sun_dir` is the direction TO the sun (the sky shader treats
+    // it that way for the sun-disc dot product). Lambert wants
+    // `dot(N, L)` where L points toward the light, so no negation.
+    // The previous `-camera.sun_dir` lit the wrong side: at noon the
+    // bottoms of blocks got n·L=+1 and the tops clamped to 0.
+    let n_dot_l = max(dot(in.v_face_normal, camera.sun_dir.xyz), 0.0);
     let wrap    = (n_dot_l + 0.4) / 1.4;
     // PR 5 introduces real cast shadows; until then `shadow = 1`.
     let shadow  = 1.0;
