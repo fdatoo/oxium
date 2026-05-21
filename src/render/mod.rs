@@ -247,15 +247,19 @@ pub struct Renderer {
     underwater_factor: f32,
 }
 
-/// Per-chunk GPU resources: the mesh buffers and the chunk-origin uniform.
-/// The bind group referencing the uniform buffer is built at draw time so
-/// each draw can include the chunk's current light_volume view.
+/// Per-chunk GPU resources: the mesh buffers, the chunk-origin uniform,
+/// and a cached bind group that references both. The bind group is built
+/// once at upload time and reused across all three render passes
+/// (opaque, water, reflection). It must be rebuilt whenever the chunk's
+/// light volume is (re)uploaded — see `upload_chunk_light_volume`.
 struct ChunkGpu {
     mesh: GpuMesh,
-    /// Per-LOD chunk uniform (world-space origin). The bind group
-    /// referencing this buffer is built at draw time so each draw
-    /// can include the chunk's current light_volume view.
+    /// Per-LOD chunk uniform (world-space origin).
     ubuf: wgpu::Buffer,
+    /// Cached bind group for `chunk_bgl`: ubuf @ 0, light view @ 1,
+    /// light sampler @ 2. Used as group 1 in every chunk draw with
+    /// a dynamic offset of 0.
+    bind_group: wgpu::BindGroup,
 }
 
 impl Renderer {
@@ -700,22 +704,54 @@ impl Renderer {
         );
     }
 
+    /// Build the per-chunk bind group used as group 1 in every chunk
+    /// draw. Binding 0 is the chunk-origin uniform (dynamic-offset
+    /// buffer, size 16), binding 1 is the chunk's light-volume view
+    /// (or the 1×1×1 placeholder when no volume has been uploaded
+    /// yet), and binding 2 is the shared light sampler.
+    fn make_chunk_bind_group(
+        &self,
+        ubuf: &wgpu::Buffer,
+        light_view: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
+        self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("chunk-bg"),
+            layout: &self.chunk_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: ubuf,
+                        offset: 0,
+                        size: std::num::NonZeroU64::new(16),
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(light_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.light_sampler),
+                },
+            ],
+        })
+    }
+
     /// Upload (or replace) the GPU mesh for chunk `coord` at LOD `lod`
     /// (0 = full resolution, 1 = 2× downsample, 2 = 4× downsample).
     /// An empty mesh clears just that one LOD slot.
     pub fn upload_chunk_mesh(&mut self, coord: ChunkCoord, lod: u8, mesh: &ChunkMesh) {
         let lod = lod as usize;
         debug_assert!(lod < 3);
-        let slots = self
-            .chunk_meshes
-            .entry(coord)
-            .or_insert_with(|| [None, None, None]);
         let Some(gpu_mesh) = upload_mesh(&self.gpu.device, mesh) else {
-            slots[lod] = None;
-            // If every slot is empty (e.g. all-air chunk), drop the
-            // hashmap entry entirely so iteration stays cheap.
-            if slots.iter().all(|s| s.is_none()) {
-                self.chunk_meshes.remove(&coord);
+            if let Some(slots) = self.chunk_meshes.get_mut(&coord) {
+                slots[lod] = None;
+                // If every slot is empty (e.g. all-air chunk), drop the
+                // hashmap entry entirely so iteration stays cheap.
+                if slots.iter().all(|s| s.is_none()) {
+                    self.chunk_meshes.remove(&coord);
+                }
             }
             return;
         };
@@ -730,9 +766,23 @@ impl Renderer {
                 }]),
                 usage: wgpu::BufferUsages::UNIFORM,
             });
+        // Pick the light view first so we don't hold a `&mut` borrow on
+        // `self.chunk_meshes` while we still need `&self` to build the
+        // bind group.
+        let light_view: &wgpu::TextureView = self
+            .chunk_lights
+            .get(&coord)
+            .map(|v| &v.view)
+            .unwrap_or(&self.placeholder_light_view);
+        let bind_group = self.make_chunk_bind_group(&ubuf, light_view);
+        let slots = self
+            .chunk_meshes
+            .entry(coord)
+            .or_insert_with(|| [None, None, None]);
         slots[lod] = Some(ChunkGpu {
             mesh: gpu_mesh,
             ubuf,
+            bind_group,
         });
     }
 
@@ -758,6 +808,33 @@ impl Renderer {
                     blob,
                 );
                 e.insert(vol);
+            }
+        }
+        // The cached per-chunk bind group references the chunk's
+        // light-volume `TextureView`, so each LOD slot whose mesh
+        // is already uploaded needs its bind group rebuilt to point
+        // at the new view. Slots not yet uploaded (mesh hasn't
+        // arrived) will pick up the correct view when their mesh
+        // upload lands.
+        let light_view = &self.chunk_lights.get(&coord).expect("just inserted").view;
+        // Build the new bind groups first (needs `&self`), then
+        // assign them under `&mut self.chunk_meshes`. We can't call
+        // `self.make_chunk_bind_group` while holding a `&mut` into
+        // `chunk_meshes`, so collect references via an intermediate
+        // pass over the slots.
+        if let Some(slots) = self.chunk_meshes.get(&coord) {
+            let mut new_bgs: [Option<wgpu::BindGroup>; 3] = [None, None, None];
+            for (i, slot) in slots.iter().enumerate() {
+                if let Some(cg) = slot {
+                    new_bgs[i] = Some(self.make_chunk_bind_group(&cg.ubuf, light_view));
+                }
+            }
+            if let Some(slots_mut) = self.chunk_meshes.get_mut(&coord) {
+                for (i, bg_opt) in new_bgs.into_iter().enumerate() {
+                    if let (Some(cg), Some(bg)) = (slots_mut[i].as_mut(), bg_opt) {
+                        cg.bind_group = bg;
+                    }
+                }
             }
         }
     }
@@ -1177,32 +1254,7 @@ impl Renderer {
                 .as_ref()
                 .or_else(|| slots.iter().flatten().next());
             if let Some(cg) = chosen {
-                let light_view = self.chunk_lights.get(coord)
-                    .map(|v| &v.view)
-                    .unwrap_or(&self.placeholder_light_view);
-                let chunk_bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("chunk-bg"),
-                    layout: &self.chunk_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: &cg.ubuf,
-                                offset: 0,
-                                size: std::num::NonZeroU64::new(16),
-                            }),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(light_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&self.light_sampler),
-                        },
-                    ],
-                });
-                pass.set_bind_group(1, &chunk_bg, &[0]);
+                pass.set_bind_group(1, &cg.bind_group, &[0]);
                 pass.set_vertex_buffer(0, cg.mesh.vbuf.slice(..));
                 pass.set_index_buffer(cg.mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..cg.mesh.index_count, 0, 0..1);
@@ -1315,32 +1367,7 @@ impl Renderer {
                 .as_ref()
                 .or_else(|| slots.iter().flatten().next());
             if let Some(cg) = chosen {
-                let light_view = self.chunk_lights.get(coord)
-                    .map(|v| &v.view)
-                    .unwrap_or(&self.placeholder_light_view);
-                let chunk_bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("chunk-bg"),
-                    layout: &self.chunk_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: &cg.ubuf,
-                                offset: 0,
-                                size: std::num::NonZeroU64::new(16),
-                            }),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(light_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&self.light_sampler),
-                        },
-                    ],
-                });
-                pass.set_bind_group(1, &chunk_bg, &[0]);
+                pass.set_bind_group(1, &cg.bind_group, &[0]);
                 pass.set_vertex_buffer(0, cg.mesh.vbuf.slice(..));
                 pass.set_index_buffer(cg.mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..cg.mesh.index_count, 0, 0..1);
@@ -1434,32 +1461,7 @@ impl Renderer {
                 .as_ref()
                 .or_else(|| slots.iter().flatten().next());
             if let Some(cg) = chosen {
-                let light_view = self.chunk_lights.get(coord)
-                    .map(|v| &v.view)
-                    .unwrap_or(&self.placeholder_light_view);
-                let chunk_bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("chunk-bg"),
-                    layout: &self.chunk_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: &cg.ubuf,
-                                offset: 0,
-                                size: std::num::NonZeroU64::new(16),
-                            }),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(light_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&self.light_sampler),
-                        },
-                    ],
-                });
-                pass.set_bind_group(1, &chunk_bg, &[0]);
+                pass.set_bind_group(1, &cg.bind_group, &[0]);
                 pass.set_vertex_buffer(0, cg.mesh.vbuf.slice(..));
                 pass.set_index_buffer(cg.mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..cg.mesh.index_count, 0, 0..1);
