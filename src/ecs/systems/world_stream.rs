@@ -136,7 +136,40 @@ pub fn world_stream(
         cache.last_player_chunk = Some(pc);
     }
 
+    // Cap in-flight dispatches so the rayon queue's priority order
+    // can't go stale. Without this, the first frame at world spawn
+    // dispatches all ~10 625 candidates into rayon's injection queue
+    // (sorted by distance from spawn). The queue is FIFO; workers
+    // chew through it in that order regardless of where the player
+    // walks next. After the player moves, new edge chunks get
+    // appended to the *back* of a queue that's still holding
+    // thousands of jobs prioritised around where the player *used to
+    // be*. From the player's POV that reads as a directional wipe:
+    // their current surroundings stay empty while workers fill in
+    // old territory. The visible symptom — half the screen stuck on
+    // sky while you wait for chunks behind you to finish — disappears
+    // once the queue can never grow more than `DISPATCH_CAP` deep:
+    // each new dispatch picks the closest currently-vacant chunk, so
+    // workers are always servicing the player's actual current
+    // priority order.
+    //
+    // 32 = roughly 2 frames of worker output at the post-trilerp
+    // ~250 chunks/sec throughput across 3-5 gen threads. Big enough
+    // that workers never run dry between dispatches; small enough
+    // that the front of the queue is always within ~120 ms of
+    // current player priority.
+    const DISPATCH_CAP: usize = 32;
+    let pending_count = world
+        .chunks
+        .values()
+        .filter(|s| matches!(s, ChunkSlot::Pending))
+        .count();
+    let mut budget = DISPATCH_CAP.saturating_sub(pending_count);
+
     for &c in &cache.targets {
+        if budget == 0 {
+            break;
+        }
         // Mark Pending only when the slot is currently absent. Using
         // `entry` avoids the double-hash of contains_key + insert.
         if let std::collections::hash_map::Entry::Vacant(slot) = world.chunks.entry(c) {
@@ -172,6 +205,7 @@ pub fn world_stream(
             } else {
                 jobs.spawn_gen(c, generator.clone(), registry.clone());
             }
+            budget -= 1;
         }
     }
 }
