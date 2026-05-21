@@ -3,6 +3,135 @@ id: 3.4-hydrology
 title: 3.4 Hydrology
 ---
 
-import Stub from '@site/src/components/Stub';
+import LazyWidget from '@site/src/widgets/LazyWidget';
+import D8Stepper from '@site/src/widgets/D8Stepper';
 
-<Stub />
+Rivers flow downhill. That statement sounds obvious — but for a procedural world it is a hard constraint to enforce. Pure noise generates elevation independently per column; there is no reason for water to travel anywhere in particular, so every local minimum is a sink and the landscape becomes a maze of puddles. The engine instead *computes* drainage: D8 flow direction, sink-fill, and a topological accumulation pass that lets every cell donate its area to the one cell downhill of it. The result is a drainage tree — and it is built per-region, deterministically, without any global state.
+
+## The picture
+
+Press *Step* to watch the algorithm process one cell at a time. The cells are visited highest-first. Each processed cell (red tones, brighter = more drainage area) donates its accumulated value to its downhill neighbour:
+
+<LazyWidget>
+  <D8Stepper />
+</LazyWidget>
+
+After all 256 cells have been processed the drainage tree is complete. A few cells collect most of the area — those are the proto-rivers.
+
+The same logic at world scale:
+
+![Flow accumulation at the book seed](/oxium/img/generated/flow-accum-s42-0_0-z8-w256.png)
+
+*Flow accumulation at the book seed, 2048 blocks across. Bright lines are high-drainage cells (trunk rivers near continental coasts); faint texture is the per-cell drainage area of 1. The tree-of-rivers structure radiates from interior highlands toward coastal outlets.*
+
+## Build it — the fine-grid algorithm
+
+The implementation lives in `src/worldgen/hydrology.rs`. The fine pass operates on a 5 × 5-region window — a 2-region halo on every side — so that a region's rivers are influenced by upstream drainage that originates in its neighbours. The window is `(1 + 2 × 2) × 64 = 320` cells per axis at the fine resolution of 8 blocks per cell.
+
+**Step 1 — sample the heightmap.** `h_pre` is evaluated at the center of every fine cell in the 320 × 320 window. This is the pre-carve terrain elevation from [3.3](./3.3-heightmap.mdx) — rivers route over the raw terrain before valley carving (carving happens afterward in response to where rivers ended up).
+
+**Step 2 — Planchon–Darboux sink fill.** Without intervention, any local minimum in the heightmap becomes a sink: water accumulation would stop there and never reach the ocean. The Planchon–Darboux (PD) algorithm iteratively raises sink cells just enough that water can drain out. It uses a min-priority queue: boundary cells are seeded at their natural elevation, and the algorithm propagates inward, raising each interior cell to at least the elevation of the lowest path to any boundary cell. After PD, every interior cell has a non-decreasing path outward.
+
+Cells whose *filled* height exceeds their *natural* height have been raised above the landscape — they are lake interiors. Their filled height becomes the lake rim elevation, which the engine later uses for water-surface rendering.
+
+The engine bounds PD to the per-region window (not the whole world), so very large closed basins that exceed the window size terrace at region boundaries. The macro pass (below) catches those.
+
+**Step 3 — macro trunk injection.** Before computing D8 directions, the engine queries the macro cache (built earlier at coarser resolution) for any macro cells that are trunk rivers. For each such cell, it injects `macro_acc × (FINE_PER_MACRO)²` units of starting accumulation at the corresponding fine cell. This plants an already-fat river in the fine grid before the fine accumulation pass even begins. Without this step, a river draining a 200 km mountain range would arrive at the fine grid with no drainage history and look like a small stream.
+
+**Step 4 — D8 flow direction.** On the *filled* heightmap, each cell finds its steepest downhill neighbour among the 8 compass directions. Cardinal moves (N/S/E/W) and diagonal moves (NE/SE/SW/NW) are both considered, but diagonal moves are penalised by the actual Euclidean distance (√2) so the slope comparison is fair:
+
+```
+slope = height_drop / distance_to_neighbour
+```
+
+The direction of the steepest slope is stored as a 3-bit code (0 = N, 1 = NE, … 7 = NW). A cell with no downhill neighbour gets code 8 (`DIR_NONE` — a persistent sink, typically at a window boundary or a completely flat plateau).
+
+**Step 5 — flow accumulation by topological sort.** Sort all cells by filled elevation, descending — highest first. Iterate in that order: each cell donates its own accumulated value to the cell pointed to by its D8 direction. Because we process highest-first, a cell always receives from all its uphill neighbours before it donates to its own downhill neighbour. One O(N) pass is sufficient; no iteration is needed.
+
+Every cell starts with `acc = 1` (its own unit area) plus any injected trunk units from step 3. After the pass, `acc` measures the total upstream drainage area in fine-cell units.
+
+**Step 6 — river threshold and width.** Cells with `acc ≥ RIVER_THRESH` (`= 50`) are rivers. Width is:
+
+```
+width = clamp(sqrt(acc) × RIVER_WIDTH_SCALE, MIN_RIVER_WIDTH, MAX_RIVER_WIDTH)
+       = clamp(sqrt(acc) × 0.30,              1.5,             32.0)
+```
+
+The square-root scaling reflects a well-known empirical relationship between drainage area and channel width. The min and max clamp keep tiny tributaries visible and enormous trunk rivers from filling entire biomes.
+
+**Step 7 — extract interior data.** The halo exists for computation only. The engine strips it and writes only the inner 64 × 64 cells into the `FineRegion` cache.
+
+**Step 8 — river segment extraction.** The engine walks each river cell to its downstream neighbour, building cell-center-to-cell-center polylines. A domain-warped meander offset is added so rivers don't look like grid-aligned stairstepping lines.
+
+## Build it — the macro pass
+
+A 64-cell-wide fine region sees at most 320 cells of drainage context — roughly 2.5 km of upstream reach. Continental-scale rivers (an inland mountain range draining across 200 km of plateau) need a much larger horizon. The engine solves this with a **macro grid** at 8× coarser resolution:
+
+| Property | Fine | Macro |
+|---|---|---|
+| Cell size | 8 blocks | 64 blocks |
+| Region size | 512 blocks (64 cells) | 8,192 blocks (128 cells) |
+| Window | 5 × 5 regions (320 cells) | 3 × 3 regions (384 cells) |
+| Drainage horizon | ~2.5 km | ~24 km |
+
+The macro pass runs the same algorithm — sink fill, D8, accumulation — on the coarser grid. Macro cells with `acc ≥ MACRO_RIVER_THRESH` (`= 500`) are *trunk* cells. Their accumulation values are what gets injected into fine cells in step 3 of the fine pass, scaled by `(FINE_PER_MACRO)² = 8² = 64` to convert from macro-cell units to fine-cell units.
+
+The result: trunk rivers route through fine geography (so they meander at fine resolution and respect fine-scale topography) while carrying continental-scale drainage area that no local fine pass could compute on its own.
+
+Two adjacent fine regions built from the same macro data see the same trunk cells and inject the same values at their shared border. This is the primary mechanism that prevents visible river seams at region boundaries.
+
+## In the engine
+
+The `FineRegion` struct stores the hydrology outputs for one 512 × 512 region after the halo is stripped:
+
+```rust
+// src/worldgen/region.rs
+pub struct FineRegion {
+    pub coord: RegionCoord,
+    pub h_pre: Box<[i16]>,         // heightmap samples (from 3.3)
+    pub flow_dir: Box<[u8]>,       // D8 direction code per cell (0–7, or 8 = sink)
+    pub flow_acc: Box<[u32]>,      // upstream drainage area in fine-cell units
+    pub is_river: Box<[u8]>,       // bit set: cell is a river (acc ≥ RIVER_THRESH)
+    pub is_lake: Box<[u8]>,        // bit set: cell is a lake interior
+    pub width: Box<[f32]>,         // river width in blocks (0 if not a river)
+    pub lake_rim: Box<[i16]>,      // filled elevation (= water surface for lakes)
+    pub segments: Vec<RiverSegment>,
+    pub cave_systems: Vec<CaveSystem>,
+}
+```
+
+All slice lengths are `64 × 64 = 4096` (one entry per fine cell). The bit sets (`is_river`, `is_lake`) pack eight cells per byte for compact storage. `segments` is populated in step 8 above; `cave_systems` is populated later by [3.6 Cave Systems](./3.6-cave-systems.mdx).
+
+The entry point for the fine pass is:
+
+```rust
+// src/worldgen/hydrology.rs
+pub fn build_fine_hydro(
+    seed: u64,
+    coord: RegionCoord,
+    heightmap: &HeightmapNoise,
+    climate: &ClimateConfig,
+    density: &DensityConfig,
+    macro_cache: &MacroCache,   // queried for trunk injection
+    fine_cache: &FineCache,     // queried for neighbour edge data
+    region: &mut FineRegion,
+)
+```
+
+`MacroCache` is a shared LRU cache that builds `MacroRegion` entries on demand. The macro build (`build_macro_region`) runs the same algorithm chain at coarse resolution and stores its trunk-flagged cells in `MacroRegion::is_trunk`.
+
+## What you can now do
+
+Read `src/worldgen/hydrology.rs` from line 422 (`build_fine_hydro`) through approximately line 640 (segment extraction). The struct `Grid` (lines 93–120) owns the working state; `sink_fill`, `compute_flow`, and `compute_acc` are its three methods. The halo gather and inject loop follows, then the crop-and-write to `FineRegion`.
+
+Things you can tune directly in `src/worldgen/tuning.rs`:
+
+- **`RIVER_THRESH = 50`** — lower this to make small streams visible; raise it to leave only trunk rivers. This is the single knob that most dramatically changes how dense the river network looks.
+- **`RIVER_WIDTH_SCALE = 0.30`** — controls how fast width grows with drainage area. Decreasing it narrows every river uniformly.
+- **`MACRO_RIVER_THRESH = 500`** — controls which macro cells are considered trunk rivers for the injection step. Raising it means only the very largest continental drainages inject into fine — you'll see smaller rivers lose their continental context.
+
+To understand why crossing a region boundary doesn't produce a visible river seam: both neighbouring regions build their fine-pass windows from the same macro trunk data. The trunk injection plants the same large `acc` value in both windows at the shared border, so the river arrives with the same width on both sides. The `FINE_HALO_REGIONS = 2` halo means that even the D8 direction field is computed on shared terrain, so flow direction agrees at the border too.
+
+## Next
+
+→ [3.5 Rivers, Valleys, Lakes](./3.5-rivers-lakes.mdx) — what rivers *look like* once the engine knows where they are: valley carving, meander offsets, lake water surfaces, and the kd-tree spatial index that makes chunk fill fast.
