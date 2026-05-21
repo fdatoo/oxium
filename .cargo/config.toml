@@ -1,0 +1,4 @@
+[alias]
+# `cargo run` defaults to release so you don't need --release every time.
+# Override with: cargo run --profile dev -- …
+run = "run --release"

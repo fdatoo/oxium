@@ -68,6 +68,9 @@ struct CliOptions {
     /// Hidden test hook: drop the UI into `paused` or `chat` before the
     /// screenshot frame. No effect during normal play.
     ui_state: Option<String>,
+    /// Override the world seed. `--seed 43` forces seed 43 regardless of
+    /// the saved manifest or the TEST_SEED_OVERRIDE constant.
+    seed: Option<u64>,
 }
 
 impl CliOptions {
@@ -81,6 +84,7 @@ impl CliOptions {
         let mut uncapped = false;
         let mut profile_path = None;
         let mut ui_state: Option<String> = None;
+        let mut seed: Option<u64> = None;
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--screenshot-and-exit" => {
@@ -121,6 +125,10 @@ impl CliOptions {
                     let v = args.next().expect("--ui requires `paused` or `chat`");
                     ui_state = Some(v);
                 }
+                "--seed" => {
+                    let v = args.next().expect("--seed requires an integer");
+                    seed = Some(v.parse().expect("--seed must be a u64"));
+                }
                 _ => {}
             }
         }
@@ -138,6 +146,7 @@ impl CliOptions {
             uncapped,
             profile_path,
             ui_state,
+            seed,
         }
     }
 }
@@ -232,8 +241,9 @@ impl ApplicationHandler for App {
             .or_else(|| self.cli.find_water.then(find_water_spawn));
         let uncapped = self.cli.uncapped;
         let profile = self.cli.profile_path.as_deref();
+        let seed = self.cli.seed;
         let mut state = match spawn {
-            Some(p) => AppState::new_with_spawn(window.clone(), p, uncapped, profile),
+            Some(p) => AppState::new_with_spawn(window.clone(), p, uncapped, profile, seed),
             None => AppState::new_with_spawn(
                 window.clone(),
                 // High default spawn so you can see the whole load
@@ -242,6 +252,7 @@ impl ApplicationHandler for App {
                 glam::Vec3::new(16.0, 250.0, 16.0),
                 uncapped,
                 profile,
+                seed,
             ),
         };
         // CLI `--time` overrides the TimeOfDay sun-cycle value. Apply

@@ -197,6 +197,7 @@ impl AppState {
         spawn: glam::Vec3,
         uncapped: bool,
         profile_path: Option<&std::path::Path>,
+        seed_override: Option<u64>,
     ) -> Self {
         // One save folder per binary; could grow into a world-picker UI.
         let saves_dir = PathBuf::from("saves/default");
@@ -212,7 +213,26 @@ impl AppState {
         // launch shows the same terrain. Drop this override when the
         // generator is locked in and we want fresh worlds again.
         const TEST_SEED_OVERRIDE: Option<u64> = Some(42);
-        let seed = TEST_SEED_OVERRIDE.unwrap_or(manifest.seed);
+        let seed = seed_override.or(TEST_SEED_OVERRIDE).unwrap_or(manifest.seed);
+
+        if seed != manifest.seed {
+            log::warn!(
+                "seed mismatch (saved={}, effective={}) — discarding save at {}",
+                manifest.seed,
+                seed,
+                saves_dir.display()
+            );
+            let regions_dir = saves_dir.join("regions");
+            if regions_dir.exists() {
+                std::fs::remove_dir_all(&regions_dir)
+                    .expect("failed to clear regions on seed change");
+            }
+            let mut fresh = crate::persistence::manifest::WorldManifest::fresh();
+            fresh.seed = seed;
+            crate::persistence::manifest::save(&saves_dir, &fresh)
+                .expect("failed to write manifest on seed change");
+        }
+
         log::info!(
             "world manifest loaded: seed={} (manifest seed={}, version={})",
             seed,
