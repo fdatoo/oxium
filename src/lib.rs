@@ -17,4 +17,5 @@ pub mod mesher;
 pub mod persistence;
 pub mod physics;
 pub mod voxel;
+pub mod viz_render;
 pub mod worldgen;
