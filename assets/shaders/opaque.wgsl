@@ -263,7 +263,17 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     }
 
     // ── Per-pixel light volume sample, air-side of the surface.
-    let sample_world = in.v_world + in.v_face_normal * 0.5;
+    //
+    // The vertex sits on the face plane: for a PosY face at world-y=11 it
+    // shares that y with the air cell at chunk-local index 11 (which
+    // spans world [11,12)); for a NegY face at world-y=10 it shares that
+    // y with the BLOCK cell at index 10. We need to land sample_local
+    // inside the air-side cell so trilinear filtering reads the actual
+    // surface illumination, not a 50/50 blend with the opaque cell on
+    // the other side of the face. `min(face_normal, 0)` gives 0 for
+    // positive normals (vertex is already in the air cell) and -1 for
+    // negative normals (step back one cell to the air on that side).
+    let sample_world = in.v_world + min(in.v_face_normal, vec3<f32>(0.0));
     let chunk_local  = sample_world - chunk.origin.xyz;
     let uvw          = (chunk_local + vec3<f32>(0.5, 0.5, 0.5)) / 33.0;
     let lvol         = textureSampleLevel(light_volume, light_sampler, uvw, 0.0);

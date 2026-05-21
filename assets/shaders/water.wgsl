@@ -476,7 +476,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let deep_tint = vec3<f32>(0.04, 0.18, 0.32);
 
     // Sample the chunk light volume at the water surface's air-side.
-    let sample_world = in.v_world + in.v_face_normal * 0.5;
+    // See the long comment in opaque.wgsl: `min(face_normal, 0)` lands
+    // sample_local inside the air-side cell (PosY: same y as vertex;
+    // NegY: one cell back) so trilinear reads the surface illumination
+    // rather than a 50/50 blend with the opaque cell on the far side.
+    let sample_world = in.v_world + min(in.v_face_normal, vec3<f32>(0.0));
     let chunk_local  = sample_world - chunk.origin.xyz;
     let uvw          = (chunk_local + vec3<f32>(0.5, 0.5, 0.5)) / 33.0;
     let lvol         = textureSampleLevel(light_volume, light_sampler, uvw, 0.0);
