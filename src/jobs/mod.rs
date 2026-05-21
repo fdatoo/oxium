@@ -1,5 +1,5 @@
 //! Background job system: chunk generation, lighting, and meshing run on
-//! a `rayon` worker pool; results return via a `crossbeam-channel`.
+//! `rayon` worker pools; results return via a `crossbeam-channel`.
 //!
 //! Why decouple producer (worker) from consumer (main thread)?
 //!
@@ -8,8 +8,16 @@
 //! - Channels are lock-free for the common case (one producer, one
 //!   consumer) — fine for our drain-each-frame pattern.
 //!
-//! The pool deliberately uses N-1 worker threads (where N = available
-//! parallelism) so the main rendering thread keeps a CPU core to itself.
+//! The pools deliberately use N-1 worker threads total (where N =
+//! available parallelism) so the main rendering thread keeps a CPU core
+//! to itself.
+//!
+//! Why two pools instead of one? A single FIFO pool starves mesh jobs
+//! during the initial worldgen burst — ~11,250 gen jobs queue up at
+//! startup and every Generated result enqueues up to 7 mesh jobs behind
+//! them. Splitting into a `gen_pool` (gen + disk load) and a `mesh_pool`
+//! (meshing + relight) lets mesh jobs run the moment their source
+//! chunk is Stored, in parallel with the gen pool draining its backlog.
 
 use crate::mesher::ChunkMesh;
 use crate::voxel::block::BlockRegistry;
@@ -74,14 +82,21 @@ pub enum JobResult {
     },
 }
 
-/// Owns the rayon pool plus the result channel. Held inside `AppState` and
-/// shared by reference to all systems that spawn or drain jobs.
+/// Owns the rayon pools plus the result channel. Held inside `AppState`
+/// and shared by reference to all systems that spawn or drain jobs.
 #[allow(clippy::too_many_arguments)] // mesh-spawn helpers naturally take many context args
 pub struct Jobs {
     tx: Sender<JobResult>,
     /// Receivers drain `try_recv()` from this each frame.
     pub rx: Receiver<JobResult>,
-    pool: rayon::ThreadPool,
+    /// Pool that runs `spawn_gen` and `spawn_load` jobs (the producers of
+    /// chunk data). Separated from `mesh_pool` so the initial gen burst
+    /// can't starve mesh jobs.
+    gen_pool: rayon::ThreadPool,
+    /// Pool that runs `spawn_mesh_lod0`, `spawn_mesh_lod`, and
+    /// `spawn_relight` jobs. Relight lives here because it's the
+    /// precursor to a re-mesh and shares cost characteristics.
+    mesh_pool: rayon::ThreadPool,
 }
 
 impl Default for Jobs {
@@ -91,18 +106,32 @@ impl Default for Jobs {
 }
 
 impl Jobs {
-    /// Build a fresh worker pool sized to *N - 1* logical CPUs (leaving one
-    /// for the main thread). Result channel is unbounded — it can briefly
-    /// queue up dozens of completions during a fast fly-around without
-    /// stalling the workers.
+    /// Build two fresh worker pools whose combined size is *N - 1* logical
+    /// CPUs (leaving one for the main thread). The total is split evenly
+    /// between the gen pool (gen + disk load) and the mesh pool (meshing +
+    /// relight), each clamped to at least one thread.
+    ///
+    /// Result channel is unbounded — it can briefly queue up dozens of
+    /// completions during a fast fly-around without stalling the workers.
     pub fn new() -> Self {
         let (tx, rx) = unbounded();
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(worker_thread_count())
-            .thread_name(|i| format!("oxium-worker-{i}"))
+        let (gen_threads, mesh_threads) = pool_thread_split();
+        let gen_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(gen_threads)
+            .thread_name(|i| format!("oxium-gen-{i}"))
             .build()
-            .expect("rayon pool");
-        Self { tx, rx, pool }
+            .expect("rayon gen pool");
+        let mesh_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(mesh_threads)
+            .thread_name(|i| format!("oxium-mesh-{i}"))
+            .build()
+            .expect("rayon mesh pool");
+        Self {
+            tx,
+            rx,
+            gen_pool,
+            mesh_pool,
+        }
     }
 
     /// Spawn a chunk-load job: read the persisted chunk from disk on
@@ -117,7 +146,7 @@ impl Jobs {
     /// falls back to procedural gen for that case.
     pub fn spawn_load(&self, coord: ChunkCoord, path: std::path::PathBuf) {
         let tx = self.tx.clone();
-        self.pool.spawn(move || {
+        self.gen_pool.spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 use crate::persistence::region::{read_chunk, RegionError};
                 match read_chunk(&path, coord) {
@@ -156,7 +185,7 @@ impl Jobs {
         registry: Arc<BlockRegistry>,
     ) {
         let tx = self.tx.clone();
-        self.pool.spawn(move || {
+        self.gen_pool.spawn(move || {
             // Catch worker panics so they surface in logs instead of
             // silently killing a worker thread. Without this, a single
             // deterministic panic in `fill_chunk` or `recompute_chunk`
@@ -198,7 +227,7 @@ impl Jobs {
         registry: Arc<BlockRegistry>,
     ) {
         let tx = self.tx.clone();
-        self.pool.spawn(move || {
+        self.mesh_pool.spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut dense = data.decompress();
                 let neighbor_dense: Vec<Option<DenseChunk>> = neighbors
@@ -255,7 +284,7 @@ impl Jobs {
     ) {
         debug_assert!(lod == 1 || lod == 2, "use spawn_mesh_lod0 for LOD0");
         let tx = self.tx.clone();
-        self.pool.spawn(move || {
+        self.mesh_pool.spawn(move || {
             let dense = data.decompress();
             let factor: u32 = if lod == 1 { 2 } else { 4 };
             let lod_chunk = crate::mesher::lod::downsample(&dense, factor);
@@ -286,7 +315,7 @@ impl Jobs {
         version: u64,
     ) {
         let tx = self.tx.clone();
-        self.pool.spawn(move || {
+        self.mesh_pool.spawn(move || {
             // Catch worker panics so they surface in logs instead of being
             // silently swallowed by the rayon pool. (Cheap in steady state.)
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -348,4 +377,18 @@ fn worker_thread_count() -> usize {
         .unwrap_or(4)
         .saturating_sub(1)
         .max(1)
+}
+
+/// Split the total worker budget between the gen pool and the mesh pool.
+///
+/// Gives the gen pool the ceiling half and the mesh pool the floor half
+/// of `worker_thread_count()`, each clamped to at least one. On systems
+/// with only 1-2 workers available this collapses to 1+1 — meaning the
+/// budget grows by a thread, but only when there's truly nothing to
+/// split. Better than starving either side.
+fn pool_thread_split() -> (usize, usize) {
+    let total = worker_thread_count();
+    let gen_threads = total.div_ceil(2).max(1);
+    let mesh_threads = total.saturating_sub(gen_threads).max(1);
+    (gen_threads, mesh_threads)
 }
