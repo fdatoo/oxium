@@ -183,6 +183,7 @@ impl Jobs {
         coord: ChunkCoord,
         generator: Arc<Generator>,
         registry: Arc<BlockRegistry>,
+        _neighbors: [Option<Arc<PalettedChunk>>; 6],
     ) {
         let tx = self.tx.clone();
         self.gen_pool.spawn(move || {
