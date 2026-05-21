@@ -1,0 +1,8 @@
+[
+    {"fn":"fbm","args":{"seed":42,"octaves":4,"persistence":0.5,"x":0,"y":0},"out":0},
+    {"fn":"fbm","args":{"seed":42,"octaves":4,"persistence":0.5,"x":0.25,"y":0},"out":0.1375537640832377},
+    {"fn":"fbm","args":{"seed":42,"octaves":4,"persistence":0.5,"x":0.5,"y":0.5},"out":-0.06878646014483951},
+    {"fn":"fbm","args":{"seed":42,"octaves":1,"persistence":0.5,"x":0.5,"y":0.5},"out":-0.217591680723256},
+    {"fn":"fbm","args":{"seed":42,"octaves":6,"persistence":0.6,"x":0.123,"y":0.789},"out":-0.06944942729986964},
+    {"fn":"fbm","args":{"seed":1337,"octaves":4,"persistence":0.5,"x":0,"y":0},"out":0}
+]

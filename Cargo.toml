@@ -88,3 +88,7 @@ opt-level = 1   # debug builds are slow without this for graphics work
 [[bin]]
 name = "worldgen_viz"
 path = "src/bin/worldgen_viz/main.rs"
+
+[[bin]]
+name = "doc_render"
+path = "src/bin/doc_render/main.rs"

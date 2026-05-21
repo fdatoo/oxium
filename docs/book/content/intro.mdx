@@ -1,0 +1,28 @@
+---
+id: intro
+title: How Oxium Builds a World
+sidebar_position: 1
+slug: /
+---
+
+import Stub from '@site/src/components/Stub';
+
+This is the documentation for **Oxium**, a voxel engine. The book teaches how the engine works from first principles up — starting with the math primitives, building the worldgen pipeline layer by layer, then (in later phases) the renderer, mesher, lighting, and engineering substrate.
+
+## Who this is for
+
+You have a CS degree but no specialized background in graphics or games math. You can read Rust well enough to follow types and ownership. By the end of Phase 1 you will be able to read the entire `src/worldgen/` module and know what every line is doing.
+
+## What is in Phase 1
+
+| Part | What it covers |
+|---|---|
+| **I.** Foundations | Noise, FBM, Voronoi, vector fields, splines, SDFs, trilerp, determinism — the math primitives the engine reuses. |
+| **II.** Pipeline Overview | One chapter that walks the whole worldgen pipeline end-to-end, no math. |
+| **III.** Per-Region Build | Plates, climate, heightmap, hydrology, cave systems — what the engine caches per region. |
+| **IV.** Per-Chunk Fill | Density graph, cell evaluator, cave composition, surface rules, aquifers, trees — the runtime hot path. |
+| **V.** Engineering Scaffolding | Determinism, region cache, hot-reload, the visualizer. |
+
+Phase 2 (renderer, mesher, lighting) and Phase 3 (ECS, jobs, persistence, UI) land in subsequent versions of this book.
+
+<Stub />

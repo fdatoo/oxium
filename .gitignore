@@ -5,3 +5,8 @@
 /.superpowers
 /saves
 /target
+
+# Docusaurus
+docs/book/node_modules/
+docs/book/build/
+docs/book/.docusaurus/

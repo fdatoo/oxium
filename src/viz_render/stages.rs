@@ -2,9 +2,9 @@
 //! `Generator::sample_stage` — no rendering happens here; `MapView`
 //! consumes this module's `render_pixel` to fill its texture.
 
-use crate::overlays::colormap;
-use oxium::worldgen::probe::Stage;
-use oxium::worldgen::Generator;
+use crate::viz_render::colormap;
+use crate::worldgen::probe::Stage;
+use crate::worldgen::Generator;
 
 /// Sensible value range per stage for normalisation into `[0, 1]`.
 /// Returning `None` means the stage is categorical and the colormap
@@ -69,7 +69,7 @@ pub fn render_pixel(generator: &Generator, stage: Stage, wx: i32, wz: i32) -> [u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxium::worldgen::Generator;
+    use crate::worldgen::Generator;
 
     #[test]
     fn render_pixel_is_deterministic() {

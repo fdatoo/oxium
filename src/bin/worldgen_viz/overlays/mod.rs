@@ -1,7 +1,17 @@
-//! 2D pan/zoom map of pipeline stages. Click-to-probe.
+//! Overlay map + per-stage sampler.
+//!
+//! The pure rendering primitives (colormap, per-stage pixel) live in
+//! the library at `oxium::viz_render` so the `doc_render` binary can
+//! reuse them. This module re-exports them and keeps the egui/UI-side
+//! `MapView` plumbing here (binary-only).
 
-pub mod colormap;
-pub mod stages;
+// Re-export both library names so callers in this binary can still
+// reach `crate::overlays::{colormap, stages}` after the promotion.
+// `colormap` is not used directly inside this file today; we keep
+// it for symmetry so future code that wants colormap parity with
+// stages does not have to re-add it.
+#[allow(unused_imports)]
+pub use oxium::viz_render::{colormap, stages};
 
 use egui::{ColorImage, TextureHandle, TextureOptions, Ui};
 use oxium::worldgen::probe::Stage;
@@ -245,7 +255,6 @@ impl MapView {
 /// horizontal gradient with min/max labels; categorical stages get a
 /// short text hint.
 fn legend(ui: &mut Ui, stage: Stage) {
-    use crate::overlays::stages;
     let strip_h = 12.0;
     let strip_w = MAP_SIZE_PX as f32;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(strip_w, strip_h), egui::Sense::hover());
