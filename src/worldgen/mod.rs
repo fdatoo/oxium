@@ -33,9 +33,8 @@
 //! 4. **Caves.** Graph-based cave systems (`caves.rs`) deposit
 //!    chambers + spline tunnels into the chunk. The `CAVE_SURFACE_BUFFER`
 //!    rule preserves the grass cap except where an explicit entrance
-//!    (sinkhole / cliff mouth / skylight) punches through. Below
-//!    `WORMHOLE_BAND_Y` a sparse 3D-noise wormhole field carves
-//!    additional connective passages.
+//!    (sinkhole / cliff mouth / skylight) punches through. Cheese + pillar
+//!    noise carvers provide ambient density variation underground.
 //! 5. **Water flood.** Sea-level flood + per-column lake-rim flood
 //!    (the latter from sink-filled basins in the hydrology pass)
 //!    turn any air cell below the appropriate water level into Water.
@@ -47,7 +46,7 @@
 //!
 //! Plates → continental mask + ridge lift → heightmap → flow
 //! accumulation (fine + macro hierarchical) → valley carve →
-//! cave systems / wormholes → biomes / surface materials / trees.
+//! cave systems / cheese+pillar noise → biomes / surface materials / trees.
 //! Each layer is in its own module; this file is the public entry
 //! point that wires them together.
 
@@ -123,10 +122,6 @@ pub struct Generator {
     /// wetter columns earn denser tree cover, drier columns read as
     /// sparser plains.
     humidity_map: Fbm<Simplex>,
-    /// Deep-band wormhole filler: sparse 3D noise that supplements
-    /// the graph-based cave systems below `WORMHOLE_BAND_Y`. Above
-    /// that, caves come exclusively from the cave-system graph.
-    wormhole_noise: caves::WormholeNoise,
     /// PR 4: weirdness 2D noise (mid-frequency). Mirrors MC's
     /// "ridge" axis as a biome-table input — lets the same
     /// (temperature, humidity) climate produce both base biomes
@@ -146,10 +141,9 @@ pub struct Generator {
     /// per-cell `y_top` + fluid kind (Water/Lava). Floods caves
     /// and replaces the primitive ocean/lake-rim filler.
     aquifer: aquifer::AquiferSystem,
-    /// PR 8: cheese / spaghetti / pillar noise channels. Built once
-    /// per Generator from `WorldgenConfig::cave`. Read per-voxel in
-    /// `fill_chunk` to compose with the graph cave SDFs and
-    /// wormholes via `max()`.
+    /// PR 8: cheese / pillar noise channels. Built once per Generator
+    /// from `WorldgenConfig::cave`. Read per-voxel in `fill_chunk`
+    /// to compose with the graph cave SDFs.
     noise_carvers: caves::NoiseCarvers,
     /// MC-style procedural carver tunnel cache. Per-chunk LRU keyed
     /// on origin chunk coord; each entry is the deterministic list
@@ -235,7 +229,6 @@ impl Generator {
             .set_octaves(2)
             .set_frequency(1.0 / 512.0)
             .set_persistence(0.5);
-        let wormhole_noise = caves::WormholeNoise::new(seed);
         // PR 4: weirdness noise — mid-frequency 2D Fbm. Used as the
         // 6th biome-lookup axis (variant biomes within the same
         // T/H/C region).
@@ -252,10 +245,9 @@ impl Generator {
         // probabilities) requires a Generator restart; only the
         // pressure tunables in `AquiferConfig` re-read live.
         let aquifer = aquifer::AquiferSystem::new(seed, bundled.aquifer.clone());
-        // PR 8: noise carvers (cheese / spaghetti / pillar Fbm
-        // channels) built from the bundled cave config. Channel
-        // topology (which Fbm fields exist) is fixed in Rust; only
-        // tunable values re-read live.
+        // PR 8: noise carvers (cheese / pillar Fbm channels) built
+        // from the bundled cave config. Channel topology is fixed in
+        // Rust; only tunable values re-read live.
         let noise_carvers = caves::NoiseCarvers::new(seed, &bundled.cave);
         // Carver cache: cap chosen so a chunk-fill's 11×5×11
         // neighbour query has comfortable headroom for adjacent
@@ -268,7 +260,6 @@ impl Generator {
             density,
             temperature_map,
             humidity_map,
-            wormhole_noise,
             weirdness_noise,
             biome_list,
             aquifer,
@@ -797,24 +788,10 @@ impl Generator {
                 caves::entrance_sdf(wx, wy, wz, &cave_systems),
             );
         }
-        // Wormhole — same gate.
-        if approx_depth > CAVE_SURFACE_BUFFER
-            && wy > CAVE_FLOOR_Y
-            && self.wormhole_noise.carve(wx, wy, wz)
-        {
-            cave_sdf_val = cave_sdf_val.max(CAVE_SDF_INTENSITY);
-        }
-
-        // Noise carvers (cheese + spaghetti) — same gate. `cheese_contribution`
-        // also takes `raw_density` now (gates a density-aware cap that landed
-        // on main after our viz redesign started).
+        // Noise carvers (cheese) — same gate. `cheese_contribution`
+        // also takes `raw_density` (gates a density-aware cap).
         let cheese = if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
             caves::cheese_contribution(wx, wy, wz, raw_density, &self.noise_carvers, &cfg.cave)
-        } else {
-            0.0
-        };
-        let spaghetti = if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
-            caves::spaghetti_contribution(wx, wy, wz, &self.noise_carvers, &cfg.cave)
         } else {
             0.0
         };
@@ -826,13 +803,10 @@ impl Generator {
 
         // Compose to a signed final density the same way fill_chunk
         // does: start from `raw_density`, then `min()` in each cave
-        // carver's signed contribution. Graph cave / wormhole SDFs
-        // are positive intensities, so they're applied as
-        // `min(-sdf)`. `cheese` and `spaghetti` are signed
-        // (post-cave-referendum: cheese includes the cave_layer²
-        // term and can be strongly positive in cave-poor strata,
-        // so treating it as a positive-only subtraction would flip
-        // solid voxels to air). Pillars apply last via `max()`.
+        // carver's signed contribution. Graph cave SDFs are positive
+        // intensities, so they're applied as `min(-sdf)`. `cheese` is
+        // signed (includes the cave_layer² term). Pillars apply last
+        // via `max()`.
         //
         // NB: the procedural carver (`carver.rs`) mask isn't included
         // here — it operates per-chunk and isn't cheap to query at
@@ -844,7 +818,6 @@ impl Generator {
         }
         if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
             final_density = final_density.min(cheese);
-            final_density = final_density.min(spaghetti);
         }
         if pillar > 0.0 {
             final_density = final_density.max(pillar);
@@ -899,21 +872,12 @@ impl Generator {
                     }
                     scan_cave = scan_cave.max(caves::entrance_sdf(wx, scan_y, wz, &cave_systems));
                 }
-                if scan_approx_depth > CAVE_SURFACE_BUFFER
-                    && scan_y > CAVE_FLOOR_Y
-                    && self.wormhole_noise.carve(wx, scan_y, wz)
-                {
-                    scan_cave = scan_cave.max(CAVE_SDF_INTENSITY);
-                }
                 if scan_approx_depth > CAVE_SURFACE_BUFFER && scan_y > CAVE_FLOOR_Y {
                     scan_cave = scan_cave.max(
                         caves::cheese_contribution(
                             wx, scan_y, wz, scan_density,
                             &self.noise_carvers, &cfg.cave,
                         ),
-                    );
-                    scan_cave = scan_cave.max(
-                        caves::spaghetti_contribution(wx, scan_y, wz, &self.noise_carvers, &cfg.cave),
                     );
                 }
                 let scan_pillar = if scan_approx_depth > CAVE_SURFACE_BUFFER && scan_y > CAVE_FLOOR_Y {
@@ -967,7 +931,6 @@ impl Generator {
             base_3d,
             cave_sdf: cave_sdf_val,
             cheese,
-            spaghetti,
             pillar,
             final_density,
             block,
@@ -1043,7 +1006,6 @@ impl Generator {
         // Simplex calls inside the inner loop.
         let carver_eval = caves::CarverEvaluator::new(
             &self.noise_carvers,
-            &self.wormhole_noise,
             &cfg.cave,
             origin,
         );
@@ -1147,13 +1109,6 @@ impl Generator {
                             composed = composed.min(-ent);
                         }
                     }
-                    if approx_depth > CAVE_SURFACE_BUFFER
-                        && wy > CAVE_FLOOR_Y
-                        && carver_eval.wormhole_carve_at(wx, wy, wz)
-                    {
-                        composed = composed.min(-CAVE_SDF_INTENSITY);
-                    }
-
                     // Noise carvers: only deeper than the underground
                     // density threshold.
                     if approx_depth > CAVE_SURFACE_BUFFER
@@ -1162,19 +1117,6 @@ impl Generator {
                     {
                         let cheese = carver_eval.cheese_at(wx, wy, wz, raw_density, &cfg.cave);
                         composed = composed.min(cheese);
-
-                        let spag = carver_eval.spaghetti_at(wx, wy, wz, &cfg.cave);
-                        let roughness = carver_eval.spaghetti_roughness_at(wx, wy, wz);
-                        composed = composed.min(spag + roughness);
-                    }
-
-                    // Surface entrance noise — NOT gated by the
-                    // underground density threshold. This is the
-                    // whole point: punch holes through the
-                    // heightmap to create natural cave openings.
-                    if wy > CAVE_FLOOR_Y {
-                        let ent = carver_eval.surface_entrance_at(wx, wy, wz, &cfg.cave);
-                        composed = composed.min(ent);
                     }
 
                     // MC-style procedural carver mask. Hard carve to
@@ -1806,12 +1748,14 @@ mod tests {
     #[test]
     fn golden_seed42_chunk_0_2_0() {
         // Hash re-baselined for the carver-trilerp pass: the noise
-        // carvers (cheese / spaghetti / pillar / wormhole /
-        // surface_entrance) now run through a 9³ corner lattice +
-        // trilerp instead of per-voxel FBM. Voxels near a cave
-        // sign-boundary can resolve differently from the pre-trilerp
-        // implementation; cave shapes are visually equivalent. Same
-        // precedent as the PR-5 hash bump for the base density.
+        // carvers (cheese / pillar) now run through a 9³ corner
+        // lattice + trilerp instead of per-voxel FBM. Voxels near a
+        // cave sign-boundary can resolve differently from the
+        // pre-trilerp implementation; cave shapes are visually
+        // equivalent. Same precedent as the PR-5 hash bump for the
+        // base density.
+        // Note: this golden will be rebaselined in PR1.6 after
+        // density composition changes from removing spaghetti/wormhole.
         const GOLDEN_42_002: u64 = 0xE4E964788BEB26DD;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
@@ -1837,8 +1781,7 @@ mod tests {
         let mut found_carved_chunk = false;
         // Scan a 16 × 16 grid of chunks (one region's worth) at
         // chunk y=-2 (world y [-64, -33]). This depth straddles the
-        // Middle / Deep cave bands and the wormhole noise band
-        // (`WORMHOLE_BAND_Y` = -40), so at least one chunk should
+        // Middle / Deep cave bands, so at least one chunk should
         // hit something.
         for cx in -8..8 {
             for cz in -8..8 {
@@ -1854,11 +1797,10 @@ mod tests {
                     }
                 }
                 // PR 8: ambient noise carvers + graph chambers +
-                // wormholes + aquifer flood can stack in a single
-                // chunk near a system intersection. "Mostly stone"
-                // is no longer a useful invariant — `stone +
-                // mostly-fluid >= 5%` is the realistic floor that
-                // catches a fully-blank chunk.
+                // aquifer flood can stack in a single chunk near a
+                // system intersection. "Mostly stone" is no longer a
+                // useful invariant — `stone + mostly-fluid >= 5%` is
+                // the realistic floor that catches a fully-blank chunk.
                 let fluid: i32 = c
                     .blocks
                     .iter()
@@ -1871,8 +1813,8 @@ mod tests {
                 );
                 if air > CHUNK_VOL / 50 {
                     // 2% — well above the 0.5% pre-PR-8 threshold;
-                    // ambient cheese + spaghetti carving means every
-                    // underground chunk should easily clear this.
+                    // ambient cheese carving means every underground
+                    // chunk should easily clear this.
                     found_carved_chunk = true;
                 }
             }

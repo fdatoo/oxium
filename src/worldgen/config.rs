@@ -44,7 +44,7 @@ impl ChannelParams {
 }
 
 /// Cave-carving tunables — applies to the noise carvers (cheese,
-/// spaghetti, pillars), not the graph cave systems.
+/// pillars), not the graph cave systems.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CaveConfig {
     // Cheese: signed-density carver, see `cheese_contribution`.
@@ -87,39 +87,6 @@ pub struct CaveConfig {
     /// carving everywhere.
     pub cave_layer_intensity: f32,
 
-    // Spaghetti: signed-density tube carver, see `spaghetti_contribution`.
-    pub spaghetti_2d: ChannelParams,
-    pub spaghetti_2d_modulator: ChannelParams,
-    pub spaghetti_2d_elevation: ChannelParams,
-    pub spaghetti_2d_thickness: ChannelParams,
-    pub spaghetti_roughness: ChannelParams,
-    /// Linear remap range for the elevation modulator. The
-    /// elevation noise output is mapped to `[min, max]` and added
-    /// to the y-clamped gradient to find the tube centerline.
-    pub spaghetti_elevation_min: f32,
-    pub spaghetti_elevation_max: f32,
-    /// Y-clamped gradient endpoints. Added to the mapped
-    /// elevation noise before the abs() that defines the tube
-    /// distance. Larger positive values suppress tubes; negative
-    /// values let them carve.
-    pub spaghetti_gradient_from_y: i32,
-    pub spaghetti_gradient_from_value: f32,
-    pub spaghetti_gradient_to_y: i32,
-    pub spaghetti_gradient_to_value: f32,
-    /// Thickness modulator linear remap: `offset + slope *
-    /// thickness_noise`. A negative offset biases the cube term
-    /// (see `spaghetti_contribution`) so tube interiors go
-    /// negative; the noise-driven slope adds per-region width
-    /// variation.
-    pub spaghetti_thickness_offset: f32,
-    pub spaghetti_thickness_slope: f32,
-    /// Final clamp range on the spaghetti density.
-    pub spaghetti_clamp_min: f32,
-    pub spaghetti_clamp_max: f32,
-    /// Coefficient on the thickness modulator inside the
-    /// region-modulated cave noise term.
-    pub spaghetti_cave_noise_offset: f32,
-
     // Pillars: positive density that gets max()'d at the end so
     // they refill carved voxels (stone columns inside open caves).
     pub pillar: ChannelParams,
@@ -130,39 +97,12 @@ pub struct CaveConfig {
     pub pillar_cutoff: f32,
     pub pillar_intensity: f32,
 
-    /// Raw-density threshold below which the noise carvers
-    /// (spaghetti + cheese) are silent. The graph cave system's
-    /// entrances still carve below this, providing the deliberate
-    /// surface openings. Above it (deeper underground), all
-    /// carvers operate.
+    /// Raw-density threshold below which the noise carvers (cheese)
+    /// are silent. The graph cave system's entrances still carve
+    /// below this, providing the deliberate surface openings. Above
+    /// it (deeper underground), all carvers operate.
     pub underground_density_threshold: f32,
 
-    // ── Surface entrance noise ──────────────────────────────────────
-    //
-    // A dedicated noise-driven carver that runs in the surface
-    // band only, punching small holes through the heightmap. Acts
-    // as the "natural cave entrance" carver alongside the graph
-    // cave system's chamber-attached entrances (which fire only
-    // under specific geometric conditions). This one is purely
-    // noise-gated and produces many small openings everywhere.
-    pub surface_entrance: ChannelParams,
-    /// XZ scale on the surface entrance noise sample.
-    pub surface_entrance_xz_scale: f32,
-    /// Y scale on the surface entrance noise sample. Smaller = the
-    /// entrance "shaft" stays straight; larger = wobbly bores.
-    pub surface_entrance_y_scale: f32,
-    /// Noise threshold above which the entrance fires. Larger →
-    /// fewer entrances; smaller → more.
-    pub surface_entrance_threshold: f32,
-    /// Carve intensity. Translated to a negative signed-density
-    /// contribution in `surface_entrance_contribution`.
-    pub surface_entrance_intensity: f32,
-    /// Active Y window. Outside this range the entrance noise is
-    /// silent. Should bracket the player's expected surface band.
-    pub surface_entrance_y_min: i32,
-    pub surface_entrance_y_max: i32,
-    /// Soft-edge fade width at each Y boundary.
-    pub surface_entrance_fade_blocks: i32,
 }
 
 /// PR 4 biome lookup config. The 6 existing biomes (Tundra,

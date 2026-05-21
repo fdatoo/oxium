@@ -69,12 +69,10 @@ pub struct DensityBreakdown {
     pub bias: f32,
     /// 3D base noise contribution at this voxel.
     pub base_3d: f32,
-    /// Graph cave / entrance / wormhole combined SDF.
+    /// Graph cave / entrance combined SDF.
     pub cave_sdf: f32,
     /// Cheese carver contribution.
     pub cheese: f32,
-    /// Spaghetti carver contribution.
-    pub spaghetti: f32,
     /// Pillar contribution (adds back density inside carved volumes).
     pub pillar: f32,
     /// Composed density after all contributions (post-slide).

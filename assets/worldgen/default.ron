@@ -315,12 +315,12 @@
         Block(Stone),
     ]),
 
-    // ── Noise carvers: cheese / spaghetti / pillars ─────────────────
+    // ── Noise carvers: cheese / pillars ─────────────────────────────
     //
     // Ambient noise-driven cave density that runs alongside the
-    // graph cave systems and wormholes. Topology (which noise
-    // channels exist, how they compose) stays in Rust; only the
-    // numeric values are hot-reloadable from this file.
+    // graph cave systems. Topology (which noise channels exist, how
+    // they compose) stays in Rust; only the numeric values are
+    // hot-reloadable from this file.
     cave: (
         // ── Cheese: signed-density carver.
         //   cheese = clamp(offset + cheese_noise, -1, 1)
@@ -359,89 +359,6 @@
         cave_layer_y_scale: 8.0,
         cave_layer_intensity: 6.0,
 
-        // ── Spaghetti: signed-density tube carver.
-        //   sloped_spag  = abs(elevation_mapped + y_gradient)
-        //   layer_ridged = (sloped_spag + thickness_mod)^3
-        //   cave_noise   = weird_scaled(modulator, sp2d)
-        //                  + cave_noise_offset * thickness_mod
-        //   result       = clamp(max(cave_noise, layer_ridged),
-        //                        clamp_min, clamp_max)
-        // The cube on layer_ridged makes most of the world solid
-        // (huge positive); caves form only along the thin curve
-        // where sloped_spag goes near zero — i.e., where the
-        // elevation noise crosses `-y_gradient`. That curve is the
-        // tube; the cave_noise term gates per-region.
-        spaghetti_2d: (
-            first_octave: -7,
-            amplitudes: [1.0],
-        ),
-        spaghetti_2d_modulator: (
-            first_octave: -11,
-            amplitudes: [1.0],
-        ),
-        spaghetti_2d_elevation: (
-            first_octave: -8,
-            amplitudes: [1.0],
-        ),
-        spaghetti_2d_thickness: (
-            first_octave: -8,
-            amplitudes: [1.0],
-        ),
-        spaghetti_roughness: (
-            first_octave: -5,
-            amplitudes: [1.0],
-        ),
-        // Elevation noise maps to [-8, 8]: this is the amplitude of
-        // the "where is the tube centerline" wobble. ±8 means tubes
-        // can meander up to 8 blocks above/below a Y-driven base.
-        spaghetti_elevation_min: -8.0,
-        spaghetti_elevation_max: 8.0,
-        // Tube density profile: tubes form where
-        //   abs(elev + ygrad) < |thickness_offset|
-        // and the per-Y density depends on what `elev` value is
-        // needed at that Y. Tube DENSITY peaks where ygrad ≈ 0
-        // (then elev ≈ 0 satisfies, which is the most common
-        // noise value); tube DENSITY tapers toward zero as
-        // |ygrad| approaches `elev_max`.
-        //
-        // Asymmetric gradient: full suppression at the world top
-        // (no sky tubes), gentle ygrad ≈ 0 around Y ≈ -50 where
-        // tubes are densest, mild suppression at the floor. The
-        // gradient gently lets tubes "leak" up to the surface
-        // (Y ≈ 62) at about 5% density — rare but present, so
-        // entrances appear without flooding the surface.
-        // MC-direction gradient: slope -0.075/block. y_grad peaks
-        // at y=0 (mid-shallow cave band) and tapers symmetrically.
-        // At y=70 y_grad ≈ -5.25 → tubes form at elev≈5.25 (~15%
-        // of columns), so tubes occasionally break the surface
-        // without flooding every column with cave entrances.
-        spaghetti_gradient_from_y: 80,
-        spaghetti_gradient_from_value: -6.0,
-        spaghetti_gradient_to_y: -120,
-        spaghetti_gradient_to_value: 9.0,
-        // Negative offset on the thickness_mod biases the cube
-        // term so tube interiors actually go negative; |offset|
-        // is the half-width of the cube term's negative range,
-        // which is *also* the maximum tube radius in (elev, ygrad)
-        // space. Smaller |offset| → thinner tubes → less likely
-        // to merge into bowls when adjacent tubes overlap.
-        //
-        // -0.5 gives tubes around ~8 blocks across horizontally
-        // (vs ~15 at -0.95). Combined with the asymmetric
-        // gradient above, tubes stay tube-shaped.
-        // -0.15: thin slivers. With the procedural carver providing
-        // the meandering tunnel network, spaghetti's role is reduced
-        // to "extra texture." Its elevation noise is sampled in
-        // pure 2D, so any tube formed is a VERTICAL CURTAIN over a
-        // 2D contour — narrow tubes minimise the curtain area so
-        // it reads as faint cracks rather than walls. Set to 0.0
-        // to disable spaghetti entirely.
-        spaghetti_thickness_offset: -0.15,
-        spaghetti_thickness_slope: -0.2,
-        spaghetti_clamp_min: -1.0,
-        spaghetti_clamp_max: 1.0,
-        spaghetti_cave_noise_offset: 0.083,
-
         // ── Pillars: positive-density blobs that get max()'d
         //     after cave subtraction so they refill carved voxels.
         pillar: (
@@ -462,53 +379,10 @@
         pillar_intensity: 4.0,
 
         // Density threshold for the noise carvers to operate.
-        // 0.0 means "any voxel that's nominally solid" — so
-        // spaghetti tubes can extend right up to the heightmap
-        // and form natural cave entrances where they reach it.
-        // Cheese's own surface-suppression term keeps cheese
-        // pockets from blooming through the surface.
+        // 0.0 means "any voxel that's nominally solid". Cheese's
+        // own surface-suppression term keeps cheese pockets from
+        // blooming through the surface.
         underground_density_threshold: 0.0,
-
-        // ── Surface entrance noise.
-        //
-        // Single noise channel that fires in the surface band
-        // (≈ sea level ± 20) when noise exceeds threshold.
-        // Produces small natural cave openings independent of
-        // the graph cave system's chamber-attached entrances.
-        surface_entrance: (
-            first_octave: -5,    // ~32-block wavelength
-            amplitudes: [1.0, 0.5],
-        ),
-        surface_entrance_xz_scale: 1.0,
-        // y_scale = 0.0 → the noise is constant in Y, so wherever
-        // an XZ column passes threshold the carving applies for the
-        // entire active Y range. That gives a *vertical shaft* from
-        // the top of the band down into the cave network, instead
-        // of a localized 3D pocket that's disconnected from the
-        // underground.
-        surface_entrance_y_scale: 0.0,
-        // With 2D shafts, the threshold determines what fraction of
-        // XZ columns get a shaft. 0.35 lands ~3% of columns →
-        // about 30 shafts per 32×32 chunk patch on average.
-        // Raise → fewer; lower → more.
-        surface_entrance_threshold: 0.35,
-        // Disabled (intensity 0): the standalone 2D-shaft carver
-        // had no way of knowing where the underground cave
-        // network was, so it produced craters that dead-ended in
-        // bedrock. The new design relies on the spaghetti tubes
-        // themselves reaching the surface — entrances appear
-        // organically where a tube happens to surface.
-        surface_entrance_intensity: 0.0,
-        // Active range extends down past the surface, well into
-        // the depths where the spaghetti tube band operates
-        // (typically Y in [-100, -10] for the configured gradient).
-        // The depth taper makes the bottom of this range carry
-        // almost no carving — by the time the shaft is at the
-        // tube band, it's just a hint of negative density that
-        // existing tubes can extend into the surface.
-        surface_entrance_y_min: -20,
-        surface_entrance_y_max: 82,
-        surface_entrance_fade_blocks: 6,
     ),
 
     // ── Aquifer system (PR 7) ────────────────────────────────────────

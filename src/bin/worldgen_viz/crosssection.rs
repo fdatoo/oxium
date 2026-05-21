@@ -65,17 +65,14 @@ pub enum Layer {
     /// would colour it. Reads through the existing density+surface
     /// pipeline so the slice matches what fill_chunk would write.
     Block,
-    /// Combined cave-contribution magnitude (max of cave_sdf + cheese
-    /// + spaghetti). Bright = the carvers are removing material here.
+    /// Combined cave-contribution magnitude (max of cave_sdf + cheese).
+    /// Bright = the carvers are removing material here.
     /// Pillar contribution is positive in the opposite direction
     /// and isn't included; see the dedicated `Pillar` layer for that.
     CaveSdf,
     /// Cheese noise contribution only (blobby caves). Bright = strong
     /// cheese carve at this voxel.
     Cheese,
-    /// Spaghetti tube contribution only (thin worming tubes). Bright =
-    /// strong spaghetti carve.
-    Spaghetti,
     /// Pillar density-add-back. Bright = strong pillar add-back
     /// (resists carving inside cave volumes).
     Pillar,
@@ -88,7 +85,6 @@ impl Layer {
             Layer::Block => "Block",
             Layer::CaveSdf => "Cave SDF (combined)",
             Layer::Cheese => "Cheese",
-            Layer::Spaghetti => "Spaghetti",
             Layer::Pillar => "Pillar",
         }
     }
@@ -98,7 +94,6 @@ impl Layer {
         Layer::Block,
         Layer::CaveSdf,
         Layer::Cheese,
-        Layer::Spaghetti,
         Layer::Pillar,
     ];
 }
@@ -456,11 +451,10 @@ fn sample_pixel(generator: &Generator, layer: Layer, wx: i32, wy: i32, wz: i32) 
         // magnitude (~2.0 — most contributions sit there). Hot ramp
         // so cave material is easy to spot against solid rock.
         Layer::CaveSdf => {
-            let combined = bd.cave_sdf.max(bd.cheese).max(bd.spaghetti);
+            let combined = bd.cave_sdf.max(bd.cheese);
             hot_color((combined / 2.0).clamp(0.0, 1.0))
         }
         Layer::Cheese => hot_color((bd.cheese / 2.0).clamp(0.0, 1.0)),
-        Layer::Spaghetti => hot_color((bd.spaghetti / 2.0).clamp(0.0, 1.0)),
         Layer::Pillar => hot_color((bd.pillar / 2.0).clamp(0.0, 1.0)),
     }
 }

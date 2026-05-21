@@ -150,14 +150,6 @@ pub const CAVE_SURFACE_BUFFER: i32 = -1;
 /// Floor (world Y) below which caves stop carving. Keeps the loaded
 /// chunk-stack bottom solid.
 pub const CAVE_FLOOR_Y: i32 = -120;
-/// Y below which sparse 3D-noise wormholes are layered in addition to
-/// the graph systems. Wormholes only operate in the deep band so
-/// shallow caves stay coherent.
-pub const WORMHOLE_BAND_Y: i32 = -40;
-/// Half-width of the near-zero band on the wormhole noise. Wider →
-/// thicker / more frequent wormholes.
-pub const WORMHOLE_BAND: f64 = 0.05;
-
 // ── Biomes & surface ─────────────────────────────────────────────────
 
 // PR 4: COLD_THRESHOLD, FOREST_HUMIDITY, BIOME_JITTER_*,
