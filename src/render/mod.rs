@@ -11,6 +11,7 @@
 //! are owned per subsystem (sky, opaque voxels, water, cursor, HUD).
 
 pub mod atlas;
+pub mod bloom;
 pub mod camera;
 pub mod font;
 pub mod gpu;
@@ -38,6 +39,8 @@ use crate::render::gpu::{
 };
 use crate::render::hud::HudFrame;
 use crate::render::mesh::{upload_mesh, GpuMesh};
+use crate::render::bloom::BloomChain;
+use crate::render::pipelines::bloom::{build as build_bloom, BloomPipelines};
 use crate::render::pipelines::composite::{build as build_composite, CompositePipeline};
 use crate::render::pipelines::cursor::{
     build as build_cursor, make_cursor_bind_group_layout, CursorPipeline,
@@ -194,6 +197,12 @@ pub struct Renderer {
     /// Composite pipeline: resolves the HDR target to the swapchain.
     /// Currently passthrough; Tasks 5/6 add tonemap + underwater tint.
     composite_pipe: CompositePipeline,
+    /// Bloom mip chain (5 levels, ½..1/32 swapchain). Recreated on resize.
+    pub bloom: BloomChain,
+    /// Threshold / downsample / upsample bloom pipelines. Shared bind-
+    /// group layout; instances of `BloomChain::sampler` + per-mip view
+    /// fill the layout per draw.
+    bloom_pipes: BloomPipelines,
     /// Wireframe cursor pipeline + its uniform/bind group. Drawn last
     /// (over the opaque pass) only when `cursor_visible == true`.
     cursor_pipe: CursorPipeline,
@@ -420,6 +429,12 @@ impl Renderer {
         let sky_pipe = build_sky(&gpu.device, hdr::HDR_FORMAT, &camera_bgl);
         let sky_pipe_reflection = build_sky(&gpu.device, gpu.surface_cfg.format, &camera_bgl);
         let composite_pipe = build_composite(&gpu.device, gpu.surface_cfg.format);
+        let bloom = BloomChain::new(
+            &gpu.device,
+            gpu.surface_cfg.width,
+            gpu.surface_cfg.height,
+        );
+        let bloom_pipes = build_bloom(&gpu.device, crate::render::bloom::BLOOM_FORMAT);
 
         // HUD: build the pipeline + upload the font atlas. The font
         // texture is its own resource (R8-style data but stored
@@ -594,6 +609,8 @@ impl Renderer {
             sky_pipe,
             sky_pipe_reflection,
             composite_pipe,
+            bloom,
+            bloom_pipes,
             cursor_pipe,
             cursor_buf,
             cursor_bg,
@@ -656,6 +673,7 @@ impl Renderer {
     pub fn resize(&mut self, w: u32, h: u32) {
         self.gpu.resize(w, h);
         self.hdr.recreate(&self.gpu.device, w, h);
+        self.bloom.recreate(&self.gpu.device, w, h);
         let (depth_tex, depth_view) = make_depth_texture(&self.gpu.device, w, h);
         let (depth_sample_tex, depth_sample_view) =
             make_depth_sample_texture(&self.gpu.device, w, h);
@@ -1051,6 +1069,9 @@ impl Renderer {
             &self.hdr.view,
             &visible_main,
         );
+        // Bloom chain: builds 5 mips on the HDR target. Result lives in
+        // self.bloom.mips[0]; composite reads it in Task 5.
+        self.encode_bloom_pass(&mut enc);
         // Composite: read HDR, write to the swapchain. Passthrough
         // today; Tasks 5/6 add tonemap + underwater tint.
         self.encode_composite_pass(&mut enc, &view);
@@ -1117,6 +1138,118 @@ impl Renderer {
         (out, any_water)
     }
 
+    /// Build the bloom mip chain by sampling `self.hdr` through the
+    /// threshold + downsample + upsample passes. Mutates `self.bloom`'s
+    /// textures in place; the final result lives at `self.bloom.mips[0]`
+    /// for the composite pass to read.
+    ///
+    /// Bind groups are created per pass because each pass reads a
+    /// different source view. wgpu requires the bind group's layout to
+    /// match the pipeline's layout, so we reuse `self.bloom_pipes.bgl`
+    /// for every binding.
+    fn encode_bloom_pass(&self, enc: &mut wgpu::CommandEncoder) {
+        // Helper: a one-shot fullscreen pass with a single color target
+        // and one bind group.
+        let mut one_pass = |label: &str,
+                        pipeline: &wgpu::RenderPipeline,
+                        bg: &wgpu::BindGroup,
+                        target: &wgpu::TextureView,
+                        load: wgpu::LoadOp<wgpu::Color>| {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(label),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, bg, &[]);
+            pass.draw(0..3, 0..1);
+        };
+
+        // Pass 0: HDR → bloom[0]. Threshold + downsample in one shader.
+        let bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bloom-threshold-bg"),
+            layout: &self.bloom_pipes.bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.hdr.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.bloom.sampler),
+                },
+            ],
+        });
+        one_pass(
+            "bloom-threshold",
+            &self.bloom_pipes.threshold,
+            &bg,
+            &self.bloom.mips[0].view,
+            wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+        );
+
+        // Passes 1..4: bloom[n] → bloom[n+1] via the 13-tap downsample.
+        for n in 0..(crate::render::bloom::BLOOM_MIP_COUNT as usize - 1) {
+            let bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(&format!("bloom-downsample-{n}-bg")),
+                layout: &self.bloom_pipes.bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&self.bloom.mips[n].view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.bloom.sampler),
+                    },
+                ],
+            });
+            one_pass(
+                "bloom-downsample",
+                &self.bloom_pipes.downsample,
+                &bg,
+                &self.bloom.mips[n + 1].view,
+                wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+            );
+        }
+
+        // Passes 5..8: bloom[n+1] → bloom[n] additive (3×3 tent). Walks
+        // from the smallest mip outward, accumulating onto the destination
+        // mip's existing downsample content.
+        for n in (0..(crate::render::bloom::BLOOM_MIP_COUNT as usize - 1)).rev() {
+            let bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(&format!("bloom-upsample-{n}-bg")),
+                layout: &self.bloom_pipes.bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&self.bloom.mips[n + 1].view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.bloom.sampler),
+                    },
+                ],
+            });
+            // Upsample uses `LoadOp::Load` — destination mip already
+            // holds the downsample result; we accumulate via additive
+            // blend (configured in the pipeline).
+            one_pass(
+                "bloom-upsample",
+                &self.bloom_pipes.upsample,
+                &bg,
+                &self.bloom.mips[n].view,
+                wgpu::LoadOp::Load,
+            );
+        }
+    }
+
     /// Encode the composite pass: sample the HDR target, write to the
     /// swapchain (or screenshot target). Today this is a passthrough;
     /// Tasks 5/6 fold in ACES tonemap and underwater tint. The bind
@@ -1142,6 +1275,14 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: self.camera_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&self.bloom.mips[0].view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&self.bloom.sampler),
                 },
             ],
         });
@@ -1535,6 +1676,7 @@ impl Renderer {
             &self.hdr.view,
             &visible_main,
         );
+        self.encode_bloom_pass(&mut enc);
         self.encode_composite_pass(&mut enc, target);
         if let Some(hud) = hud {
             self.encode_hud_pass(&mut enc, target, hud);

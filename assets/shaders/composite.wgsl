@@ -25,6 +25,10 @@ struct CameraUniform {
 @group(0) @binding(0) var          hdr_tex:     texture_2d<f32>;
 @group(0) @binding(1) var          hdr_sampler: sampler;
 @group(0) @binding(2) var<uniform> camera:      CameraUniform;
+@group(0) @binding(3) var          bloom_tex:     texture_2d<f32>;
+@group(0) @binding(4) var          bloom_sampler: sampler;
+
+const BLOOM_STRENGTH: f32 = 0.06;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -88,8 +92,15 @@ fn underwater_tint(rgb: vec3<f32>, screen_uv: vec2<f32>, t: f32, factor: f32) ->
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let hdr     = textureSample(hdr_tex, hdr_sampler, in.uv).rgb;
-    let mapped  = aces_tonemap(hdr);
+    var color = textureSample(hdr_tex,   hdr_sampler,   in.uv).rgb;
+    let bloom = textureSample(bloom_tex, bloom_sampler, in.uv).rgb;
+
+    // Bloom is additive in linear HDR, applied *before* the tonemap so
+    // HDR-bright pixels drive bloom proportionally (per spec composite-
+    // order: fog → bloom → tonemap → underwater).
+    color = color + bloom * BLOOM_STRENGTH;
+
+    let mapped  = aces_tonemap(color);
     let out_rgb = underwater_tint(mapped, in.uv, camera.time, camera.underwater_factor);
     return vec4<f32>(out_rgb, 1.0);
 }
