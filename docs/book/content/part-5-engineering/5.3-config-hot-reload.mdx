@@ -3,6 +3,225 @@ id: 5.3-config-hot-reload
 title: 5.3 Config & Hot-Reload
 ---
 
-import Stub from '@site/src/components/Stub';
 
-<Stub />
+A worldgen pipeline with dozens of tunable parameters lives or dies by its authoring loop. Recompiling Rust every time a spline knot moves a metre is unacceptable. Saving a RON file and watching the world re-shape itself in the visualizer — that is the goal. Oxium achieves this by splitting configuration into two layers: compile-time constants that define structural choices, and a runtime RON file that holds everything a world author actually wants to turn. The runtime side hot-reloads via a file watcher; the `ConfigHolder` keeps every reload atomic.
+
+## The two-layer split
+
+Worldgen configuration lives in two places that serve different masters.
+
+| Layer | Location | What lives there | Reload path |
+|---|---|---|---|
+| Compile-time | `src/worldgen/tuning.rs` | `PLATE_CELL_SIZE`, `SEA_LEVEL`, `FINE_CACHE_CAP`, cave band bounds, river width laws | Recompile |
+| Runtime | `assets/worldgen/default.ron` | Spline knots, biome rate percentiles, surface rules, cave thresholds, aquifer pressure | File save |
+
+The compile-time layer (`tuning.rs`) holds constants that govern topology: how many plates exist, how large the region cache is, what Y bands the three cave strata occupy, how rivers widen near mouths. These values flow into long-lived data structures at `Generator::new` and cannot be swapped without rebuilding those structures.
+
+The runtime layer (`default.ron`) holds *values inside* an already-built topology: where on the Y axis the ocean floor sits, how aggressively the jaggedness spline amplifies ridges, which pressure coefficients the aquifer uses. These are re-read on every chunk fill, so a file change lands in the next chunk.
+
+> **Note:** `tuning.rs` is a single flat file with grouped `pub const` items and doc-comments explaining the design intent of each knob. If you want to understand why a constant exists, read it there rather than hunting through individual modules.
+
+## WorldgenConfig and its sub-configs
+
+All runtime-tunable values root at `WorldgenConfig` in `src/worldgen/config.rs`:
+
+```rust
+// src/worldgen/config.rs
+pub struct WorldgenConfig {
+    pub density: DensityConfig,
+    pub climate: ClimateConfig,
+    pub biomes: BiomesConfig,
+    pub surface: crate::worldgen::surface::RuleSource,
+    pub aquifer: crate::worldgen::aquifer::AquiferConfig,
+    pub cave: CaveConfig,
+}
+```
+
+**`DensityConfig`** controls the y-gradient that biases density toward solid below the surface and air above it. The key fields are `y_min` / `y_max` (the world's vertical range), `y_gradient_amplitude`, `composition_scale` (multiplier on the depth-times-factor term; Minecraft uses 4.0), and `above_surface_softening` (how gently the bias fades above ground). Slide parameters (`slide_top_blocks`, `slide_top_target`, `slide_bottom_blocks`, `slide_bottom_target`) force clean sky ceilings and solid void floors near the Y extremes.
+
+**`ClimateConfig`** encodes the three nested cubic Hermite spline pipelines (offset, factor, jaggedness) that convert continentalness, terrain shape, and ridge PV into a surface Y offset. Each spline is a `NestedSpline` — either a `Constant(f32)` leaf or a `Multipoint` list of `NestedKnot { loc, val, slope }` entries. The outer spline keys on continentalness; each knot's `val` is itself a spline keyed on terrain shape; the innermost level keys on ridges PV. `ClimateConfig` also holds the period and amplitude of the terrain-shape and ridges noise fields, and the per-plate roughness bias range.
+
+**`CaveConfig`** tunes the noise carvers: cheese rooms, spaghetti tunnels, and pillar formations each have a `ChannelParams` (first octave + amplitude weights) plus scale factors that control anisotropy. Separate surface-entrance fields (`surface_entrance_y_min`, `surface_entrance_y_max`, `surface_entrance_fade_blocks`) define the Y window where the entrance noise activates, exposing cave openings at the surface.
+
+**`AquiferConfig`** carries the pressure-model coefficients: `sea_level` (caps aquifer surfaces so no water emerges above the ocean), `y_top_jitter` (how much per-cell water-table height varies), `barrier_strength` and `barrier_period` (the 3D noise that warps the fluid boundary), and `top_falloff` / `bottom_falloff` (asymmetric pressure decay rates above and below the fluid surface).
+
+**`surface: RuleSource`** is the data-driven surface rule tree described in chapter 4.6. Unlike the other sub-configs it is not a plain struct but a recursive enum that the chunk filler walks at each surface column to pick the final block type. Because it is read fresh from the config snapshot at chunk time, the entire rule tree can be replaced without restarting the generator.
+
+**`BiomesConfig`** holds the biome lookup table — a `Vec<ParameterPoint>` where each entry claims a biome on six climate axes (temperature, humidity, continentalness, erosion, ridges PV, weirdness) — plus `weirdness_period` and `weirdness_amplitude` for the variant-biome noise.
+
+## The RON file
+
+`assets/worldgen/default.ron` is the editable source of truth for all of the above. It opens with a root `(` record whose fields match `WorldgenConfig`:
+
+```ron
+// assets/worldgen/default.ron
+(
+    density: (
+        y_min: -120,
+        y_max: 140,
+        y_gradient_amplitude: 1.5,
+        composition_scale: 4.0,
+        above_surface_softening: 0.25,
+        factor: 4.0,
+        base_3d_period: 32.0,
+        // ... slide params, offset_spline ...
+    ),
+
+    climate: (
+        offset_spline: Multipoint([
+            (loc: -1.1, val: Constant(0.10), slope: 0.0),
+            (loc:  0.0, val: Multipoint([
+                (loc: -1.0, val: Constant(0.55), slope: 0.0),
+                // ... terrain-shape knots ...
+            ]), slope: 0.0),
+            // ... more continentalness knots ...
+        ]),
+        factor_spline: ...,
+        jaggedness_spline: ...,
+        terrain_shape_period: 2000.0,
+        // ...
+    ),
+
+    // cave, aquifer, surface, biomes ...
+)
+```
+
+`NestedSpline` deserializes as a tagged union: `Constant(value)` for leaf nodes, `Multipoint([...])` for interpolated splines. The nesting can be arbitrary — the outer level keys on continentalness, each `val` field is itself a `NestedSpline` that keys on terrain shape, and so on.
+
+RON was chosen over JSON or TOML because it supports Rust-native enum syntax (the `Constant(...)` / `Multipoint(...)` discriminants map directly to `NestedSpline` variants) and allows inline comments, which are essential when documenting what a spline knot at continentalness -1.1 actually means in world-space Y.
+
+## ConfigHolder and ArcSwap
+
+Thread safety across the file watcher and the chunk generation threads is handled by `ConfigHolder`:
+
+```rust
+// src/worldgen/config.rs
+use arc_swap::ArcSwap;
+use std::sync::Arc;
+
+#[derive(Clone)]
+pub struct ConfigHolder(Arc<ArcSwap<WorldgenConfig>>);
+
+impl ConfigHolder {
+    pub fn new(initial: WorldgenConfig) -> Self {
+        Self(Arc::new(ArcSwap::new(Arc::new(initial))))
+    }
+
+    /// Cheap atomic snapshot — no mutex, no lock.
+    pub fn load(&self) -> Arc<WorldgenConfig> {
+        self.0.load_full()
+    }
+
+    /// Atomically replace the held config.
+    /// Existing snapshots from load() remain valid.
+    pub fn swap(&self, new: WorldgenConfig) {
+        self.0.store(Arc::new(new));
+    }
+}
+```
+
+`ArcSwap` is a lock-free atomic pointer: `load_full()` returns an `Arc<WorldgenConfig>` snapshot in a few nanoseconds with no mutex contention. `store()` replaces the inner pointer; threads that already called `load()` and hold their `Arc` continue reading the old config until they drop it. The `ConfigHolder` itself is cheaply cloneable — it wraps the inner `Arc<ArcSwap<...>>`, so both the `Generator` and the file watcher can own a clone that shares the same underlying cell.
+
+## The snapshot pattern
+
+Every code path that reads config follows the same one-liner at the top of its work unit:
+
+```rust
+// fill_chunk — src/worldgen/mod.rs
+pub fn fill_chunk(&self, coord: ChunkCoord, out: &mut DenseChunk) {
+    // ...
+    // Snapshot the hot-reloadable config once at the top of this
+    // chunk and reuse for every voxel — keeps each chunk
+    // deterministic even if a file watcher swaps mid-generation.
+    let cfg = self.config_snapshot();
+    // ... thousands of voxels that all use &*cfg ...
+}
+```
+
+`config_snapshot()` is a thin wrapper around `self.config.load()`. By calling it once and passing `&cfg` (or `&cfg.climate`, `&cfg.density`) into every sub-call, the entire chunk sees a single frozen config. Two invariants follow:
+
+**Determinism within a chunk.** Every voxel in a given chunk-fill was computed with the same config. The chunk output is a pure function of `(seed, coord, config_at_snapshot_time)`.
+
+**No mid-chunk weirdness.** If the file watcher fires while a chunk is being filled, the swap has no effect on that chunk. The next chunk fill starts fresh with the new config.
+
+`column_data_with` (the per-column hot path called from `fill_chunk`) also calls `self.config.load()` directly when it needs config before the chunk-level snapshot is in scope, but during a normal chunk fill the snapshot is passed in, keeping the pattern consistent.
+
+## The file watcher
+
+`spawn_watcher` in `config.rs` wraps `notify-debouncer-mini` with a 300 ms debounce:
+
+```rust
+// src/worldgen/config.rs
+pub fn spawn_watcher(
+    path: PathBuf,
+    holder: ConfigHolder,
+) -> anyhow::Result<Debouncer<RecommendedWatcher>> {
+    let watch_path = path.clone();
+    let mut debouncer = new_debouncer(
+        Duration::from_millis(300),
+        move |res: DebounceEventResult| match res {
+            Ok(_events) => match WorldgenConfig::from_ron_file(&watch_path) {
+                Ok(cfg) => {
+                    log::info!("worldgen config reloaded from {:?}", watch_path);
+                    holder.swap(cfg);
+                }
+                Err(e) => {
+                    log::error!(
+                        "worldgen config reload failed ({:?}): {} — keeping previous",
+                        watch_path, e
+                    );
+                }
+            },
+            Err(e) => log::error!("watcher error: {:?}", e),
+        },
+    )?;
+    debouncer.watcher().watch(&path, RecursiveMode::NonRecursive)?;
+    Ok(debouncer)
+}
+```
+
+The 300 ms debounce absorbs the burst of filesystem events that most editors produce on save (write + metadata flush + rename-into-place). On first valid save after the burst, the RON is re-parsed. If parsing fails the error is logged at `error` level and the previous config stays in effect — the watcher never puts the world into an invalid state, only a logged one. The caller must hold the returned `Debouncer` alive; dropping it shuts the background watcher thread down.
+
+## What hot-reloads and what does not
+
+Not everything in `WorldgenConfig` is equally cheap to swap. The rule is: anything *re-read per chunk via* `config.load()` hot-reloads cleanly; anything *baked into a long-lived struct at* `Generator::new` requires a generator restart.
+
+**Safe to hot-reload (re-read per chunk):**
+
+- All spline knots and slopes in `ClimateConfig` (`offset_spline`, `factor_spline`, `jaggedness_spline`)
+- Noise period and amplitude fields (`terrain_shape_period`, `ridges_period`, `weirdness_amplitude`)
+- The entire `surface: RuleSource` rule tree
+- All `CaveConfig` thresholds and scale factors
+- All `AquiferConfig` pressure coefficients (`barrier_strength`, `top_falloff`, etc.)
+- `DensityConfig` slide parameters and `y_gradient_amplitude`
+- `BiomesConfig` parameter-point entries and weirdness amplitude
+
+**Requires a generator restart (baked at construction):**
+
+- **Noise channel frequencies** (`ChannelParams::first_octave`, `amplitudes`). The actual noise objects — `Fbm<Simplex>` instances for heightmap, density, climate, and weirdness — are constructed in `Generator::new_internal` from the bundled default and their frequency parameters are fixed there. A config swap changes `cfg.cave.cheese.first_octave` in memory, but the live `NoiseCarvers` object inside the generator still runs at the original frequency.
+- **`AquiferSystem` cell topology.** `AquiferSystem::new(seed, bundled.aquifer.clone())` consumes the aquifer config once. The jittered 16×12×16 cell grid is fixed for the generator's lifetime; `AquiferConfig` swaps only affect the pressure computation, not the cell positions.
+- **`NoiseCarvers` channel topology.** Built once from `cfg.cave` in `new_internal`; changing channel counts or octave structure requires reconstruction.
+
+In practice, the most iteratively useful knobs — spline curves, biome rates, surface rules, aquifer pressure feel — all hot-reload. The noise frequencies that define the broad-stroke geography (mountain wavelength, climate zone sizes) are stable enough that recompile cadence is acceptable.
+
+> **Tip:** If you change `assets/worldgen/default.ron` and the world does not visibly react, check the engine log for a `worldgen config reload failed` message. RON parse errors (mismatched brackets, unknown field names) are reported there and the previous config is silently retained.
+
+## In the engine
+
+`Generator` holds its config as a `config: config::ConfigHolder` field (line 171 of `mod.rs`). The public surface consists of three entry points:
+
+- `Generator::new(seed)` — builds from the bundled default, constructs a fresh `ConfigHolder` internally.
+- `Generator::with_config(seed, holder)` — takes an externally owned `ConfigHolder`, so the application can share the holder between the generator and the file watcher.
+- `Generator::config_snapshot()` — returns `self.config.load()`, the one-line snapshot callers use to avoid repeated atomic loads within a single unit of work.
+
+The visualizer (chapter 5.4) uses `with_config` so it can hand the same `ConfigHolder` to both the watcher and the generator, giving the overlay map live reaction to every file save.
+
+## What you can now do
+
+Open `assets/worldgen/default.ron`, adjust a spline knot in the `offset_spline` section (try pushing the continentalness 0.0 entry's constant from 0.55 toward 0.70 to raise coastal plains), save the file, and watch the visualizer's heightmap overlay update within a second. The terminal will print `worldgen config reloaded from "assets/worldgen/default.ron"` on each successful swap.
+
+To understand the full schema, read `src/worldgen/config.rs` top-to-bottom: the struct definitions are ordered from outermost (`WorldgenConfig`) inward, with doc-comments on every field explaining its range and effect.
+
+---
+
+**Next:** [5.4 The Visualizer](./5.4-visualizer.mdx)
