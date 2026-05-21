@@ -43,8 +43,18 @@ be 0 for a true no-visual-change refactor.
 | `baseline_cave.png` | `OXIUM_SCREENSHOT_WARMUP_FRAMES=1800 cargo run --release --bin oxium -- --screenshot-and-exit tests/screenshots/baseline_cave.png --spawn 0,30,0 --look 0,-30 --time 0.5` |
 | `baseline_sunset.png` | `OXIUM_SCREENSHOT_WARMUP_FRAMES=1800 cargo run --release --bin oxium -- --screenshot-and-exit tests/screenshots/baseline_sunset.png --look 90,-10 --time 0.78` |
 | `baseline_fog_horizon.png` | `OXIUM_SCREENSHOT_WARMUP_FRAMES=1800 cargo run --release --bin oxium -- --screenshot-and-exit tests/screenshots/baseline_fog_horizon.png --look 0,0 --time 0.5` |
+| `baseline_sun_in_frame.png` | `OXIUM_SCREENSHOT_WARMUP_FRAMES=1800 cargo run --release --bin oxium -- --screenshot-and-exit tests/screenshots/baseline_sun_in_frame.png --spawn 0,80,0 --look 0,85 --time 0.25` |
 
 ## Known limitations
 
 - **`baseline_underwater.png` does not currently exercise `underwater_factor > 0`** — the camera spawned above water rather than inside it. Stable as a baseline (same input → same output) but won't catch regressions in the underwater tint code path. Future work: a `--spawn-underwater` helper that locates a deep water column and spawns the camera 4 blocks below the surface.
-- The "sunset" baseline at `--time 0.78` reads as dusk/twilight, not golden hour. Adjust `--time` to taste if a brighter sunset is wanted.
+- The "noon" baseline at `--time 0.5` and the "sunset" baseline at `--time 0.78` are misnamed — both correspond to dim twilight sun positions per the `sun_state` formula (`sin(t * TAU) + 0.1` ≈ 0.1 at those times). They were kept for continuity with PR1-PR3's regression suite but do not produce HDR-bright pixels and therefore do not exercise the bloom pass.
+- **`baseline_sun_in_frame.png`** (added in PR4) captures `--look 0,85 --time 0.25` (overhead sun at true noon) — this is the scene that visibly exercises the bloom pass. The soft halo around the sun disc is the PR4 visual diff.
+
+## PR 4 notes
+
+All five legacy baselines were refreshed in PR 4 — the previous PNGs had silently drifted from main due to PR 2 (colored block light) and PR 3 (per-pixel light volume sampling, wrap diffuse) altering the lit appearance of surfaces beyond `diff.py`'s noise floor without anyone re-baselining at the time. PR 4 leaves them at the same `--time` / `--spawn` / `--look` parameters but with current content.
+
+Bloom tuning constants:
+- `BLOOM_THRESHOLD` and `BLOOM_KNEE` in `assets/shaders/bloom.wgsl` (`1.0` / `0.5`).
+- `BLOOM_STRENGTH` in `assets/shaders/composite.wgsl` (`0.10`).
