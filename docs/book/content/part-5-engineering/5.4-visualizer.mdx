@@ -9,7 +9,7 @@ This chapter closes the book by explaining `worldgen_viz` — how it is structur
 
 ## The picture
 
-`worldgen_viz` is a windowed application: a wgpu 3D viewport on the right showing a live chunk mesh, and egui panels on the left and top carrying configuration sliders, a stage-selector map, a column probe, a cross-section slice, and a preset library. Everything in the egui layer reads directly from a single live `Generator`. There is no intermediate data model to keep in sync — the generator is the source of truth, and every panel samples it on demand.
+`worldgen_viz` is a windowed application: a wgpu 3D viewport in the center showing a live chunk mesh, a top toolbar, a left config panel, a right panel hosting the stage-selector map / column probe / cross-section, and a bottom status panel. Everything in the egui layer reads directly from a single live `Generator`. There is no intermediate data model to keep in sync — the generator is the source of truth, and every panel samples it on demand.
 
 The binary lives at `src/bin/worldgen_viz/`. Build and run it with:
 
@@ -41,7 +41,7 @@ pub struct Session {
 }
 ```
 
-`ConfigHolder` is the hot-reload handle from chapter 5.3. The `Generator` is constructed from it; the generator and the config holder share the same `Arc<RwLock<WorldgenConfig>>` internally. Editing a `.ron` file on disk triggers the file watcher, the config swaps atomically, and the generator begins using the new values on the next call.
+`ConfigHolder` is the hot-reload handle from chapter 5.3. The `Generator` is constructed from it; the generator and the config holder share the same `Arc<ArcSwap<WorldgenConfig>>` internally. Editing a `.ron` file on disk triggers the file watcher, the config swaps atomically, and the generator begins using the new values on the next call.
 
 `World` wraps the chunk cache and mesh buffers. `Probe`, `MapView`, and `CrossSection` are the three independent view modes that interpret the generator's output. `PaintMode` controls how faces in the 3D viewport are coloured (block type, biome, plate, height delta, or slope).
 
@@ -103,7 +103,7 @@ Aquifer fluid:     Water
 Cave systems intersecting: 2
 ```
 
-The probe re-evaluates on every config swap. Edit a spline knot in `assets/worldgen/default.ron`, save, and the column's `h_pre` and `h_target` values update within the file-watcher debounce window — about 100 ms in practice. You do not need to restart the process.
+The probe re-evaluates on every config swap. Edit a spline knot in `assets/worldgen/default.ron`, save, and the column's `h_pre` and `h_target` values update within the file-watcher debounce window — about 300 ms in practice (see [5.3](./5.3-config-hot-reload.mdx) for the exact debounce). You do not need to restart the process.
 
 The probe is implemented in `probe.rs`. Its state is a `Probe` struct carrying the pinned coordinate, the last `ColumnProbe` snapshot, the current density-inspection Y level, and the last `DensityBreakdown`. The `Probe::pin` method calls two generator methods: `generator.probe_column(wx, wz)` for the column snapshot, and `generator.evaluate_density_breakdown(wx, probe_y, wz)` for the per-voxel density decomposition at the current Y.
 
@@ -143,7 +143,7 @@ The cross-section samples the generator directly on a background thread via a ch
 `worldgen_viz` participates in the same `ConfigHolder` mechanism described in chapter 5.3. The `Session` creates a `ConfigHolder` from the initial config, passes it to the `Generator`, and also passes a clone to the file watcher. When a change arrives:
 
 1. The watcher validates and deserialises the new `.ron` file.
-2. The swap is written into the shared `Arc<RwLock<WorldgenConfig>>`.
+2. The swap is written into the shared `Arc<ArcSwap<WorldgenConfig>>`.
 3. The `Invalidator` marks all cached regions and chunks as dirty.
 4. The next frame triggers a region rebuild and chunk re-mesh.
 
