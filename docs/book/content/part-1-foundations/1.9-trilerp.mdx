@@ -6,7 +6,7 @@ title: 1.9 Trilinear Interpolation
 import LazyWidget from '@site/src/widgets/LazyWidget';
 import TrilerpDemo from '@site/src/widgets/TrilerpDemo';
 
-Evaluating the density graph once per voxel in a 32³ chunk means about 32,768 calls to the full noise pipeline — splines, FBM, climate lookups, the works. Most adjacent voxels yield nearly the same density; the interesting variation happens at scales larger than a single block. The engine exploits this: it evaluates the density graph only at the corners of a coarse 9×9×9 lattice (729 samples per chunk instead of 32,768), then **trilinearly interpolates** the rest. That single change accounts for a roughly **134× reduction** in expensive density evaluations per chunk.
+Evaluating the density graph once per voxel in a 32³ chunk means about 32,768 calls to the full noise pipeline — splines, FBM, climate lookups, the works. In practice the engine's chunk-fill workload is larger still: accounting for height coupling and the 3D density volume the doc comment in `density_graph.rs` quotes **~98,000 voxels per chunk**. Either way, most adjacent voxels yield nearly the same density; the interesting variation happens at scales larger than a single block. The engine exploits this: it evaluates the density graph only at the corners of a coarse 9×9×9 lattice (729 samples per chunk), then **trilinearly interpolates** the rest. That single change accounts for a roughly **134× reduction** in expensive density evaluations per chunk (98k ÷ 729 ≈ 134; the per-32³-voxel ratio alone is ~45×).
 
 ## The picture
 
@@ -55,7 +55,7 @@ $$
 
 Seven lerps total (4 along x, 2 along y, 1 along z).
 
-The engine uses the corner index convention: `c[xi + 2*yi + 4*zi]` for `xi, yi, zi ∈ {0, 1}`. So index 0 = $(0,0,0)$, index 1 = $(1,0,0)$, index 2 = $(0,1,0)$, up to index 7 = $(1,1,1)$.
+For the TypeScript port and parity test entries we store the 8 corners as a flat array indexed `xi + 2*yi + 4*zi` for `xi, yi, zi ∈ {0, 1}` — so index 0 = $(0,0,0)$, index 1 = $(1,0,0)$, index 2 = $(0,1,0)$, up to index 7 = $(1,1,1)$. The engine itself uses a 9×9×9 flat array indexed `cx + cy * CORNER_COUNT + cz * CORNER_COUNT²` and names the 8 corners around a query as locals `c000`..`c111` inside `evaluate`.
 
 ```typescript
 // From docs/book/src/math/trilerp.ts

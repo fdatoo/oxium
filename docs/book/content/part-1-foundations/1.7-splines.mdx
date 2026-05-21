@@ -64,7 +64,7 @@ Things worth trying:
 
 ## In the engine
 
-The engine applies splines in three places in the heightmap pipeline (`src/worldgen/config.rs::HeightmapNoise`):
+The engine applies splines in three places in the heightmap pipeline (`src/worldgen/config.rs::ClimateConfig`):
 
 ```
 offset_spline(continentalness, terrain_shape, ridges_pv) → height offset
@@ -74,22 +74,24 @@ jaggedness_spline(continentalness, terrain_shape, ridges_pv) → jaggedness weig
 
 Each outer spline is keyed on *continentalness* (a plate Voronoi SDF). Its knot *values* are themselves splines keyed on *terrain_shape* or *ridges_pv* — a 2D function implemented as nested 1D splines, a trick from Minecraft 1.18's climate system.
 
-The key insight is that `src/worldgen/spline.rs::CubicSpline` is *1D scalar* — one input, one output. The nested composition lives in `config.rs::NestedSpline::evaluate(c, s, r)`, which does:
+The key insight is that `src/worldgen/spline.rs::CubicSpline` is *1D scalar* — one input, one output. The nested composition lives in `config.rs::NestedSpline::evaluate(c, s, r)`, which recurses through the input tuple depth by depth:
 
 ```rust
-// outer keyed on c (continentalness)
-let inner = outer_spline.evaluate(c);  // returns an inner CubicSpline
-inner.evaluate(s or r)                  // keyed on terrain_shape or ridges
+// evaluate_inner walks inputs = [c, s, r] at increasing depth
+// At each Multipoint knot, its val is itself a NestedSpline, evaluated
+// at depth+1 — so the outer spline is keyed on c, each knot's val
+// is keyed on s, and those inner knots' vals are keyed on r (or are Constants).
+self.evaluate_inner(&[c, s, r], 0)
 ```
 
-This lets you say "over ocean (`c ≈ −1`), use an inner spline that keeps height near sea level regardless of terrain_shape; over inland plateau (`c ≈ 0.8`), use a different inner spline that varies height strongly with terrain_shape". A 2D lookup table of similar expressiveness would need hundreds of rows.
+This lets you say "over ocean (`c ≈ −1`), the knot values (themselves splines on `s`) keep height near sea level regardless of terrain_shape; over inland plateau (`c ≈ 0.8`), a different set of knot-value splines varies height strongly with terrain_shape". A 2D lookup table of similar expressiveness would need hundreds of rows.
 
 ## What you can now do in the code
 
 You can read:
 
 - `src/worldgen/spline.rs` — the full `CubicSpline::evaluate` implementation. The formula in the code matches exactly what's above.
-- `src/worldgen/config.rs::HeightmapNoise` — the three spline fields and their `_at` methods. Note that `NestedSpline` wraps an outer `CubicSpline<InnerSpline>` — the generic machinery that lets knot values be splines rather than scalars.
+- `src/worldgen/config.rs::ClimateConfig` — the three spline fields and their `_at` methods. `NestedSpline` is a parallel enum in `src/worldgen/config.rs` that walks the same Hermite formula recursively across the `[continentalness, terrain_shape, ridges_pv]` input tuple — it lets each knot's `val` either be a scalar or another spline keyed on the next input axis.
 - The RON configs in `assets/worldgen/` — search for `offset_spline` to see real authored knot tables with `loc`, `val`, and `slope` fields.
 
 ## Next
