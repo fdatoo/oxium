@@ -1,0 +1,54 @@
+name: Docs image drift check
+
+on:
+  pull_request:
+    paths:
+      - 'src/worldgen/**'
+      - 'src/voxel/**'
+      - 'src/viz_render/**'
+      - 'src/bin/doc_render/**'
+      - 'docs/book/tools/gen-images.sh'
+      - 'docs/book/static/img/generated/**'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Regenerate images
+        run: bash docs/book/tools/gen-images.sh
+
+      - name: Diff against committed
+        id: diff
+        run: |
+          set +e
+          CHANGED=$(git status --porcelain docs/book/static/img/generated docs/book/static/parity.json)
+          if [[ -n "$CHANGED" ]]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "drift<<EOF"
+              echo "The following docs images changed in this PR:"
+              echo ""
+              echo "$CHANGED" | awk '{print "- " $2}'
+              echo ""
+              echo "Run \`bash docs/book/tools/gen-images.sh\` locally and commit the result if these are expected."
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comment on PR
+        if: steps.diff.outputs.changed == 'true'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: docs-image-drift
+          message: ${{ steps.diff.outputs.drift }}
