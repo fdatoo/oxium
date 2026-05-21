@@ -3,6 +3,128 @@ id: 1.8-sdfs
 title: 1.8 Signed Distance Functions
 ---
 
-import Stub from '@site/src/components/Stub';
+import LazyWidget from '@site/src/widgets/LazyWidget';
+import SdfComposer from '@site/src/widgets/SdfComposer';
 
-<Stub />
+Caves aren't carved by writing "air" at specific voxels. The engine writes a *field* — a value at every voxel that says "how deep inside a cave am I?" — and then subtracts that field from the density grid. That field is an SDF.
+
+## The picture
+
+A **signed distance function** (SDF) assigns a scalar to every point in space:
+
+- **Positive** inside the shape.
+- **Zero** at the boundary.
+- **Negative** outside.
+
+In the engine the shapes are *soft*: instead of a crisp 0-or-1 membership, the value tapers continuously from 1 (deep inside) to 0 (at the geometric boundary). This is what gives cave walls their rounded, chamfered edge: the density doesn't drop to air all at once, it slopes down.
+
+The widget below shows two ellipses and a capsule composed together. Toggle between **Union** (most-inside-of-anything wins) and **Intersection** (you have to be inside *all* of them):
+
+<LazyWidget fallbackSrc="/oxium/img/figures/sdf-default-fallback.png" fallbackAlt="SDF composer with two ellipses and a capsule">
+  <SdfComposer />
+</LazyWidget>
+
+Turn on iso-lines to see contours at 0.25, 0.5, and 0.75 — these are the level sets at which a voxel transitions from solid to cave to air.
+
+## Build it
+
+### Ellipsoid
+
+For a 3D ellipsoid centred at $\mathbf{c}$ with radii $(r_x, r_y, r_z)$, the normalised squared distance is:
+
+$$
+\rho = \left(\frac{x - c_x}{r_x}\right)^2 + \left(\frac{y - c_y}{r_y}\right)^2 + \left(\frac{z - c_z}{r_z}\right)^2
+$$
+
+$\rho \leq 1$ inside the ellipsoid, $\rho > 1$ outside. The soft intensity is:
+
+$$
+\text{sdf} = \max(0,\; 1 - \rho)
+$$
+
+At the exact centre $\rho = 0$, so intensity = 1. At the geometric boundary $\rho = 1$, intensity = 0. Outside, intensity is clamped to 0.
+
+```rust
+// From src/worldgen/caves.rs::cave_sdf
+let ratio = (d.x / c.radii.x).powi(2)
+    + (d.y / c.radii.y).powi(2)
+    + (d.z / c.radii.z).powi(2);
+if ratio <= 1.0 {
+    let sdf = (1.0 - ratio) * CAVE_SDF_INTENSITY;
+    // ...
+}
+```
+
+### Capsule
+
+A capsule is a cylinder with hemispherical endcaps. The key operation is projecting the query point onto the line segment $AB$:
+
+$$
+t = \text{clamp}\!\left(\frac{(\mathbf{p} - \mathbf{a}) \cdot (\mathbf{b} - \mathbf{a})}{|\mathbf{b} - \mathbf{a}|^2},\; 0,\; 1\right)
+$$
+
+$$
+\mathbf{q} = \mathbf{a} + t\,(\mathbf{b} - \mathbf{a})
+$$
+
+The intensity is then:
+
+$$
+\text{sdf} = \max\!\left(0,\; 1 - \frac{|\mathbf{p} - \mathbf{q}|}{r}\right)
+$$
+
+Clamping $t$ to $[0, 1]$ makes the projection stop at the endpoints, which gives the hemispherical caps: points past the end of the segment are compared against the nearest endpoint.
+
+```rust
+// From src/worldgen/caves.rs::cave_sdf
+let t_param = ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+let closest = a + ab * t_param;
+let dist = (p - closest).length();
+if dist <= t.radius {
+    let sdf = (1.0 - dist / t.radius) * CAVE_SDF_INTENSITY;
+    // ...
+}
+```
+
+### Union and intersection
+
+Given several shapes' intensities at the same point, you need to combine them into one field:
+
+| Operation | Formula | Meaning |
+|-----------|---------|---------|
+| Union | $\max(s_1, s_2, \ldots)$ | Inside any shape |
+| Intersection | $\min(s_1, s_2, \ldots)$ |  Inside all shapes |
+
+**Why max = union?** If you're deep inside shape A and barely inside shape B, max returns the A value — you are intensely inside the union. The result is always the *most inside* of anything, so every shape contributes its full region.
+
+**Why min = intersection?** If you're deep inside A but outside B, min returns 0 — you're outside the intersection because you failed one test. Both conditions must be satisfied simultaneously.
+
+Try the intersection toggle in the widget: the field goes to zero everywhere outside the overlap of all three shapes.
+
+## In the engine
+
+Open `src/worldgen/caves.rs`. The two key functions are:
+
+- **`cave_sdf`** — iterates over every chamber (ellipsoid) and every tunnel segment (capsule) in the active cave systems, evaluates each shape, and returns `max_sdf` — the union of all shapes.
+- **`entrance_sdf`** — same pattern, but only for entrance features (sinkholes, skylights). It multiplies intensity by `2 × CAVE_SDF_INTENSITY` so entrances reliably punch through the surface density.
+
+The composition with terrain happens later, in the density-filling pass:
+
+```rust
+// conceptually, in fill_chunk:
+density = density.min(-cave_sdf);
+```
+
+This is the *subtraction* idiom: the cave SDF is positive inside cave space. Negating it makes it negative there. Taking `min(density, -sdf)` pulls density below zero inside the cave — below zero means air. So while individual shapes compose via `max` *within* the cave SDF layer, the whole cave layer is then *subtracted* from terrain density via `min`. Two separate min/max passes, each doing something logically distinct.
+
+## What you can now do in the code
+
+You can read:
+
+- `src/worldgen/caves.rs::cave_sdf` and `entrance_sdf` — the full SDF evaluation. Verify that the loop over `sys.chambers` and `sys.tunnels` matches the formulas above exactly.
+- The `CaveSystem` struct (search `struct CaveSystem`) — note `chambers: Vec<Chamber>` and `tunnels: Vec<Tunnel>`, each with radii fields.
+- The density composition in `fill_chunk` — find the `cave_sdf` call and follow how the result is applied to the per-voxel density.
+
+## Next
+
+→ [1.9 Trilinear Interpolation](./1.9-trilerp.mdx)

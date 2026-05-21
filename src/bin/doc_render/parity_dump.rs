@@ -76,6 +76,29 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
     }
 
+    // -- ellipsoid_sdf --
+    // The chapter's TS port uses a 2D version of the formula the engine
+    // applies in 3D inside cave_sdf. This block asserts the TS port
+    // matches the same formula evaluated in Rust on identical inputs.
+    {
+        let cases: &[(f32, f32, f32, f32, f32, f32)] = &[
+            // (px, py, cx, cy, rx, ry)
+            (0.0, 0.0, 0.0, 0.0, 1.0, 1.0),  // dead center → 1.0
+            (1.0, 0.0, 0.0, 0.0, 1.0, 1.0),  // on boundary → 0.0
+            (0.5, 0.0, 0.0, 0.0, 1.0, 1.0),  // halfway radially → 0.75
+            (2.0, 0.0, 0.0, 0.0, 1.0, 1.0),  // outside → 0.0
+            (0.0, 0.5, 0.0, 0.0, 1.0, 2.0),  // off-y in elongated → 1 - 0.0625
+        ];
+        for &(px, py, cx, cy, rx, ry) in cases {
+            let dx = (px - cx) / rx;
+            let dy = (py - cy) / ry;
+            let v = (1.0_f32 - (dx * dx + dy * dy)).max(0.0);
+            entries.push(format!(
+                "    {{\"fn\":\"ellipsoid2D\",\"args\":{{\"px\":{px},\"py\":{py},\"cx\":{cx},\"cy\":{cy},\"rx\":{rx},\"ry\":{ry}}},\"out\":{v}}}",
+            ));
+        }
+    }
+
     // Write as JSON array. We hand-build the JSON so we don't pull
     // in serde_json just for this (the schema is simple and stable).
     let json = format!("[\n{}\n]\n", entries.join(",\n"));
