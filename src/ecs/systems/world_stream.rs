@@ -47,6 +47,20 @@ fn player_chunk(pos: glam::Vec3) -> ChunkCoord {
     ))
 }
 
+/// Cached, distance-sorted candidate list for `world_stream`.
+///
+/// Rebuilding + sorting the ~10 625 chunks in the load radius every
+/// frame showed up as the largest non-idle CPU hotspot in profiling
+/// (quicksort + the Wang-hash tie-breaker dominated). The candidate
+/// set is a pure function of `player_chunk(pos)`, so we cache it and
+/// only rebuild when the player crosses a chunk boundary. With a
+/// stationary player this is zero allocation and zero sort per frame.
+#[derive(Default)]
+pub struct WorldStreamCache {
+    last_player_chunk: Option<ChunkCoord>,
+    targets: Vec<ChunkCoord>,
+}
+
 /// Per-frame: enqueue generation jobs for every chunk inside the render
 /// radius that the World doesn't already know about (either as `Pending` or
 /// `Stored`). Visits chunks closest-first so nearby terrain appears before
@@ -61,6 +75,7 @@ pub fn world_stream(
     persistence: &Persistence,
     save_index: &mut SaveIndex,
     saves_dir: &Path,
+    cache: &mut WorldStreamCache,
 ) {
     let mut q = ecs.world.query_one::<&Position>(ecs.player).unwrap();
     let pos = q.get().unwrap();
@@ -78,41 +93,50 @@ pub fn world_stream(
     // arrived seconds after forward chunks, so any small camera
     // movement revealed unloaded voids. Pure radial is more
     // forgiving when the world is still streaming in.
-    let mut targets: Vec<ChunkCoord> = Vec::new();
-    for dy in -VERTICAL_RADIUS..=VERTICAL_RADIUS {
-        for dz in -RENDER_RADIUS..=RENDER_RADIUS {
-            for dx in -RENDER_RADIUS..=RENDER_RADIUS {
-                targets.push(ChunkCoord(pc.0 + IVec3::new(dx, dy, dz)));
+    //
+    // The candidate set + sort order is a pure function of `pc`, so
+    // we cache it and only rebuild when the player crosses a chunk
+    // boundary. Profiling showed the per-frame sort (over ~10 625
+    // entries) was the single biggest non-idle CPU cost; with a
+    // stationary player this branch never runs.
+    if cache.last_player_chunk != Some(pc) {
+        cache.targets.clear();
+        for dy in -VERTICAL_RADIUS..=VERTICAL_RADIUS {
+            for dz in -RENDER_RADIUS..=RENDER_RADIUS {
+                for dx in -RENDER_RADIUS..=RENDER_RADIUS {
+                    cache.targets.push(ChunkCoord(pc.0 + IVec3::new(dx, dy, dz)));
+                }
             }
         }
+        cache.targets.sort_by_key(|c| {
+            let d = c.0 - pc.0;
+            // Euclidean squared as the primary key.
+            let dist_sq =
+                (d.x as i64).pow(2) + (d.y as i64).pow(2) + (d.z as i64).pow(2);
+            // Symmetric tie-breaker. Without it, equidistant chunks
+            // resolve in iteration order (dy → dz → dx), which puts the
+            // +X+Z corner of every distance ring at the very tail of
+            // the rayon queue. With ~10 000 chunks to dispatch on
+            // spawn, those tail chunks waited multiple seconds to even
+            // *start* gen — visible as a whole quadrant of the load
+            // radius staying blank long after the others filled in.
+            // A small Wang-style coord hash spreads ties evenly across
+            // all 8 spatial octants. `dist_sq * 1024` keeps the
+            // distance term dominant; only the low 10 bits of the hash
+            // contribute, so two chunks at different distances never
+            // swap order — only ties.
+            let hash = c
+                .0
+                .x
+                .wrapping_mul(73856093)
+                .wrapping_add(c.0.y.wrapping_mul(19349663))
+                .wrapping_add(c.0.z.wrapping_mul(83492791));
+            dist_sq * 1024 + ((hash & 1023) as i64)
+        });
+        cache.last_player_chunk = Some(pc);
     }
-    targets.sort_by_key(|c| {
-        let d = c.0 - pc.0;
-        // Euclidean squared as the primary key.
-        let dist_sq =
-            (d.x as i64).pow(2) + (d.y as i64).pow(2) + (d.z as i64).pow(2);
-        // Symmetric tie-breaker. Without it, equidistant chunks
-        // resolve in iteration order (dy → dz → dx), which puts the
-        // +X+Z corner of every distance ring at the very tail of
-        // the rayon queue. With ~10 000 chunks to dispatch on
-        // spawn, those tail chunks waited multiple seconds to even
-        // *start* gen — visible as a whole quadrant of the load
-        // radius staying blank long after the others filled in.
-        // A small Wang-style coord hash spreads ties evenly across
-        // all 8 spatial octants. `dist_sq * 1024` keeps the
-        // distance term dominant; only the low 10 bits of the hash
-        // contribute, so two chunks at different distances never
-        // swap order — only ties.
-        let hash = c
-            .0
-            .x
-            .wrapping_mul(73856093)
-            .wrapping_add(c.0.y.wrapping_mul(19349663))
-            .wrapping_add(c.0.z.wrapping_mul(83492791));
-        dist_sq * 1024 + ((hash & 1023) as i64)
-    });
 
-    for c in targets {
+    for &c in &cache.targets {
         // Mark Pending only when the slot is currently absent. Using
         // `entry` avoids the double-hash of contains_key + insert.
         if let std::collections::hash_map::Entry::Vacant(slot) = world.chunks.entry(c) {
