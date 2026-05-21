@@ -1276,6 +1276,14 @@ impl Renderer {
                     binding: 2,
                     resource: self.camera_buf.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&self.bloom.mips[0].view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&self.bloom.sampler),
+                },
             ],
         });
         let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
