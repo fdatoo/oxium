@@ -1676,6 +1676,7 @@ impl Renderer {
             &self.hdr.view,
             &visible_main,
         );
+        self.encode_bloom_pass(&mut enc);
         self.encode_composite_pass(&mut enc, target);
         if let Some(hud) = hud {
             self.encode_hud_pass(&mut enc, target, hud);

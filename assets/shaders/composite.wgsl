@@ -28,7 +28,7 @@ struct CameraUniform {
 @group(0) @binding(3) var          bloom_tex:     texture_2d<f32>;
 @group(0) @binding(4) var          bloom_sampler: sampler;
 
-const BLOOM_STRENGTH: f32 = 0.10;
+const BLOOM_STRENGTH: f32 = 0.06;
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,

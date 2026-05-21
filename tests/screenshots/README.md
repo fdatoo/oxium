@@ -57,4 +57,4 @@ All five legacy baselines were refreshed in PR 4 — the previous PNGs had silen
 
 Bloom tuning constants:
 - `BLOOM_THRESHOLD` and `BLOOM_KNEE` in `assets/shaders/bloom.wgsl` (`1.0` / `0.5`).
-- `BLOOM_STRENGTH` in `assets/shaders/composite.wgsl` (`0.10`).
+- `BLOOM_STRENGTH` in `assets/shaders/composite.wgsl` (`0.06`, matching the spec).
