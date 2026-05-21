@@ -3,6 +3,230 @@ id: 4.7-aquifers
 title: 4.7 Aquifers
 ---
 
-import Stub from '@site/src/components/Stub';
+Plain sea-level flooding produces oceans. It does not produce water *inside* the world. Without additional machinery every cave the carvers open is a dry void — no underground lake, no lava pool, no trickling river through a deep chamber. Aquifers fix this. A three-dimensional Voronoi cell grid carpets the underground; each cell holds a water-table level (`y_top`) and a fluid kind (Water or Lava). When the density field calls a voxel air, the aquifer checks whether that voxel sits below its cell's water table. If it does, the aquifer overrides the decision and places fluid instead. The result: cave lakes that respect the local topography, lava pockets that cluster in hot deep zones, and a pressure model that keeps thin rock walls from dissolving unexpectedly into water.
 
-<Stub />
+## The picture
+
+![Aquifer water-level surface](/oxium/img/generated/aquifer-y-s42-0_0-z8-w256.png)
+*The aquifer's `y_top` field across a 256-block-wide slice at seed 42. Bright tones are high water-table cells — perched lakes sitting well above bedrock. Cooler tones are low water-table cells that only flood deep chambers. The sharp horizontal boundaries between bright and dark patches are where the nearest-cell assignment flips from one Voronoi cell to another.*
+
+![Aquifer substance kind](/oxium/img/generated/aquifer-substance-s42-0_0-z8-w256.png)
+*Water vs lava per cell at the same region. The slice around (0, 0) at the book seed is uniformly water — lava cells require a cell center below Y = −32 and a 40 % probability roll. No lava-eligible cells happen to fall in this particular 256-block window. Lava appears in genuinely deep, isolated areas further from origin.*
+
+## Build it — the cell grid
+
+The aquifer grid divides world space into rectangular cells of **16 × 12 × 16** blocks (`AQUIFER_CELL_X × AQUIFER_CELL_Y × AQUIFER_CELL_Z`). The horizontal dimensions match a Minecraft chunk, so cell boundaries never cross chunk boundaries in X or Z. The vertical dimension is 12 rather than 16 because the water table changes faster vertically than horizontally — a finer Y grain captures the transition from a sea-level lake to a deep-cave pool within a single hundred-block height band.
+
+```rust
+// src/worldgen/aquifer.rs
+pub const AQUIFER_CELL_X: i32 = 16;
+pub const AQUIFER_CELL_Y: i32 = 12;
+pub const AQUIFER_CELL_Z: i32 = 16;
+```
+
+Each cell has a jittered center. `cell_at(cx, cy, cz)` hashes `(seed, cx, cy, cz, salt)` three times — once per axis — to produce offsets that stay at least `CELL_CENTER_MARGIN = 2` blocks away from any face. This margin guarantees no two adjacent cells' centers can coincide, preserving a meaningful nearest-cell distinction at every point.
+
+```rust
+// src/worldgen/aquifer.rs — cell_at (abridged)
+let jx = hash::mix(seed, &[cx, cy, cz, 0]) as u32
+    % (AQUIFER_CELL_X - 2 * CELL_CENTER_MARGIN) as u32;
+let center_x = cx * AQUIFER_CELL_X + CELL_CENTER_MARGIN + jx as i32;
+// similarly for Y, Z
+```
+
+The hash machinery is the same `hash::mix` family introduced in [1.2 Deterministic Randomness](../part-1-foundations/1.2-determinism.mdx) — seeded by world seed plus a salt per axis so the three jitter dimensions are uncorrelated.
+
+**Dry-cell gate.** Before computing any per-cell properties the system rolls a dry-cell check: only 3 % of cells pass (`keep_chance = 0.03`). The other 97 % receive `y_top = i32::MIN / 2` — effectively negative infinity — making them permanently dry. This sparsity is deliberate: underground aquifer cells are rare punctuation in an otherwise dry rock mass, not a uniform water table.
+
+**Above-sea-level guard.** Cells whose jittered center sits more than 8 blocks above sea level are force-dry before the sparsity roll. This prevents aquifer water from appearing in terrain above the ocean surface, where the surface flood handles all fluid placement.
+
+**`y_top` placement.** For the 3 % of cells that pass, the fluid surface is placed in the **lower third** of the cell:
+
+```rust
+let band_nominal = cy * AQUIFER_CELL_Y + AQUIFER_CELL_Y / 3;
+let jitter = ((jitter_unit - 0.5) * 2.0 * cfg.y_top_jitter as f32) as i32;
+let y_top = band_nominal.saturating_add(jitter).min(cfg.sea_level - 1);
+```
+
+`y_top_jitter = 6` (blocks) gives a ±6-block scatter around `band_nominal`. The `.min(sea_level - 1)` cap ensures no aquifer surface rises to the ocean surface — doing so would produce hovering water cubes visible from above.
+
+**Fluid kind — Water vs Lava.** Lava is only allowed when a cell's jittered center sits below `LAVA_BAND_TOP_Y = −32`. Above that depth every cell is water unconditionally. Below it, a second roll decides:
+
+```rust
+let fluid = if center_y < LAVA_BAND_TOP_Y && fluid_roll < LAVA_PROB_IN_BAND {
+    Block::Lava
+} else {
+    Block::Water
+};
+```
+
+`LAVA_PROB_IN_BAND = 0.40` — roughly two in five deep cells roll lava. Combined with the 3 % keep rate, lava pools are sparse even in deep hot strata. Near the origin at the book seed, the deepest cells in the slice are only marginally below Y = −32, which is why the substance image is uniform blue.
+
+## Build it — the substance function
+
+`AquiferSystem::substance(wx, wy, wz, density)` is the per-voxel query. It returns one of two variants:
+
+```rust
+pub enum Substance {
+    /// Aquifer is silent — keep the density-driven decision
+    /// (positive ⇒ Stone, non-positive ⇒ Air).
+    Density,
+    /// Aquifer places this exact block (Water / Lava / Air / Stone).
+    Block(Block),
+}
+```
+
+The function first finds the three nearest cell centers via a 27-cell neighbourhood sweep (3×3×3 in cell space), sorted by squared distance to `(wx, wy, wz)`.
+
+**Case 1 — density wants solid (`density > 0.0`).**
+
+If the voxel is *above* the nearest cell's water table (`wy > y_top`), the aquifer has nothing to say: return `Substance::Density` and let the rock stand.
+
+If the voxel is *at or below* `y_top`, the aquifer wants to flood. But dense rock can resist. The engine computes an **asymmetric pressure**:
+
+```rust
+pub fn asymmetric_pressure(wy: i32, y_top: i32, top_falloff: f32, bottom_falloff: f32) -> f32 {
+    let gap = (wy - y_top) as f32;
+    if gap > 0.0 {
+        // Above table — quadratic negative penalty.
+        -top_falloff * gap * gap
+    } else {
+        // Below table — linear positive, capped at +1.
+        (1.0 - bottom_falloff * (-gap)).max(-1.0)
+    }
+}
+```
+
+Then a 3D FBM barrier noise sample (2-octave Simplex, period `barrier_period = 24.0` blocks) is added. Together they form the aquifer's "push" against the density field's "resistance":
+
+```rust
+let pressure = asymmetric_pressure(wy, a.y_top, cfg.top_falloff, cfg.bottom_falloff)
+    + self.barrier_noise(wx, wy, wz);
+
+if density - pressure > 0.0 {
+    Substance::Density  // rock holds
+} else {
+    Substance::Block(a.fluid)  // fluid wins
+}
+```
+
+Rock wins when `density > pressure`. With the defaults (`top_falloff = 0.06`, `bottom_falloff = 0.012`, `barrier_strength = 0.5`) the asymmetry looks like this:
+
+- **Above `y_top`**: pressure drops quadratically (`−0.06 × gap²`). One block above the table the penalty is −0.06; ten blocks above it is −6.0. The aquifer gives up quickly above its own surface.
+- **Below `y_top`**: pressure is a gentle linear positive ramp, capped at +1.0. At depth the aquifer pushes with full unit force — but rock must only have `density > 1.0` to hold against it. Very dense voxels (deep solid core) resist; thin-walled voxels near zero density yield and become fluid.
+
+The barrier noise gives the fluid surface a chiselled, irregular edge rather than a geometrically flat plane. With `barrier_strength = 0.5`, the noise can nudge the threshold by half a density unit in either direction.
+
+**Case 2 — density wants air (`density ≤ 0.0`).**
+
+The voxel would be empty. If it is also above `y_top`, return `Substance::Density` — it stays air.
+
+If it is at or below `y_top`, the aquifer checks **unanimity** across the three nearest cells. Both the second and third nearest must agree: same fluid kind, and the voxel is below their `y_top` too.
+
+```rust
+let agree_b = b.fluid == a.fluid && wy <= b.y_top;
+let agree_c = c.fluid == a.fluid && wy <= c.y_top;
+
+if agree_b && agree_c {
+    Substance::Block(a.fluid)  // unanimous — fill with fluid
+} else {
+    // Near a cell boundary. Barrier noise breaks the tie.
+    let pressure = asymmetric_pressure(...) + self.barrier_noise(wx, wy, wz);
+    if pressure > 0.0 {
+        Substance::Block(a.fluid)
+    } else {
+        Substance::Density  // remain air — dry pocket
+    }
+}
+```
+
+Unanimity is the key mechanism behind the **boundary barrier**: where two adjacent cells carry different fluids (or one is dry), the cell boundary manifests as a thin wall of solid rock rather than a chaotic mix of two fluids. The 3D barrier noise shapes that wall's exact surface. Where pressure stays positive the fluid wins; where it goes negative a dry air pocket survives inside an otherwise wet zone.
+
+## Build it — ocean and lake yield
+
+Even with a working pressure model, one edge case needs a hard override. Ocean and lake water must come exclusively from the surface flood path in `fill_chunk`, not from the aquifer. The reason is twofold:
+
+1. The fluid settle pass (chapter 4.8) only visits voxels that the aquifer placed — ones with `aquifer_mask` set. Ocean and lake water placed by the surface flood is left untouched. If the aquifer also claims those voxels, the settle pass re-examines them and can disturb fluid that the surface flood had already placed cleanly.
+2. There is no benefit: the surface flood already handles every voxel above `height` in an ocean or lake column correctly.
+
+The yield rule is applied in `fill_chunk` before the aquifer substance is used:
+
+```rust
+// src/worldgen/mod.rs — fill_chunk
+let above_terrain_now = wy > height;
+let in_ocean_column = height <= SEA_LEVEL;
+let in_lake_column = lake_rim.map_or(false, |rim| wy <= rim);
+let yield_to_surface_flood = above_terrain_now && (in_ocean_column || in_lake_column);
+
+let aq_substance = if yield_to_surface_flood {
+    aquifer::Substance::Density   // aquifer stays silent
+} else {
+    aq_substance
+};
+```
+
+The aquifer's pressure model is not consulted at all for these voxels. The surface flood places water afterwards and the settle pass ignores it.
+
+## In the engine
+
+The public surface of the aquifer system is:
+
+```rust
+// src/worldgen/aquifer.rs
+pub struct AquiferSystem {
+    seed: u64,
+    pub cfg: AquiferConfig,
+    barrier: Fbm<Simplex>,      // 2-octave FBM, period = barrier_period
+}
+
+pub struct AquiferCell {
+    pub cx: i32, pub cy: i32, pub cz: i32,
+    pub center_x: i32, pub center_y: i32, pub center_z: i32,
+    pub y_top: i32,             // world Y of the fluid surface
+    pub fluid: Block,           // Block::Water or Block::Lava
+}
+
+impl AquiferSystem {
+    pub fn substance(&self, wx: i32, wy: i32, wz: i32, density: f32) -> Substance;
+    pub fn cell_at(&self, cx: i32, cy: i32, cz: i32) -> AquiferCell;
+    pub fn cell_for_column(&self, wx: i32, wz: i32) -> AquiferCell;
+}
+```
+
+`fill_chunk` calls `substance` once per voxel in the y-loop after computing the final density:
+
+```rust
+// src/worldgen/mod.rs — fill_chunk (abridged)
+let aquifer_density = final_density;
+let aq_substance = self.aquifer.substance(wx, wy, wz, aquifer_density);
+
+let block = if let aquifer::Substance::Block(b) = aq_substance {
+    // Aquifer overrides — set block and mark the voxel in aquifer_mask
+    aquifer_mask[lx + dim * ly + dim * dim * lz] = true;
+    b
+} else if !solid {
+    // Density says air — check surface flood (ocean / lake)
+    let in_lake = lake_rim.map_or(false, |rim| wy <= rim);
+    let in_ocean = height <= SEA_LEVEL && wy <= SEA_LEVEL;
+    if in_lake || in_ocean { Block::Water } else { Block::Air }
+} else {
+    // Solid — run surface rules (chapter 4.6)
+    ...
+};
+```
+
+`aquifer_mask` is a flat `bool` array (`CHUNK_DIM³`). Only voxels with `aquifer_mask = true` are processed by the `settle_fluid` pass in chapter 4.8.
+
+## What you can now do
+
+Read `src/worldgen/aquifer.rs`. The full substance decision fits in about 50 lines around `AquiferSystem::substance` and `asymmetric_pressure`. The tuning knobs live in `AquiferConfig`:
+
+- **`y_top_jitter`** (default `6`): widens the scatter of water-table heights between adjacent cells. Raise to 20 for dramatic perched lakes at wildly different elevations; lower to 0 for a flat water table inside each vertical cell band.
+- **`barrier_strength`** (default `0.5`): scales the FBM noise added to pressure. At `0.0` fluid surfaces are geometrically flat planes. At `1.5` the noise can flip voxels on the wrong side of the table, producing thin peninsulas of fluid extending upward into otherwise dry caves.
+- **`top_falloff`** (default `0.06`): the quadratic penalty above `y_top`. Raise to `0.15` for a sharper water-table cutoff (less fluid leaking into elevated voids). Lower to `0.01` for slow falloff — the aquifer's influence bleeds upward through many blocks.
+- **`bottom_falloff`** (default `0.012`): the linear taper below `y_top`. Lower values allow fluid to persist further below the nominal surface even against increasing rock density. Raise to `0.05` for shallow, tight pools.
+- **`LAVA_PROB_IN_BAND`** (compile-time constant, `0.40`): the fraction of deep cells that roll lava. The lava band begins at `LAVA_BAND_TOP_Y = −32`.
+
+## Next
+
+→ [4.8 Fluid Settle](./4.8-fluid-settle.mdx)
