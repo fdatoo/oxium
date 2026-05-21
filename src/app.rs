@@ -502,6 +502,8 @@ impl AppState {
                 draw_calls: self.perf.draw_calls,
                 light_queue: self.perf.light_queue as u32,
                 chunks_rendered: self.perf.chunks_rendered as u32,
+                chunks_loaded: self.perf.chunks_loaded as u32,
+                chunks_pending: self.perf.chunks_pending as u32,
                 edits: self.frame_edit_count,
             });
         }

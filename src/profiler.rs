@@ -38,6 +38,14 @@ pub struct FrameCounters {
     pub draw_calls: u32,
     pub light_queue: u32,
     pub chunks_rendered: u32,
+    /// Chunks currently in `ChunkSlot::Stored` — gen completed and
+    /// `world.data` is populated. Compared against `chunks_rendered`
+    /// it tells us whether the mesher is keeping up with gen.
+    pub chunks_loaded: u32,
+    /// Chunks currently in `ChunkSlot::Pending` — gen spawned but not
+    /// yet returned. If this stays high the worker pool is the
+    /// bottleneck.
+    pub chunks_pending: u32,
     /// Number of chunk-edit interactions that fired this frame
     /// (place/break clicks). Useful for picking out the exact frames
     /// where the player triggered an edit when scanning the CSV.
@@ -121,7 +129,7 @@ impl Profiler {
         if !*self.header_written.borrow() {
             // Header: counters first, then span columns.
             let mut header = String::from(
-                "frame_id,t_session_ms,fps,work_ms,draw_calls,light_queue,chunks_rendered,edits",
+                "frame_id,t_session_ms,fps,work_ms,draw_calls,light_queue,chunks_rendered,chunks_loaded,chunks_pending,edits",
             );
             for c in &cols_snapshot {
                 header.push(',');
@@ -135,13 +143,15 @@ impl Profiler {
         let fid = *self.frame_id.borrow();
         let t_session_ms = self.start.elapsed().as_secs_f32() * 1000.0;
         let mut row = format!(
-            "{fid},{:.2},{:.1},{:.2},{},{},{},{}",
+            "{fid},{:.2},{:.1},{:.2},{},{},{},{},{},{}",
             t_session_ms,
             counters.fps,
             counters.work_ms,
             counters.draw_calls,
             counters.light_queue,
             counters.chunks_rendered,
+            counters.chunks_loaded,
+            counters.chunks_pending,
             counters.edits,
         );
         for col in &cols_snapshot {
