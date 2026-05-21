@@ -3,6 +3,130 @@ id: 1.9-trilerp
 title: 1.9 Trilinear Interpolation
 ---
 
-import Stub from '@site/src/components/Stub';
+import LazyWidget from '@site/src/widgets/LazyWidget';
+import TrilerpDemo from '@site/src/widgets/TrilerpDemo';
 
-<Stub />
+Evaluating the density graph once per voxel in a 32³ chunk means about 32,768 calls to the full noise pipeline — splines, FBM, climate lookups, the works. In practice the engine's chunk-fill workload is larger still: accounting for height coupling and the 3D density volume the doc comment in `density_graph.rs` quotes **~98,000 voxels per chunk**. Either way, most adjacent voxels yield nearly the same density; the interesting variation happens at scales larger than a single block. The engine exploits this: it evaluates the density graph only at the corners of a coarse 9×9×9 lattice (729 samples per chunk), then **trilinearly interpolates** the rest. That single change accounts for a roughly **134× reduction** in expensive density evaluations per chunk (98k ÷ 729 ≈ 134; the per-32³-voxel ratio alone is ~45×).
+
+## The picture
+
+Start in 2D. A bilinear interpolation takes four corner values and smoothly blends them across a rectangular patch. The four corners define a *tent*: the value at any interior point $(t_x, t_y)$ is the weighted average of all four corners, with weights $1-t_x$, $t_x$, $1-t_y$, $t_y$ combining multiplicatively.
+
+The widget below shows a 2D bilinear interpolation. Drag the corner sliders to see how the gradient changes. Toggle **"show exact"** to see a reference function ($\cos(2\pi x)\cos(2\pi y)$), and **"show error"** to see where the flat-corner approximation diverges from it — largest near the curvature peaks of the exact function.
+
+<LazyWidget fallbackSrc="/oxium/img/figures/trilerp-default-fallback.png" fallbackAlt="Bilinear interpolation demo with corner sliders">
+  <TrilerpDemo />
+</LazyWidget>
+
+Notice that with only four corners we can faithfully reproduce any linear gradient across the cell — the error is zero. The error grows only where the exact function is *non-linear* within the cell. For the slowly-varying noise functions the engine uses, cells of 4 blocks per side keep the error invisible.
+
+## Build it
+
+### Lerp
+
+Everything bottoms out at a single **linear interpolation**:
+
+$$
+\text{lerp}(a, b, t) = a(1 - t) + bt
+$$
+
+At $t = 0$ you get $a$; at $t = 1$ you get $b$; in between, a straight line.
+
+### Bilerp (2D)
+
+Take four corners $c_{00}$, $c_{10}$, $c_{01}$, $c_{11}$ where the subscript is $(x, y)$. Apply lerp along x at both y values, then lerp along y:
+
+$$
+a = \text{lerp}(c_{00}, c_{10},\; t_x), \quad b = \text{lerp}(c_{01}, c_{11},\; t_x)
+$$
+$$
+\text{bilerp} = \text{lerp}(a, b,\; t_y)
+$$
+
+That is three lerps total. The result is the same whether you lerp x then y, or y then x — the operation is symmetric.
+
+### Trilerp (3D)
+
+Add one more axis. Eight corners $c_{xyz}$ for $x, y, z \in \{0, 1\}$. Apply bilerp at $z=0$ and $z=1$, then lerp along z:
+
+$$
+\text{trilerp} = \text{lerp}(\text{bilerp}(c_{000}, c_{100}, c_{010}, c_{110},\; t_x, t_y),\;\text{bilerp}(c_{001}, c_{101}, c_{011}, c_{111},\; t_x, t_y),\; t_z)
+$$
+
+Seven lerps total (4 along x, 2 along y, 1 along z).
+
+For the TypeScript port and parity test entries we store the 8 corners as a flat array indexed `xi + 2*yi + 4*zi` for `xi, yi, zi ∈ {0, 1}` — so index 0 = $(0,0,0)$, index 1 = $(1,0,0)$, index 2 = $(0,1,0)$, up to index 7 = $(1,1,1)$. The engine itself uses a 9×9×9 flat array indexed `cx + cy * CORNER_COUNT + cz * CORNER_COUNT²` and names the 8 corners around a query as locals `c000`..`c111` inside `evaluate`.
+
+```typescript
+// From docs/book/src/math/trilerp.ts
+export function trilerp(
+  corners: [number, number, number, number, number, number, number, number],
+  tx: number, ty: number, tz: number,
+): number {
+  const c00 = corners[0] * (1 - tx) + corners[1] * tx;
+  const c10 = corners[2] * (1 - tx) + corners[3] * tx;
+  const c01 = corners[4] * (1 - tx) + corners[5] * tx;
+  const c11 = corners[6] * (1 - tx) + corners[7] * tx;
+  const c0  = c00 * (1 - ty) + c10 * ty;
+  const c1  = c01 * (1 - ty) + c11 * ty;
+  return c0 * (1 - tz) + c1 * tz;
+}
+```
+
+## In the engine
+
+Open `src/worldgen/density_graph.rs`. Two constants define the grid:
+
+```rust
+pub const CELL_SIZE:   i32   = 4;           // each cell is 4×4×4 blocks
+pub const CELL_COUNT:  usize = 8;           // 8 cells per chunk axis (32 / 4)
+pub const CORNER_COUNT: usize = 9;          // CELL_COUNT + 1: corners are shared between cells
+```
+
+`CellEvaluator::new` loops over all $9 \times 9 \times 9 = 729$ corner positions, evaluates the full density graph at each, and stores the results in a flat `Vec<f32>`:
+
+```rust
+let idx = cx + cy * CORNER_COUNT + cz * CORNER_COUNT * CORNER_COUNT;
+corners[idx] = graph.evaluate(wx, wy, wz, climate, density, cfg);
+```
+
+`CellEvaluator::evaluate(wx, wy, wz)` then locates which cell the query point falls in, computes the fractional offsets $t_x, t_y, t_z$ within that cell, and blends the 8 surrounding corners:
+
+```rust
+let tx = (lx - cx as i32 * CELL_SIZE) as f32 / CELL_SIZE as f32;
+// ... ty, tz similarly ...
+// then 7 lerps → single f32 result
+```
+
+The module's doc comment tallies the win: `~98k voxels per chunk → ~729 corner samples ≈ 134× fewer expensive density evaluations`.
+
+### What stays per-voxel
+
+Caves are exempt from the lattice. Cave SDFs need 1-block resolution — a 4-block cell would blur the air/solid boundary and give you foot-thick cave walls. The per-voxel pass subtracts the cave SDF *after* trilerping the terrain density:
+
+```rust
+// conceptually in fill_chunk:
+let density_interp = evaluator.evaluate(wx, wy, wz);
+let density = heightmap::slide(density_interp, wy, &cfg.density);
+// cave SDF subtracted separately at full resolution
+```
+
+## The honest caveat
+
+Trilerp is an *approximation*. Near voxels right at the density = 0 threshold — the air/solid boundary — the interpolated value can sign-flip at a slightly different location than the exact evaluation would. In practice the boundary shifts by less than half a block, and the visual difference is invisible at play distance. The engine accepts this trade deliberately: the speedup is real and large; the artifact is below perceptual threshold.
+
+If you need exact density values — for example, the inspection panels in the dev HUD — the engine exposes the full graph evaluation directly. Search for `DensityBreakdown` in `src/worldgen/probe.rs` to see where exact (non-interpolated) values are sampled for diagnostic purposes.
+
+## What you can now do in the code
+
+You can read:
+
+- `src/worldgen/density_graph.rs::CellEvaluator` — the full lattice build (`new`) and the 7-lerp query (`evaluate`). Verify that the flat index formula `cx + cy * CORNER_COUNT + cz * CORNER_COUNT * CORNER_COUNT` matches the nested loop order.
+- The constants `CELL_SIZE`, `CELL_COUNT`, `CORNER_COUNT` at the top of the same file — the test `cell_constants_divide_chunk` asserts `CELL_COUNT * CELL_SIZE == CHUNK_DIM_U` and `CORNER_COUNT == CELL_COUNT + 1`.
+- `src/worldgen/mod.rs` — find the `CellEvaluator::new(...)` call and follow how `evaluator.evaluate(wx, wy, wz)` threads into `heightmap::slide` per voxel.
+
+## Next
+
+This is the last chapter in Part I: Foundations. You have seen everything that feeds the per-voxel density value — noise, FBM, Voronoi, domain warping, splines, SDFs, and now the interpolation layer that makes it affordable.
+
+→ [2.1 The Big Picture](../part-2-overview/2.1-big-picture.mdx)

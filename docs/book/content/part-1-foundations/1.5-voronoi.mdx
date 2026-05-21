@@ -3,6 +3,99 @@ id: 1.5-voronoi
 title: 1.5 Voronoi Diagrams
 ---
 
-import Stub from '@site/src/components/Stub';
+import LazyWidget from '@site/src/widgets/LazyWidget';
+import VoronoiCells from '@site/src/widgets/VoronoiCells';
 
-<Stub />
+In [1.3](./1.3-coherent-noise.mdx) and [1.4](./1.4-fbm.mdx) we built *continuous* fields — every nearby point has a similar value to its neighbours. But the world also needs *cellular* structure: continents that are clearly separated by ocean, biomes with definite edges, cave systems that don't overlap. For that we use **Voronoi diagrams**.
+
+## The picture
+
+Drop a bunch of points (call them *seeds*) onto a 2D plane. For every other point on the plane, ask: which seed is closest? Color that point with the seed's colour. The result is a tiling — each seed "owns" a polygonal region, and the boundary between two regions is exactly the perpendicular bisector of the line between their seeds.
+
+That tiling is a **Voronoi diagram**. The regions are cells; the boundaries form a connected network.
+
+Drag the toggles to see how the cells form and how the "boundary intensity" field rises smoothly from 0 at edges to 1 deep inside cells:
+
+<LazyWidget>
+  <VoronoiCells />
+</LazyWidget>
+
+For the engine's purposes, dropping seeds at truly random locations is overkill. We use a **jittered grid**: divide the world into a regular grid of cells (1024 blocks per side in the engine — `PLATE_CELL_SIZE` in `src/worldgen/tuning.rs`), and roll one Voronoi seed at a hashed position inside each cell. Every world coordinate's nearest seed is then guaranteed to live in either the same grid cell or one of its 8 neighbours — so a 3×3 search is all you need, regardless of how big the world is.
+
+## Build it
+
+Finding the nearest seed at a query point `(wx, wz)`:
+
+```rust
+// simplified for exposition; see src/worldgen/plates.rs for the real one.
+fn nearest_seed(seed: u64, wx: i32, wz: i32) -> (PlateId, f32) {
+    let qcx = wx.div_euclid(PLATE_CELL_SIZE);
+    let qcz = wz.div_euclid(PLATE_CELL_SIZE);
+    let q = Vec2::new(wx as f32, wz as f32);
+    let mut best = (f32::INFINITY, PlateId { cell_x: 0, cell_z: 0 });
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            let cell_x = qcx + dx;
+            let cell_z = qcz + dz;
+            // Seed location: hashed jitter in [0, 1) across the full cell.
+            // Salt 0 for X-jitter, salt 1 for Z-jitter — independent rolls.
+            let jx = hash::mix_unit(seed, &[cell_x, cell_z, 0]);
+            let jz = hash::mix_unit(seed, &[cell_x, cell_z, 1]);
+            let seed_xz = Vec2::new(
+                (cell_x as f32 + jx) * PLATE_CELL_SIZE as f32,
+                (cell_z as f32 + jz) * PLATE_CELL_SIZE as f32,
+            );
+            let d = (q - seed_xz).length();
+            if d < best.0 {
+                best = (d, PlateId { cell_x, cell_z });
+            }
+        }
+    }
+    best
+}
+```
+
+Two things to notice:
+
+- **No centering.** The jitter is `jx ∈ [0, 1)`, so the seed lives anywhere inside the cell `[cell_x * PLATE_CELL_SIZE, (cell_x+1) * PLATE_CELL_SIZE)`. The seed is never forced toward the center. This is exactly what the engine does.
+- **Inline integer salts.** `hash::mix_unit(seed, &[cell_x, cell_z, 0])` and `…, 1]` are how the engine keeps X and Z jitter uncorrelated. The integer `0` and `1` are literal salts appended to the hash input slice, not named constants. The same pattern recurs everywhere worldgen needs independent rolls from the same coordinate.
+
+## The boundary intensity field
+
+The Voronoi diagram by itself only tells you which seed is closest. For terrain we want something smoother: a continuous field that's 0 on a cell boundary and 1 deep inside a cell. That's what enables tricks like *mountain ranges form along plate boundaries* (we crank ridge lift when the field is small) and *continental shelves taper into oceans* (we lerp base elevations using it).
+
+Track the two closest seeds (`d_a` = nearest, `d_b` = second-nearest) and compute:
+
+```rust
+let t = (d_b - d_a) / (d_b + d_a);  // 0 on boundary, → 1 deep inside cell
+```
+
+The expression $(d_b - d_a) / (d_b + d_a)$ has the nice property that it's scale-invariant — the field looks the same regardless of how big the cells are. Enable "Show boundary t" in the widget above to see it.
+
+## In the engine
+
+`src/worldgen/plates.rs` does exactly this. `Plate::of(seed, cell_x, cell_z)` builds the plate for a given cell — `PlateId { cell_x, cell_z }`, `kind: PlateKind::Continental` or `PlateKind::Oceanic`, a `roughness` multiplier, and the jittered `seed_xz`. `plate_at(seed, wx, wz)` runs the 3×3 scan and returns a `PlateLookup { a, b, d_a, d_b, t }`.
+
+Downstream, the boundary intensity `t` shapes the heightmap in two ways:
+
+- **Continental shelf taper.** `signed_continentalness` in `heightmap.rs` blends `plate_a` and `plate_b` kinds weighted by `t`. At a boundary (`t = 0`), you get a 50/50 mix; deep inside a plate (`t → 1`), the column takes that plate's full character.
+- **Roughness bias.** Each plate carries a `roughness` field derived from `hash::mix_range(seed, &[cell_x, cell_z, 4], ROUGHNESS_RANGE.0, ROUGHNESS_RANGE.1)` (salt 4). The heightmap spline pipeline uses this as an additive bias on `terrain_shape`, so some plates are more mountainous than others.
+
+The same Voronoi pattern shows up in two other places:
+
+- **Biome edge jitter** (`src/worldgen/climate.rs`) — per-block hash jitter perturbs the `(temperature, humidity)` query before the biome R-tree lookup, so biome edges aren't perfectly aligned with noise contours.
+- **Aquifer cells** (`src/worldgen/aquifer.rs`) — a jittered cell grid, each cell holding a `y_top` and a fluid kind (Water or Lava). Same nearest-seed logic, finer cell size.
+
+## What you can now do in the code
+
+You can read:
+
+- `src/worldgen/plates.rs` — the Voronoi plate decomposition, top to bottom. The `plate_at` function is ~30 lines. The rest is data types, derived plate properties, and tests.
+- `src/worldgen/climate.rs` — biome edge jitter using the same hash pattern.
+- `src/worldgen/aquifer.rs` — aquifer cell sampling.
+
+Whenever a chapter says "the engine partitions space into cells," you'll recognize this pattern.
+
+## Next
+
+→ [1.6 Vector Fields & Domain Warping](./1.6-domain-warping.mdx) — the trick that turns *blobby* noise into things that look like terrain.

@@ -2,13 +2,15 @@ import React, { useEffect, useState } from 'react';
 import Layout from '@theme/Layout';
 import useBaseUrl from '@docusaurus/useBaseUrl';
 import { makeFbm2D } from '../math/fbm';
+import { evaluateSpline } from '../math/spline';
+import { ellipsoid2D } from '../math/sdf';
+import { trilerp } from '../math/trilerp';
 
 type Entry =
-  | {
-      fn: 'fbm';
-      args: { seed: number; octaves: number; persistence: number; x: number; y: number };
-      out: number;
-    };
+  | { fn: 'fbm';    args: { seed: number; octaves: number; persistence: number; x: number; y: number }; out: number }
+  | { fn: 'spline'; args: { name: string; knots: [number, number, number][]; input: number }; out: number }
+  | { fn: 'ellipsoid2D'; args: { px: number; py: number; cx: number; cy: number; rx: number; ry: number }; out: number }
+  | { fn: 'trilerp'; args: { corners: number[]; tx: number; ty: number; tz: number }; out: number };
 
 type Row = {
   fn: string;
@@ -25,9 +27,14 @@ type Row = {
 // 6 reference cases (max observed delta ~0.74) but still tight enough to
 // catch algorithmic mistakes such as wrong octave count, missing /maxAmp
 // normalization, or a flipped sign (which would produce delta ≈ 2.0).
-const TOLERANCE = 1.5;
+const TOLERANCES: Record<string, number> = {
+  fbm: 1.5,          // PRNG gap between noise crate and simplex-noise + alea
+  spline: 1e-5,      // pure math, no PRNG involved
+  ellipsoid2D: 1e-5, // pure math, no PRNG involved
+  trilerp: 1e-5,     // pure math, no PRNG involved
+};
 
-function runFbm(e: Entry): number {
+function runFbm(e: Extract<Entry, { fn: 'fbm' }>): number {
   const fbm = makeFbm2D({
     seed: e.args.seed,
     octaves: e.args.octaves,
@@ -36,6 +43,20 @@ function runFbm(e: Entry): number {
     frequency: 1.0,
   });
   return fbm(e.args.x, e.args.y);
+}
+
+function runSpline(e: Extract<Entry, { fn: 'spline' }>): number {
+  const knots = e.args.knots.map(([loc, val, slope]) => ({ loc, val, slope }));
+  return evaluateSpline(knots, e.args.input);
+}
+
+function runEllipsoid(e: Extract<Entry, { fn: 'ellipsoid2D' }>): number {
+  return ellipsoid2D(e.args.px, e.args.py, e.args.cx, e.args.cy, e.args.rx, e.args.ry);
+}
+
+function runTrilerp(e: Extract<Entry, { fn: 'trilerp' }>): number {
+  const c = e.args.corners as [number, number, number, number, number, number, number, number];
+  return trilerp(c, e.args.tx, e.args.ty, e.args.tz);
 }
 
 export default function ParityPage() {
@@ -48,15 +69,21 @@ export default function ParityPage() {
       .then((r) => r.json())
       .then((entries: Entry[]) => {
         const rs = entries.map((e) => {
-          const ts = e.fn === 'fbm' ? runFbm(e) : NaN;
+          let ts: number;
+          if (e.fn === 'fbm')              ts = runFbm(e);
+          else if (e.fn === 'spline')      ts = runSpline(e);
+          else if (e.fn === 'ellipsoid2D') ts = runEllipsoid(e);
+          else if (e.fn === 'trilerp')     ts = runTrilerp(e);
+          else                             ts = NaN;
           const delta = Math.abs(ts - e.out);
+          const tol = TOLERANCES[e.fn] ?? 1e-5;
           return {
             fn: e.fn,
             args: JSON.stringify(e.args),
             rust: e.out,
             ts,
             delta,
-            ok: delta < TOLERANCE,
+            ok: delta < tol,
           };
         });
         setRows(rs);
