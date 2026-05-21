@@ -4,11 +4,13 @@ import useBaseUrl from '@docusaurus/useBaseUrl';
 import { makeFbm2D } from '../math/fbm';
 import { evaluateSpline } from '../math/spline';
 import { ellipsoid2D } from '../math/sdf';
+import { trilerp } from '../math/trilerp';
 
 type Entry =
   | { fn: 'fbm';    args: { seed: number; octaves: number; persistence: number; x: number; y: number }; out: number }
   | { fn: 'spline'; args: { name: string; knots: [number, number, number][]; input: number }; out: number }
-  | { fn: 'ellipsoid2D'; args: { px: number; py: number; cx: number; cy: number; rx: number; ry: number }; out: number };
+  | { fn: 'ellipsoid2D'; args: { px: number; py: number; cx: number; cy: number; rx: number; ry: number }; out: number }
+  | { fn: 'trilerp'; args: { corners: number[]; tx: number; ty: number; tz: number }; out: number };
 
 type Row = {
   fn: string;
@@ -29,6 +31,7 @@ const TOLERANCES: Record<string, number> = {
   fbm: 1.5,          // PRNG gap between noise crate and simplex-noise + alea
   spline: 1e-5,      // pure math, no PRNG involved
   ellipsoid2D: 1e-5, // pure math, no PRNG involved
+  trilerp: 1e-5,     // pure math, no PRNG involved
 };
 
 function runFbm(e: Extract<Entry, { fn: 'fbm' }>): number {
@@ -51,6 +54,11 @@ function runEllipsoid(e: Extract<Entry, { fn: 'ellipsoid2D' }>): number {
   return ellipsoid2D(e.args.px, e.args.py, e.args.cx, e.args.cy, e.args.rx, e.args.ry);
 }
 
+function runTrilerp(e: Extract<Entry, { fn: 'trilerp' }>): number {
+  const c = e.args.corners as [number, number, number, number, number, number, number, number];
+  return trilerp(c, e.args.tx, e.args.ty, e.args.tz);
+}
+
 export default function ParityPage() {
   const [rows, setRows] = useState<Row[]>([]);
   const [err, setErr] = useState<string | null>(null);
@@ -65,6 +73,7 @@ export default function ParityPage() {
           if (e.fn === 'fbm')              ts = runFbm(e);
           else if (e.fn === 'spline')      ts = runSpline(e);
           else if (e.fn === 'ellipsoid2D') ts = runEllipsoid(e);
+          else if (e.fn === 'trilerp')     ts = runTrilerp(e);
           else                             ts = NaN;
           const delta = Math.abs(ts - e.out);
           const tol = TOLERANCES[e.fn] ?? 1e-5;

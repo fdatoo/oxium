@@ -99,6 +99,34 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
     }
 
+    // -- trilerp --
+    // Pure math — assert TS port matches Rust exactly. Corner order:
+    // c[xi + 2*yi + 4*zi].
+    {
+        let cases: &[([f32; 8], f32, f32, f32)] = &[
+            ([0.0; 8], 0.5, 0.5, 0.5),                                       // all zero → 0
+            ([1.0; 8], 0.0, 0.0, 0.0),                                       // all one  → 1
+            ([0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0], 0.5, 0.0, 0.0),       // gradient in x → 0.5
+            ([0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0], 0.0, 0.0, 0.5),       // gradient in z → 0.5
+            ([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0.5, 0.5, 0.5),       // single corner → 0.125
+        ];
+        for &(corners, tx, ty, tz) in cases {
+            let c = corners;
+            let c00 = c[0] * (1.0 - tx) + c[1] * tx;
+            let c10 = c[2] * (1.0 - tx) + c[3] * tx;
+            let c01 = c[4] * (1.0 - tx) + c[5] * tx;
+            let c11 = c[6] * (1.0 - tx) + c[7] * tx;
+            let c0  = c00 * (1.0 - ty) + c10 * ty;
+            let c1  = c01 * (1.0 - ty) + c11 * ty;
+            let v   = c0 * (1.0 - tz) + c1 * tz;
+            let corners_json: Vec<String> = c.iter().map(|x| format!("{x}")).collect();
+            entries.push(format!(
+                "    {{\"fn\":\"trilerp\",\"args\":{{\"corners\":[{}],\"tx\":{tx},\"ty\":{ty},\"tz\":{tz}}},\"out\":{v}}}",
+                corners_json.join(",")
+            ));
+        }
+    }
+
     // Write as JSON array. We hand-build the JSON so we don't pull
     // in serde_json just for this (the schema is simple and stable).
     let json = format!("[\n{}\n]\n", entries.join(",\n"));
