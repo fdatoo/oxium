@@ -3,6 +3,114 @@ id: c-constants-catalog
 title: "Appendix C: Constants Catalog"
 ---
 
-import Stub from '@site/src/components/Stub';
+Every compile-time constant in `src/worldgen/tuning.rs` with its value and the chapter that explains why. Runtime-tunable parameters (spline curves, biome rates, surface rules) live in `assets/worldgen/default.ron` — see [5.3 Config & Hot-Reload](../part-5-engineering/5.3-config-hot-reload.mdx).
 
-<Stub />
+Derived constants (computed from other constants at compile time) appear in a final section.
+
+## Plates
+
+| Constant | Value | Description | Chapter |
+|---|---|---|---|
+| `PLATE_CELL_SIZE` | `1024` | Edge length (blocks) of one Voronoi plate seed cell; smaller → more plates → finer continental shapes | [3.1 Plates](../part-3-region-build/3.1-plates.mdx) |
+| `CONTINENTAL_RATIO` | `0.45` | Fraction of plates classified as continental; the remainder are oceanic, governing land:ocean ratio | [3.1 Plates](../part-3-region-build/3.1-plates.mdx) |
+| `ROUGHNESS_RANGE` | `(0.7, 1.4)` | Per-plate additive bias range on the climate `terrain_shape` channel; mapped to `ClimateConfig::plate_roughness_bias_range` | [3.1 Plates](../part-3-region-build/3.1-plates.mdx) |
+
+## Heightmap
+
+| Constant | Value | Description | Chapter |
+|---|---|---|---|
+| `SEA_LEVEL` | `62` | World-space Y of the sea surface | [3.3 Heightmap](../part-3-region-build/3.3-heightmap.mdx) |
+| `CLIFF_SLOPE_THRESH` | `2.2` | Slope (blocks/block) above which a column is exposed as a cliff, measured over a ±4-block stencil | [3.3 Heightmap](../part-3-region-build/3.3-heightmap.mdx) |
+| `MAX_TERRAIN_Y` | `140` | Hard upper cap on final terrain Y; keeps tallest peaks inside the vertical chunk-load radius | [3.3 Heightmap](../part-3-region-build/3.3-heightmap.mdx) |
+
+## 3D Density
+
+| Constant | Value | Description | Chapter |
+|---|---|---|---|
+| `SURFACE_BAND` | `16` | Half-width (blocks) around `h_target` used by `topmost_solid` to bound tree-trunk anchor searches; does not short-circuit density evaluation | [4.1 Density Graph](../part-4-chunk-fill/4.1-density-graph.mdx) |
+| `CAVE_SDF_INTENSITY` | `4.0` | Peak intensity of the cave SDF carve; at `4.0` cave interiors carve fully to air and chamber walls taper gracefully | [4.3 Composing Caves](../part-4-chunk-fill/4.3-composing-caves.mdx) |
+
+## Rivers (Fine)
+
+| Constant | Value | Description | Chapter |
+|---|---|---|---|
+| `FINE_CELL` | `8` | Coarse-cell edge length (blocks) for the fine flow-accumulation grid; smaller → finer river paths | [3.4 Hydrology](../part-3-region-build/3.4-hydrology.mdx) |
+| `FINE_REGION_SIZE` | `512` | Fine region edge length (blocks); sets the sink-fill horizon window | [3.4 Hydrology](../part-3-region-build/3.4-hydrology.mdx) |
+| `FINE_HALO_REGIONS` | `2` | Fine-region halos on each side when building; `2` → 2 560-block (~2.5 km) sink-fill horizon | [3.4 Hydrology](../part-3-region-build/3.4-hydrology.mdx) |
+| `RIVER_THRESH` | `50` | Flow-accumulation threshold (fine cells) above which a cell is tagged as a river | [3.5 Rivers & Lakes](../part-3-region-build/3.5-rivers-lakes.mdx) |
+| `RIVER_WIDTH_SCALE` | `0.30` | Width-law scale factor: `width = clamp(sqrt(acc) × scale, min, max)` | [3.5 Rivers & Lakes](../part-3-region-build/3.5-rivers-lakes.mdx) |
+| `MIN_RIVER_WIDTH` | `1.5` | Minimum river width (blocks) at threshold drainage | [3.5 Rivers & Lakes](../part-3-region-build/3.5-rivers-lakes.mdx) |
+| `MAX_RIVER_WIDTH` | `32.0` | Maximum river width (blocks) near major mouths | [3.5 Rivers & Lakes](../part-3-region-build/3.5-rivers-lakes.mdx) |
+| `RIVER_BED_DEPTH` | `4` | Depth (blocks below the natural heightmap) of the river bed at the centerline of a wide river | [3.5 Rivers & Lakes](../part-3-region-build/3.5-rivers-lakes.mdx) |
+| `VALLEY_HALF_WIDTH_MULT` | `3.0` | Valley half-width as a multiple of river width; `3×` → 36-block valley taper on each side of a 6-block river | [3.5 Rivers & Lakes](../part-3-region-build/3.5-rivers-lakes.mdx) |
+| `MEANDER_AMP_PER_WIDTH` | `0.4` | Lateral meander amplitude per unit of river width | [3.5 Rivers & Lakes](../part-3-region-build/3.5-rivers-lakes.mdx) |
+| `MAX_MEANDER_AMP` | `16.0` | Hard cap (blocks) on meander amplitude regardless of width | [3.5 Rivers & Lakes](../part-3-region-build/3.5-rivers-lakes.mdx) |
+| `MOUTH_FLARE_MULT` | `1.6` | Width multiplier applied at ocean mouths so deltas flare outward | [3.5 Rivers & Lakes](../part-3-region-build/3.5-rivers-lakes.mdx) |
+
+## Rivers (Macro / Trunk Pass)
+
+| Constant | Value | Description | Chapter |
+|---|---|---|---|
+| `MACRO_CELL` | `64` | Macro coarse-cell edge length (blocks); 8× `FINE_CELL`, so each macro cell covers 8×8 fine cells | [3.4 Hydrology](../part-3-region-build/3.4-hydrology.mdx) |
+| `MACRO_REGION_SIZE` | `8192` | Macro region edge length (blocks); 16× `FINE_REGION_SIZE` | [3.4 Hydrology](../part-3-region-build/3.4-hydrology.mdx) |
+| `MACRO_HALO_REGIONS` | `1` | Macro-region halos when building; `1` → ~24 km sink-fill horizon | [3.4 Hydrology](../part-3-region-build/3.4-hydrology.mdx) |
+| `MACRO_RIVER_THRESH` | `500` | Flow-accumulation threshold (macro cells) above which a cell is flagged as a trunk river | [3.5 Rivers & Lakes](../part-3-region-build/3.5-rivers-lakes.mdx) |
+
+## Caves
+
+| Constant | Value | Description | Chapter |
+|---|---|---|---|
+| `CAVE_SYSTEMS_PER_REGION` | `(0, 0)` | Range of graph cave systems per fine region; currently disabled — the procedural carver in `carver.rs` is the primary structural source | [3.6 Cave Systems](../part-3-region-build/3.6-cave-systems.mdx) |
+| `CAVE_BAND_SHALLOW` | `(10, 50)` | Y range (inclusive) for Shallow cave systems | [3.6 Cave Systems](../part-3-region-build/3.6-cave-systems.mdx) |
+| `CAVE_BAND_MIDDLE` | `(-40, 30)` | Y range (inclusive) for Middle cave systems | [3.6 Cave Systems](../part-3-region-build/3.6-cave-systems.mdx) |
+| `CAVE_BAND_DEEP` | `(-110, -30)` | Y range (inclusive) for Deep cave systems | [3.6 Cave Systems](../part-3-region-build/3.6-cave-systems.mdx) |
+| `CHAMBERS_PER_SYSTEM` | `(2, 4)` | Range of ellipsoid chambers per cave system; produces discrete room-and-passage layouts | [3.6 Cave Systems](../part-3-region-build/3.6-cave-systems.mdx) |
+| `CHAMBER_RADIUS_RANGE` | `(3.5, 5.5)` | Ellipsoid semi-axis length range (blocks); yields 7–11-block-diameter chambers at MC parity | [3.6 Cave Systems](../part-3-region-build/3.6-cave-systems.mdx) |
+| `POISSON_MIN_SPACING_MULT` | `3.0` | Poisson-disk minimum spacing between chamber centers as a multiple of chamber radius | [3.6 Cave Systems](../part-3-region-build/3.6-cave-systems.mdx) |
+| `MST_EXTRA_LOOPS` | `(1, 2)` | Range of extra MST edges (loops) added beyond the minimum spanning tree | [3.6 Cave Systems](../part-3-region-build/3.6-cave-systems.mdx) |
+| `TUNNEL_RADIUS` | `(2.0, 3.0)` | Tunnel cross-section radius range (blocks); yields 4–6-block-wide walkable corridors | [3.6 Cave Systems](../part-3-region-build/3.6-cave-systems.mdx) |
+| `ENTRANCE_PROB_SHALLOW` | `0.70` | Probability a Shallow chamber tries to expose to the surface (sinkhole / cliff mouth / skylight) | [3.6 Cave Systems](../part-3-region-build/3.6-cave-systems.mdx) |
+| `ENTRANCE_PROB_MIDDLE` | `0.25` | Probability a Middle chamber tries to expose to the surface | [3.6 Cave Systems](../part-3-region-build/3.6-cave-systems.mdx) |
+| `ENTRANCE_PROB_DEEP` | `0.05` | Probability a Deep chamber tries to expose to the surface | [3.6 Cave Systems](../part-3-region-build/3.6-cave-systems.mdx) |
+| `SINKHOLE_DEPTH_MAX` | `8` | Maximum gap (blocks) between chamber top and surface for a sinkhole to be geometrically possible | [3.6 Cave Systems](../part-3-region-build/3.6-cave-systems.mdx) |
+| `CLIFF_ENTRANCE_DIST` | `30` | Maximum horizontal distance (blocks) from a chamber to a steep-gradient column for a cliff-mouth entrance | [3.6 Cave Systems](../part-3-region-build/3.6-cave-systems.mdx) |
+| `CAVE_SURFACE_BUFFER` | `-1` | Depth below the heightmap above which carvers are suppressed; `-1` allows the topmost solid block to be carved, enabling rare natural surface openings | [4.4 Noise Carvers](../part-4-chunk-fill/4.4-noise-carvers.mdx) |
+| `CAVE_FLOOR_Y` | `-120` | World Y below which caves stop carving; keeps the loaded chunk-stack bottom solid | [4.4 Noise Carvers](../part-4-chunk-fill/4.4-noise-carvers.mdx) |
+| `WORMHOLE_BAND_Y` | `-40` | Y below which sparse 3D-noise wormholes are layered in; restriction to the deep band keeps shallow caves coherent | [4.4 Noise Carvers](../part-4-chunk-fill/4.4-noise-carvers.mdx) |
+| `WORMHOLE_BAND` | `0.05` | Half-width of the near-zero band on wormhole noise; wider → thicker / more frequent wormholes | [4.4 Noise Carvers](../part-4-chunk-fill/4.4-noise-carvers.mdx) |
+
+## Biomes & Surface
+
+| Constant | Value | Description | Chapter |
+|---|---|---|---|
+| `COLD_SNOW_MIN_ABOVE_SEA` | `8` | Minimum height (blocks above sea level) for cold-biome surface snow to apply; coastal cold regions get grass/dirt below this elevation | [4.6 Surface Rules](../part-4-chunk-fill/4.6-surface-rules.mdx) |
+| `TREE_BLEND_WIDTH` | `12.0` | Spatial width (blocks) over which tree density is interpolated across a biome boundary | [4.9 Trees](../part-4-chunk-fill/4.9-trees.mdx) |
+| `SNOW_LINE` | `110` | World Y at and above which surface columns are capped with Snow regardless of biome (alpine snow line) | [4.6 Surface Rules](../part-4-chunk-fill/4.6-surface-rules.mdx) |
+
+## Trees
+
+| Constant | Value | Description | Chapter |
+|---|---|---|---|
+| `TREE_RATE_PLAINS` | `12` | Tree density rate for plains biome (Poisson-disk thinning denominator) | [4.9 Trees](../part-4-chunk-fill/4.9-trees.mdx) |
+| `TREE_RATE_FOREST` | `55` | Tree density rate for forest biome | [4.9 Trees](../part-4-chunk-fill/4.9-trees.mdx) |
+| `TREE_RATE_SNOWY_FOREST` | `55` | Tree density rate for snowy forest biome | [4.9 Trees](../part-4-chunk-fill/4.9-trees.mdx) |
+| `TREE_RATE_TROPICAL` | `65` | Tree density rate for tropical biome | [4.9 Trees](../part-4-chunk-fill/4.9-trees.mdx) |
+| `TREE_CELL_SIZE` | `8` | Edge length (blocks) of each Poisson-disk tree placement cell | [4.9 Trees](../part-4-chunk-fill/4.9-trees.mdx) |
+| `TREE_MARGIN` | `5` | Minimum block clearance between tree trunks and chunk edges | [4.9 Trees](../part-4-chunk-fill/4.9-trees.mdx) |
+
+## Region Cache Caps
+
+| Constant | Value | Description | Chapter |
+|---|---|---|---|
+| `FINE_CACHE_CAP` | `256` | Maximum number of fine regions held in the LRU cache | [5.2 Region Cache](../part-5-engineering/5.2-region-cache.mdx) |
+| `MACRO_CACHE_CAP` | `32` | Maximum number of macro regions held in the LRU cache | [5.2 Region Cache](../part-5-engineering/5.2-region-cache.mdx) |
+
+## Derived Helpers
+
+These constants are computed from others at compile time and exist for readability; they are not independently tunable.
+
+| Constant | Value | Formula | Chapter |
+|---|---|---|---|
+| `FINE_CELLS_PER_REGION` | `64` | `FINE_REGION_SIZE / FINE_CELL` (512 / 8) | [3.4 Hydrology](../part-3-region-build/3.4-hydrology.mdx) |
+| `MACRO_CELLS_PER_REGION` | `128` | `MACRO_REGION_SIZE / MACRO_CELL` (8192 / 64) | [3.4 Hydrology](../part-3-region-build/3.4-hydrology.mdx) |
+| `FINE_PER_MACRO` | `8` | `MACRO_CELL / FINE_CELL` (64 / 8) | [3.4 Hydrology](../part-3-region-build/3.4-hydrology.mdx) |
