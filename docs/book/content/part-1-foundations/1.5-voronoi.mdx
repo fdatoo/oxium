@@ -20,7 +20,19 @@ Drag the toggles to see how the cells form and how the "boundary intensity" fiel
   <VoronoiCells />
 </LazyWidget>
 
-For the engine's purposes, dropping seeds at truly random locations is overkill. We use a **jittered grid**: divide the world into a regular grid of cells (1024 blocks per side in the engine — `PLATE_CELL_SIZE` in `src/worldgen/tuning.rs`), and roll one Voronoi seed at a hashed position inside each cell. Every world coordinate's nearest seed is then guaranteed to live in either the same grid cell or one of its 8 neighbours — so a 3×3 search is all you need, regardless of how big the world is.
+### A common gotcha: seeds aren't at cell centers
+
+Two seeds that happen to land close to each other produce a sharply asymmetric pair of cells: each seed's *own* cell gets squished toward the shared boundary while the *outer* edges stretch away. The boundary is the **perpendicular bisector** of the line between the two seeds — exactly halfway between them, regardless of where any "center" is. The seed itself is wherever you put it, often near a corner or against an edge of its own cell.
+
+Said the other way around: the cell defines what's closer to *its* seed than to any other seed. If your seed is in the upper-left of its territory because all its neighbours sit to the lower-right, that's geometrically correct. Voronoi cells are not "circular regions around their seeds" — they're whatever shape falls out of the all-pairs perpendicular-bisector geometry. Look at the widget after one or two re-seeds and you'll see seeds tucked into corners, sitting close to edges, almost never at the geometric center.
+
+### Generating it on demand for an infinite world
+
+For the engine's purposes, dropping seeds at truly random locations is overkill — and there's no way to "store" a list of seeds for an infinite world anyway. We use a **jittered grid**: divide the world into a regular grid of cells (1024 blocks per side in the engine — `PLATE_CELL_SIZE` in `src/worldgen/tuning.rs`), and for each cell roll one Voronoi seed at a hashed position inside the cell.
+
+"Roll" here means: feed the cell's integer coordinates `(cell_x, cell_z)` and the world seed into the hash mixer from [1.2](./1.2-determinism.mdx), and use the result as the seed's offset inside the cell. So every cell — no matter how far out you wander — has its own deterministic seed, produced on demand from its coordinates. Two cells at different `(cell_x, cell_z)` are different inputs to the hash, so they produce different seeds; there's no precomputed list and no wraparound. The Voronoi diagram is functionally infinite.
+
+The on-demand approach has one more benefit: every world coordinate's nearest seed is guaranteed to live in either the same grid cell or one of its 8 neighbours (because no seed can be further than the cell diagonal). So a **3×3 cell scan** is all you ever need to find the nearest seed, regardless of how big the world is.
 
 ## Build it
 
