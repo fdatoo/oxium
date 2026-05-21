@@ -256,6 +256,11 @@ struct ChunkGpu {
     /// referencing this buffer is built at draw time so each draw
     /// can include the chunk's current light_volume view.
     ubuf: wgpu::Buffer,
+    /// Mirrored from `ChunkMesh::has_water` at upload time. The frame
+    /// loop ORs this across every visible chunk to decide whether the
+    /// planar-reflection pass needs to run — when no on-screen chunk
+    /// contains water, the whole reflection render is skipped.
+    has_water: bool,
 }
 
 impl Renderer {
@@ -733,6 +738,7 @@ impl Renderer {
         slots[lod] = Some(ChunkGpu {
             mesh: gpu_mesh,
             ubuf,
+            has_water: mesh.has_water,
         });
     }
 
@@ -919,6 +925,17 @@ impl Renderer {
         );
         let refl_frustum = extract_frustum_planes(refl_vp);
 
+        // Walk every loaded chunk *once* per frame and pick the visible
+        // set + chosen LOD for the main-view frustum. The three render
+        // passes (opaque, water, reflection) used to each re-iterate
+        // `self.chunk_meshes` (10 k+ entries) and re-run the same
+        // distance + frustum + LOD-selection logic — wasted CPU.
+        // Walking once and indexing by `&ChunkGpu` in the per-pass loops
+        // collapses that work to a single pass and lets us short-circuit
+        // the reflection render when nothing visible contains water.
+        let (visible_main, any_water_visible) =
+            self.build_visible_chunks(eye, &frustum);
+
         let frame = self.gpu.surface.get_current_texture()?;
         let view = frame
             .texture
@@ -932,15 +949,30 @@ impl Renderer {
         // reflection-frustum (extracted from `view_proj * R`), so
         // chunks are tested for whether their unmirrored geometry
         // would be visible in the reflection's projection.
-        self.encode_reflection_pass(&mut enc, eye, &refl_frustum);
+        //
+        // Skip the entire pass when no on-screen chunk contains water.
+        // The water shader's reflection bind group still points at
+        // whatever `reflection_resolve_view` held from the last frame,
+        // which is fine: the sample only matters when a water fragment
+        // is shaded, and by construction no such fragment exists this
+        // frame.
+        if any_water_visible {
+            // The reflection frustum is *different* from the main
+            // frustum (it's the mirrored projection), so it culls a
+            // different set of chunks. Build a second visible list
+            // against it. Only worth doing when we're actually going
+            // to render the pass.
+            let (visible_reflection, _) =
+                self.build_visible_chunks(eye, &refl_frustum);
+            self.encode_reflection_pass(&mut enc, &visible_reflection);
+        }
         // Main world pass (sky + opaque + water + cursor) into the
         // HDR offscreen target.
         self.encode_opaque_pass(
             &mut enc,
             &self.msaa_color_view,
             &self.hdr.view,
-            eye,
-            &frustum,
+            &visible_main,
         );
         // Composite: read HDR, write to the swapchain. Passthrough
         // today; Tasks 5/6 add tonemap + underwater tint.
@@ -953,6 +985,59 @@ impl Renderer {
         self.gpu.queue.submit(std::iter::once(enc.finish()));
         frame.present();
         Ok(())
+    }
+
+    /// Walk `self.chunk_meshes` once and return the visible chunks for
+    /// the given camera + frustum, along with each chunk's chosen
+    /// `ChunkGpu` (with LOD selection and the "any-LOD fallback"
+    /// applied). Also returns whether any of those visible chunks
+    /// contain water — used by the frame loop to skip the planar-
+    /// reflection pass entirely on water-free frames.
+    ///
+    /// Why borrow into `chunk_meshes`? The three render passes used to
+    /// each independently iterate the whole HashMap and recompute the
+    /// same distance + frustum + LOD checks. Borrowing into a small
+    /// `Vec<(coord, &ChunkGpu)>` collapses that to a single walk and
+    /// lets the per-pass loops do nothing but bind + draw.
+    fn build_visible_chunks(
+        &self,
+        eye: Vec3,
+        frustum: &[Vec4; 6],
+    ) -> (Vec<(ChunkCoord, &ChunkGpu)>, bool) {
+        // Distance cull matches the load radius diagonal — see the long
+        // comment in `encode_opaque_pass`'s old loop. Kept here as the
+        // single source of truth.
+        const CULL_DISTANCE: f32 = 600.0 + 28.0;
+        let cull_sq = CULL_DISTANCE * CULL_DISTANCE;
+        let mut out: Vec<(ChunkCoord, &ChunkGpu)> =
+            Vec::with_capacity(self.chunk_meshes.len());
+        let mut any_water = false;
+        for (coord, slots) in &self.chunk_meshes {
+            let origin = coord.origin().0;
+            let chunk_min = Vec3::new(origin.x as f32, origin.y as f32, origin.z as f32);
+            let chunk_max = chunk_min + Vec3::splat(32.0);
+            let center_f = chunk_min + Vec3::splat(16.0);
+            if (center_f - eye).length_squared() > cull_sq {
+                continue;
+            }
+            if !aabb_in_frustum(frustum, chunk_min, chunk_max) {
+                continue;
+            }
+            let preferred = Self::pick_lod(eye, center_f);
+            // Try the preferred LOD first; fall back to *any* available
+            // slot so a freshly-streamed chunk that only has one LOD
+            // built still draws. Same fallback the old per-pass loops
+            // used — preserved verbatim so the visible output doesn't
+            // change.
+            let chosen = slots[preferred]
+                .as_ref()
+                .or_else(|| slots.iter().flatten().next());
+            if let Some(cg) = chosen {
+                any_water |= cg.has_water;
+                out.push((*coord, cg));
+            }
+        }
+        (out, any_water)
     }
 
     /// Encode the composite pass: sample the HDR target, write to the
@@ -1098,8 +1183,7 @@ impl Renderer {
     fn encode_reflection_pass(
         &self,
         enc: &mut wgpu::CommandEncoder,
-        eye: Vec3,
-        frustum: &[Vec4; 6],
+        visible: &[(ChunkCoord, &ChunkGpu)],
     ) {
         let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("reflection-pass"),
@@ -1159,54 +1243,38 @@ impl Renderer {
         pass.set_pipeline(&self.opaque_pipe_reflection.pipeline);
         pass.set_bind_group(0, &self.reflection_camera_bg, &[]);
         pass.set_bind_group(2, &self.atlas.bind_group, &[]);
-        const CULL_DISTANCE: f32 = 600.0 + 28.0;
-        let cull_sq = CULL_DISTANCE * CULL_DISTANCE;
-        for (coord, slots) in &self.chunk_meshes {
-            let origin = coord.origin().0;
-            let chunk_min = Vec3::new(origin.x as f32, origin.y as f32, origin.z as f32);
-            let chunk_max = chunk_min + Vec3::splat(32.0);
-            let center_f = chunk_min + Vec3::splat(16.0);
-            if (center_f - eye).length_squared() > cull_sq {
-                continue;
-            }
-            if !aabb_in_frustum(frustum, chunk_min, chunk_max) {
-                continue;
-            }
-            let preferred = Self::pick_lod(eye, center_f);
-            let chosen = slots[preferred]
-                .as_ref()
-                .or_else(|| slots.iter().flatten().next());
-            if let Some(cg) = chosen {
-                let light_view = self.chunk_lights.get(coord)
-                    .map(|v| &v.view)
-                    .unwrap_or(&self.placeholder_light_view);
-                let chunk_bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("chunk-bg"),
-                    layout: &self.chunk_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: &cg.ubuf,
-                                offset: 0,
-                                size: std::num::NonZeroU64::new(16),
-                            }),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(light_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&self.light_sampler),
-                        },
-                    ],
-                });
-                pass.set_bind_group(1, &chunk_bg, &[0]);
-                pass.set_vertex_buffer(0, cg.mesh.vbuf.slice(..));
-                pass.set_index_buffer(cg.mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..cg.mesh.index_count, 0, 0..1);
-            }
+        // The caller already culled by the reflection frustum and
+        // picked an LOD per chunk; just bind + draw.
+        for (coord, cg) in visible {
+            let light_view = self.chunk_lights.get(coord)
+                .map(|v| &v.view)
+                .unwrap_or(&self.placeholder_light_view);
+            let chunk_bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("chunk-bg"),
+                layout: &self.chunk_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &cg.ubuf,
+                            offset: 0,
+                            size: std::num::NonZeroU64::new(16),
+                        }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(light_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.light_sampler),
+                    },
+                ],
+            });
+            pass.set_bind_group(1, &chunk_bg, &[0]);
+            pass.set_vertex_buffer(0, cg.mesh.vbuf.slice(..));
+            pass.set_index_buffer(cg.mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..cg.mesh.index_count, 0, 0..1);
         }
     }
 
@@ -1215,8 +1283,7 @@ impl Renderer {
         enc: &mut wgpu::CommandEncoder,
         msaa_view: &wgpu::TextureView,
         resolve_view: &wgpu::TextureView,
-        eye: Vec3,
-        frustum: &[Vec4; 6],
+        visible: &[(ChunkCoord, &ChunkGpu)],
     ) {
         // PASS A: sky + opaque. Writes MSAA colour + MSAA depth.
         // Does NOT resolve yet — the water pass below loads the MSAA
@@ -1254,98 +1321,47 @@ impl Renderer {
         pass.set_bind_group(0, &self.camera_bg, &[]);
         pass.draw(0..3, 0..1);
 
-        // 2) Opaque chunks. Pick a LOD per chunk by camera distance;
-        // fall back to a nearby LOD if the preferred one hasn't been
-        // built yet (a freshly-streamed chunk may have L0 ready before
-        // L1/L2, or vice versa).
+        // 2) Opaque chunks. The visible-chunk list was built by
+        // `build_visible_chunks` in `render()` — see its doc-comment
+        // for why a single shared walk replaces the per-pass loops.
         pass.set_pipeline(&self.opaque_pipe.pipeline);
         pass.set_bind_group(0, &self.camera_bg, &[]);
         // Atlas (group 2) is shared by every chunk draw — bind once
         // outside the per-chunk loop. Per-chunk uniform (group 1) still
         // varies per draw and is set inside the loop below.
         pass.set_bind_group(2, &self.atlas.bind_group, &[]);
-        // Distance culling: skip chunks whose centre is beyond the
-        // load-radius diagonal. The load radius is 12 chunks (384
-        // blocks) horizontally and 8 chunks (256 blocks) vertically,
-        // so a corner chunk at the full radius is `√(384² + 256² +
-        // 384²) ≈ 600` blocks from the player centre. Anything past
-        // that is unloaded anyway, but the cull threshold has to be
-        // big enough to *include* every loaded chunk — otherwise
-        // the diagonal corners of the load radius (which are
-        // farther than the cardinal-direction chunks at the same
-        // `dx`/`dz`) get cut, painting a consistent one-quadrant
-        // void from any oblique camera.
-        //
-        // Add 28 (half-diagonal of a chunk) so a chunk straddling
-        // the boundary still draws for its in-range corner.
-        const CULL_DISTANCE: f32 = 600.0 + 28.0;
-        let cull_sq = CULL_DISTANCE * CULL_DISTANCE;
         let mut draws: u32 = 0;
-        for (coord, slots) in &self.chunk_meshes {
-            let origin = coord.origin().0;
-            let chunk_min = Vec3::new(origin.x as f32, origin.y as f32, origin.z as f32);
-            let chunk_max = chunk_min + Vec3::splat(32.0);
-            let center_f = chunk_min + Vec3::splat(16.0);
-            let d_sq = (center_f - eye).length_squared();
-            if d_sq > cull_sq {
-                continue;
-            }
-            // Frustum cull: skip chunks entirely behind the camera
-            // or out to the sides. The cheap n-vertex test per
-            // chunk saves the per-draw wgpu command-encoding cost
-            // that dominated render time before culling.
-            if !aabb_in_frustum(frustum, chunk_min, chunk_max) {
-                continue;
-            }
-            let preferred = Self::pick_lod(eye, center_f);
-            // Try the preferred LOD first; if it isn't uploaded yet,
-            // fall back to *any* available LOD slot rather than
-            // staying invisible. The previous version explicitly
-            // tried `[preferred, preferred-1, preferred+1]` which
-            // for `preferred = 2` collapsed to `[2, 1, 2]` and
-            // missed `slot[0]` — so chunks at LOD2 render distance
-            // that only have a LOD0 mesh (the case since v0.1.39
-            // stopped spawning LOD1/LOD2 at gen time) failed to
-            // draw entirely, painting a sky-shader void over the
-            // ring of "far enough for LOD2, no LOD2/LOD1 baked yet"
-            // chunks. That ring looks like a one-quadrant void
-            // from any oblique top-down view, which is the
-            // "specific quadrant won't load" symptom.
-            let chosen = slots[preferred]
-                .as_ref()
-                .or_else(|| slots.iter().flatten().next());
-            if let Some(cg) = chosen {
-                let light_view = self.chunk_lights.get(coord)
-                    .map(|v| &v.view)
-                    .unwrap_or(&self.placeholder_light_view);
-                let chunk_bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("chunk-bg"),
-                    layout: &self.chunk_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: &cg.ubuf,
-                                offset: 0,
-                                size: std::num::NonZeroU64::new(16),
-                            }),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(light_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&self.light_sampler),
-                        },
-                    ],
-                });
-                pass.set_bind_group(1, &chunk_bg, &[0]);
-                pass.set_vertex_buffer(0, cg.mesh.vbuf.slice(..));
-                pass.set_index_buffer(cg.mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..cg.mesh.index_count, 0, 0..1);
-                draws += 1;
-            }
+        for (coord, cg) in visible {
+            let light_view = self.chunk_lights.get(coord)
+                .map(|v| &v.view)
+                .unwrap_or(&self.placeholder_light_view);
+            let chunk_bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("chunk-bg"),
+                layout: &self.chunk_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &cg.ubuf,
+                            offset: 0,
+                            size: std::num::NonZeroU64::new(16),
+                        }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(light_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.light_sampler),
+                    },
+                ],
+            });
+            pass.set_bind_group(1, &chunk_bg, &[0]);
+            pass.set_vertex_buffer(0, cg.mesh.vbuf.slice(..));
+            pass.set_index_buffer(cg.mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..cg.mesh.index_count, 0, 0..1);
+            draws += 1;
         }
         self.last_draw_calls.set(draws);
 
@@ -1412,58 +1428,45 @@ impl Renderer {
         // Water draws. Same vertex buffers as the opaque pass; the
         // water shader discards every non-water fragment. Group 3
         // gives the shader the scene-depth sampler it needs for
-        // foam + depth-tint.
+        // foam + depth-tint. Reuses the same visible list — chunks
+        // without water still go through the shader, but every
+        // fragment discards so there's no GPU-side cost beyond the
+        // vertex transform.
         pass.set_pipeline(&self.water_pipe.pipeline);
         pass.set_bind_group(0, &self.camera_bg, &[]);
         pass.set_bind_group(2, &self.atlas.bind_group, &[]);
         pass.set_bind_group(3, &self.water_depth_bg, &[]);
         pass.set_bind_group(4, &self.water_reflection_bg, &[]);
-        for (coord, slots) in &self.chunk_meshes {
-            let origin = coord.origin().0;
-            let chunk_min = Vec3::new(origin.x as f32, origin.y as f32, origin.z as f32);
-            let chunk_max = chunk_min + Vec3::splat(32.0);
-            let center_f = chunk_min + Vec3::splat(16.0);
-            if (center_f - eye).length_squared() > cull_sq {
-                continue;
-            }
-            if !aabb_in_frustum(frustum, chunk_min, chunk_max) {
-                continue;
-            }
-            let preferred = Self::pick_lod(eye, center_f);
-            let chosen = slots[preferred]
-                .as_ref()
-                .or_else(|| slots.iter().flatten().next());
-            if let Some(cg) = chosen {
-                let light_view = self.chunk_lights.get(coord)
-                    .map(|v| &v.view)
-                    .unwrap_or(&self.placeholder_light_view);
-                let chunk_bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("chunk-bg"),
-                    layout: &self.chunk_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                buffer: &cg.ubuf,
-                                offset: 0,
-                                size: std::num::NonZeroU64::new(16),
-                            }),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(light_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&self.light_sampler),
-                        },
-                    ],
-                });
-                pass.set_bind_group(1, &chunk_bg, &[0]);
-                pass.set_vertex_buffer(0, cg.mesh.vbuf.slice(..));
-                pass.set_index_buffer(cg.mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..cg.mesh.index_count, 0, 0..1);
-            }
+        for (coord, cg) in visible {
+            let light_view = self.chunk_lights.get(coord)
+                .map(|v| &v.view)
+                .unwrap_or(&self.placeholder_light_view);
+            let chunk_bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("chunk-bg"),
+                layout: &self.chunk_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &cg.ubuf,
+                            offset: 0,
+                            size: std::num::NonZeroU64::new(16),
+                        }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(light_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.light_sampler),
+                    },
+                ],
+            });
+            pass.set_bind_group(1, &chunk_bg, &[0]);
+            pass.set_vertex_buffer(0, cg.mesh.vbuf.slice(..));
+            pass.set_index_buffer(cg.mesh.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..cg.mesh.index_count, 0, 0..1);
         }
 
         // Cursor wireframe — drawn last so it overlays both opaque
@@ -1512,6 +1515,7 @@ impl Renderer {
         );
 
         let frustum = extract_frustum_planes(vp);
+        let (visible_main, _) = self.build_visible_chunks(eye, &frustum);
         let mut enc = self
             .gpu
             .device
@@ -1526,8 +1530,7 @@ impl Renderer {
             &mut enc,
             &self.msaa_color_view,
             &self.hdr.view,
-            eye,
-            &frustum,
+            &visible_main,
         );
         self.encode_composite_pass(&mut enc, target);
         if let Some(hud) = hud {

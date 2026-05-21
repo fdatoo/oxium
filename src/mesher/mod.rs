@@ -107,6 +107,12 @@ pub const UNTEXTURED_TILE: u8 = 0xFF;
 pub struct ChunkMesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
+    /// Set by the mesher when the source chunk contains any `Block::Water`
+    /// cell. The renderer copies this flag onto its per-chunk GPU record
+    /// and uses it to decide whether the planar-reflection pass is
+    /// needed: if no on-screen chunk contains water, the (expensive) full-
+    /// world reflection render can be skipped entirely.
+    pub has_water: bool,
 }
 
 impl ChunkMesh {
@@ -116,6 +122,7 @@ impl ChunkMesh {
         Self {
             vertices: Vec::new(),
             indices: Vec::new(),
+            has_water: false,
         }
     }
 }
