@@ -3,6 +3,91 @@ id: 1.3-coherent-noise
 title: 1.3 Coherent Noise
 ---
 
-import Stub from '@site/src/components/Stub';
+import LazyWidget from '@site/src/widgets/LazyWidget';
+import NoiseField from '@site/src/widgets/NoiseField';
 
-<Stub />
+In [1.2](./1.2-determinism.mdx) we built `mix`, the function that turns `(seed, integer coords, salt)` into a `u64`. That gives us *uncorrelated* randomness — every adjacent column gets a different value with no relationship to its neighbours. That's perfect for things like "should a tree spawn in this cell" but useless for "how tall is this column" — terrain needs to be *smooth*. Two columns ten blocks apart should be at similar heights.
+
+**Coherent noise** is the bridge: a function from real-valued coordinates $(x, y)$ to a scalar in roughly $[-1, 1]$ that varies smoothly, looks random at scale, but has zero discontinuities anywhere. It's the fundamental primitive of every procedural texture, terrain, cloud, and water shader you've ever seen.
+
+## The picture
+
+Imagine an invisible grid of integer-coordinate points. At each grid point, the noise function pins a random unit-vector "gradient" (computed from the grid coordinate and the seed). For a query point $(x, y)$ between four grid points, the noise function:
+
+1. Looks up the four corner gradients.
+2. Computes the dot product of each gradient with the offset from its corner to $(x, y)$ — that's a per-corner "contribution".
+3. Smoothly interpolates the four contributions across the cell.
+
+The result is a smooth surface that wiggles up and down on the order of the grid spacing. The interpolation function (a fifth-degree polynomial in Perlin, a simplex-shape weighting in Simplex) is the magic: the noise has continuous *derivatives* across grid lines, not just continuous values.
+
+Try it. Drag the seed to see how the random gradient grid changes the whole pattern; drag frequency to change the grid spacing; toggle the overlay to see where the lattice sits:
+
+<LazyWidget>
+  <NoiseField />
+</LazyWidget>
+
+Two flavors are common:
+
+- **Perlin** (1985) — the classic. Hypercubic grid; gradients picked from 12 fixed unit vectors.
+- **Simplex** (2001) — Perlin's own follow-up. Uses a *triangular* grid (in 2D) — fewer corners per cell (3 instead of 4 in 2D, 4 instead of 8 in 3D), faster, fewer artifacts at axis-aligned features.
+
+The engine uses Simplex exclusively (via the `noise` crate). The "looks like terrain" properties are essentially the same; Simplex just avoids subtle grid-axis bias.
+
+## Build it
+
+Both Perlin and Simplex follow the same shape:
+
+```rust
+// simplified for exposition.
+fn noise2d(x: f64, y: f64, hash: impl Fn(i32, i32) -> [f64; 2]) -> f64 {
+    // 1. Find the cell.
+    let xi = x.floor() as i32;
+    let yi = y.floor() as i32;
+    let xf = x - xi as f64;       // [0, 1) — local position in cell
+    let yf = y - yi as f64;
+
+    // 2. Per-corner gradient and dot product with offset.
+    let n00 = dot(hash(xi,     yi    ), [xf,        yf       ]);
+    let n10 = dot(hash(xi + 1, yi    ), [xf - 1.0,  yf       ]);
+    let n01 = dot(hash(xi,     yi + 1), [xf,        yf - 1.0 ]);
+    let n11 = dot(hash(xi + 1, yi + 1), [xf - 1.0,  yf - 1.0 ]);
+
+    // 3. Smooth interpolation. Perlin uses fifth-degree fade.
+    let u = fade(xf);
+    let v = fade(yf);
+    lerp(v, lerp(u, n00, n10), lerp(u, n01, n11))
+}
+
+fn fade(t: f64) -> f64 { t * t * t * (t * (t * 6.0 - 15.0) + 10.0) }
+```
+
+The `fade` function is what gives noise its smoothness across grid lines. It's a fifth-degree polynomial chosen specifically so that `fade(0) = 0`, `fade(1) = 1`, `fade'(0) = fade'(1) = 0`, *and* `fade''(0) = fade''(1) = 0`. That last property — second derivative continuous — is what prevents visible "ringing" at grid lines.
+
+The `hash(xi, yi) → unit_vector` lookup is where our friend from 1.2 reappears. Production implementations bake the gradients into a 256-entry permutation table, but conceptually you can just hash each integer corner with the world seed and salt into one of N fixed directions.
+
+## In the engine
+
+You won't find a hand-written noise implementation in the engine — we use the `noise` crate. Every place that wants smooth random structure writes:
+
+```rust
+// src/worldgen/mod.rs (Generator::new_internal)
+let temperature_map = Fbm::<Simplex>::new(seed.wrapping_add(8) as u32)
+    .set_octaves(2)
+    .set_frequency(1.0 / 512.0)
+    .set_persistence(0.5);
+```
+
+`Fbm` is "fractional Brownian motion" — stacked octaves of noise — and we explore it in detail in [1.4](./1.4-fbm.mdx). The `<Simplex>` type parameter says "use simplex noise as the base". `seed.wrapping_add(8)` is the salt; each different noise field in the `Generator` (temperature, humidity, weirdness, FBM base, …) uses a different small constant offset so the fields are uncorrelated, even though they share the world seed.
+
+The `noise` crate handles the gradient lattice for you. You feed it a `u32` seed; it deterministically generates its permutation table; calls to `.get([x, y])` return a value in `[-1, 1]`.
+
+## What you can now do in the code
+
+You can read:
+
+- Any `Simplex::new(seed_offset)` or `Fbm::<Simplex>::new(seed_offset)` construction. The `seed.wrapping_add(N)` pattern is the salt; the result is a deterministic 2D smooth random scalar field.
+- The `noise` crate docs and source — the implementation matches the algorithm above with the addition of a 256-entry gradient permutation table.
+
+## Next
+
+→ [1.4 Fractional Brownian Motion](./1.4-fbm.mdx) — the moment you stack octaves of this and unlock fractal terrain.
