@@ -3,6 +3,98 @@ id: 1.4-fbm
 title: 1.4 Fractional Brownian Motion
 ---
 
-import Stub from '@site/src/components/Stub';
+import LazyWidget from '@site/src/widgets/LazyWidget';
+import FbmExplorer from '@site/src/widgets/FbmExplorer';
 
-<Stub />
+In the previous chapter we built **coherent noise** — a smooth scalar field over $\mathbb{R}^2$ that goes up and down in a random-looking but continuous way. One octave of coherent noise gives you blobby gradients. Real terrain has structure at *every scale*: continental shapes, ridges, gravel-sized roughness. Stacking copies of noise at different frequencies gives you all of that, cheaply. That stack is called **Fractional Brownian Motion**, or FBM.
+
+## The picture
+
+FBM is a sum of noise *octaves*. The first octave is your base noise, sampled at frequency $f_0$. Each subsequent octave samples at a higher frequency and lower amplitude. The result is a fractal-looking field with detail across orders of magnitude.
+
+$$
+\mathrm{fbm}(x, y) = \sum_{i=0}^{N-1} a_i \cdot \mathrm{noise}(f_i x, f_i y)
+$$
+
+with $a_{i+1} = a_i \cdot p$ (persistence, default $0.5$) and $f_{i+1} = f_i \cdot l$ (lacunarity, default $2.0$).
+
+Three parameters control it:
+
+- **Octaves ($N$)** — how many copies you stack. More = more detail.
+- **Persistence ($p$)** — how quickly amplitude decays. Lower = smoother (high octaves contribute less). Higher = noisier.
+- **Lacunarity ($l$)** — how quickly frequency rises. $2.0$ doubles per octave; rarely tuned away from that.
+
+Drag the sliders to see what each parameter does:
+
+<LazyWidget fallbackSrc="/oxium/img/figures/fbm-default-fallback.png" fallbackAlt="FBM at default parameters">
+  <FbmExplorer />
+</LazyWidget>
+
+A few things worth playing with:
+
+- Set octaves to **1** and persistence to anything. You get a single octave of pure simplex noise — blobby, no fine detail.
+- Set octaves to **8** with persistence **0.5**. You should see noticeable fine detail; the 8th octave is at frequency $f_0 \cdot 2^7$, so it's contributing rapid wiggles.
+- Set octaves to **8** with persistence **0.85**. The high octaves no longer decay — the image looks noisy, almost speckled. This is why default persistence is $0.5$: high octaves should be visible but subordinate.
+
+## Build it
+
+A clean FBM implementation is short:
+
+```rust
+// simplified for exposition.
+// (The engine uses noise::Fbm<Simplex> from the `noise` crate, which
+//  does essentially this in a stateful builder.)
+fn fbm_2d(
+    noise: impl Fn(f64, f64) -> f64,
+    x: f64, y: f64,
+    octaves: usize,
+    persistence: f64,
+    lacunarity: f64,
+    frequency: f64,
+) -> f64 {
+    let mut amp = 1.0;
+    let mut freq = frequency;
+    let mut total = 0.0;
+    let mut max_amp = 0.0;
+    for _ in 0..octaves {
+        total += amp * noise(x * freq, y * freq);
+        max_amp += amp;
+        amp *= persistence;
+        freq *= lacunarity;
+    }
+    total / max_amp
+}
+```
+
+The `/ max_amp` at the end normalizes back to roughly $[-1, 1]$ regardless of how many octaves you stacked. Without that, the magnitude grows with $N$, and downstream code that compares to thresholds breaks every time you add an octave.
+
+## In the engine
+
+FBM shows up in many places — every time the engine wants smooth random structure at multiple scales. A representative use is the temperature map in `src/worldgen/mod.rs`:
+
+```rust
+// src/worldgen/mod.rs (Generator::new_internal)
+let temperature_map = Fbm::<Simplex>::new(seed.wrapping_add(8) as u32)
+    .set_octaves(2)
+    .set_frequency(1.0 / 512.0)
+    .set_persistence(0.5);
+```
+
+Notes:
+
+- The seed is offset by a small constant (`+8`) per noise field. Each FBM in the engine gets a different axis-salted seed so two fields with the same conceptual role don't accidentally produce the same pattern. This is a recurring trick — we'll come back to it in **5.1 Determinism Everywhere**.
+- Only **2** octaves. Temperature varies slowly across the world; we don't want gravel-scale wiggles in temperature.
+- Frequency $1/512$ means the period of the first octave is $\sim 512$ blocks — about 16 chunks. A player walks for a while between biome bands instead of crossing one every few steps.
+
+Compare to the heightmap's 3D base density, which uses **8** octaves at higher frequencies — terrain has detail at every scale, climate doesn't.
+
+## What you can now do in the code
+
+You can read:
+
+- Every `Fbm::<Simplex>::new(...).set_octaves(N).set_frequency(f).set_persistence(p)` call site in `src/worldgen/`. The parameters tell you the spatial scale and roughness of what's being generated.
+- The `noise` crate's FBM implementation — it's a few hundred lines and matches the pseudocode above.
+
+## Next
+
+→ [1.5 Voronoi Diagrams](./1.5-voronoi.mdx) — the *other* spatial pattern we use everywhere, this time for *cellular* structure (plates, biomes-with-edges, cave system layout).
