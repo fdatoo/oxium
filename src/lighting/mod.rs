@@ -17,6 +17,10 @@ use crate::voxel::coords::{LocalPos, CHUNK_DIM_U};
 use glam::UVec3;
 use std::collections::VecDeque;
 
+pub mod sky_sources;
+
+pub use sky_sources::{ChunkSkyLightSources, NO_SOURCE_FLOOR};
+
 /// Chunk side length as a signed integer (mirrors `D` in the mesher).
 const D: i32 = CHUNK_DIM_U as i32;
 
