@@ -3,6 +3,168 @@ id: 3.1-plates
 title: 3.1 Plates
 ---
 
-import Stub from '@site/src/components/Stub';
+Continents and oceans need clean shapes that hold together across thousands of blocks. Pure FBM noise gives you a Swiss-cheese world where land and sea interleave at every scale — small islands the size of cottages, lakes the size of bathrooms. Plates give the engine the macro structure that noise then decorates.
 
-<Stub />
+## The picture
+
+![Voronoi plate decomposition at the book seed](/oxium/img/generated/plate-id-s42-0_0-z16-w256.png)
+
+*Tectonic plates at the book seed (42), centered at world (0, 0). Each colour is one plate; the hue is derived by hashing the plate's `(cell_x, cell_z)` coordinates against the world seed — the same hash mixer from [1.2](../part-1-foundations/1.2-determinism.mdx). The irregular polygon boundaries are Voronoi edges: the perpendicular bisectors between adjacent seed points. 4096 blocks across (zoom 16). Mountain ranges grow along these edges; ocean trenches sink beneath them.*
+
+The image already appeared in [2.1](../part-2-overview/2.1-big-picture.mdx) as Stage 2 of the pipeline. Here we open the implementation and see exactly how it is built.
+
+## Build it
+
+The algorithm lives in `src/worldgen/plates.rs` and uses the jittered Voronoi grid introduced in [1.5](../part-1-foundations/1.5-voronoi.mdx). Three constants in `src/worldgen/tuning.rs` control the shape:
+
+```rust
+pub const PLATE_CELL_SIZE: i32 = 1024;        // grid cell side length, blocks
+pub const CONTINENTAL_RATIO: f32 = 0.45;       // fraction of plates that are continental
+pub const ROUGHNESS_RANGE: (f32, f32) = (0.7, 1.4); // per-plate roughness bounds
+```
+
+**Step 1 — divide the world into a grid.** Every 1024 × 1024 block region is one plate cell. The cell that contains world column `(wx, wz)` is `(wx.div_euclid(1024), wz.div_euclid(1024))`. Integer division handles negative coordinates correctly: `(-1).div_euclid(1024) == -1`, so the negative-X world has symmetric, contiguous cells.
+
+**Step 2 — roll one seed per cell.** `Plate::of(seed, cell_x, cell_z)` builds the plate for a given cell deterministically:
+
+```rust
+pub struct PlateId {
+    pub cell_x: i32,
+    pub cell_z: i32,
+}
+
+pub enum PlateKind {
+    Continental,
+    Oceanic,
+}
+
+pub struct Plate {
+    pub id: PlateId,
+    pub kind: PlateKind,
+    pub seed_xz: Vec2,   // world-space seed point inside the cell
+    pub roughness: f32,  // per-plate additive bias on terrain_shape
+}
+
+pub fn Plate::of(seed: u64, cell_x: i32, cell_z: i32) -> Self {
+    // Jitter: uniform offset inside the cell. Salt 0 for X, 1 for Z.
+    let jx = mix_unit(seed, &[cell_x, cell_z, 0]);
+    let jz = mix_unit(seed, &[cell_x, cell_z, 1]);
+    let seed_xz = Vec2::new(
+        (cell_x as f32 + jx) * PLATE_CELL_SIZE as f32,
+        (cell_z as f32 + jz) * PLATE_CELL_SIZE as f32,
+    );
+    // Kind: Continental if the roll is below CONTINENTAL_RATIO. Salt 2.
+    let kind = if mix_unit(seed, &[cell_x, cell_z, 2]) < CONTINENTAL_RATIO {
+        PlateKind::Continental
+    } else {
+        PlateKind::Oceanic
+    };
+    // Roughness: uniform in [ROUGHNESS_RANGE.0, ROUGHNESS_RANGE.1]. Salt 4.
+    let roughness = mix_range(seed, &[cell_x, cell_z, 4],
+                              ROUGHNESS_RANGE.0, ROUGHNESS_RANGE.1);
+    Plate { id: PlateId { cell_x, cell_z }, kind, seed_xz, roughness }
+}
+```
+
+The integer salts (`0`, `1`, `2`, `4`) keep each roll independent. The same `(cell_x, cell_z)` yields identical output from any call site, with any call order — `Plate::of` is pure.
+
+Notice: **`PlateId` is just `(cell_x, cell_z)`.** The cell coordinates are the ID. Every plate property can be recomputed from the ID alone, which means there is no plate registry or heap allocation — every call to `plate_at` rebuilds the plates it needs inline.
+
+**Step 3 — classify a query column.** `plate_at(seed, wx, wz)` scans the 3×3 grid of cells surrounding the query, finds the two nearest seeds, and computes the boundary intensity:
+
+```rust
+pub struct PlateLookup {
+    pub a: Plate,   // nearest plate
+    pub b: Plate,   // second-nearest plate
+    pub d_a: f32,   // distance to a's seed (blocks)
+    pub d_b: f32,   // distance to b's seed (blocks)
+    pub t: f32,     // boundary intensity: 0 on boundary, 1 deep inside a
+}
+
+pub fn plate_at(seed: u64, wx: i32, wz: i32) -> PlateLookup {
+    let q = Vec2::new(wx as f32, wz as f32);
+    let qcx = wx.div_euclid(PLATE_CELL_SIZE);
+    let qcz = wz.div_euclid(PLATE_CELL_SIZE);
+    let mut best   = (f32::INFINITY, None::<Plate>);
+    let mut second = (f32::INFINITY, None::<Plate>);
+    for dz in -1..=1 {
+        for dx in -1..=1 {
+            let p = Plate::of(seed, qcx + dx, qcz + dz);
+            let d = (p.seed_xz - q).length();
+            if d < best.0 {
+                second = best;
+                best = (d, Some(p));
+            } else if d < second.0 {
+                second = (d, Some(p));
+            }
+        }
+    }
+    let (d_a, a) = (best.0,   best.1.unwrap());
+    let (d_b, b) = (second.0, second.1.unwrap());
+    let denom = d_a + d_b;
+    let t = if denom < f32::EPSILON { 1.0 } else { (d_b - d_a) / denom };
+    PlateLookup { a, b, d_a, d_b, t }
+}
+```
+
+The 3×3 window is sufficient because jitter is bounded to `[0, 1)` within each cell. The worst-case query sits at a cell corner; the four touching cells all fall within the 3×3 window. A 9-candidate search is always enough to find both nearest and second-nearest.
+
+The boundary intensity formula is:
+
+$$
+t = \frac{d_b - d_a}{d_b + d_a}
+$$
+
+At a Voronoi edge, $d_a = d_b$, so $t = 0$. Deep inside a plate, $d_b \gg d_a$, so $t \to 1$. The ratio is **scale-invariant**: the field looks the same regardless of how big the cells are.
+
+## In the engine — signed_continentalness
+
+`PlateLookup` gives you the nearest and second-nearest plates plus the smooth boundary field. That is enough geometry. But the heightmap and climate systems need a *continuous signed scalar* — something that is clearly positive over land, clearly negative under ocean, and smoothly transitions at coastlines. That is `signed_continentalness`, defined in `src/worldgen/heightmap.rs`:
+
+```rust
+pub fn signed_continentalness(look: &PlateLookup) -> f32 {
+    let sign_of = |k: PlateKind| -> f32 {
+        match k {
+            PlateKind::Continental => 1.0,
+            PlateKind::Oceanic    => -1.0,
+        }
+    };
+    let a_sign = sign_of(look.a.kind);
+    let b_sign = sign_of(look.b.kind);
+    // Weights: 0.5/0.5 at boundary (t=0), 1.0/0.0 deep inside a (t→1).
+    let wa = 0.5 + 0.5 * look.t;
+    let wb = 1.0 - wa;
+    let raw = a_sign * wa + b_sign * wb;
+    (raw * 1.1).clamp(-1.1, 1.1)
+}
+```
+
+Walk through the four cases:
+
+| `a.kind`      | `b.kind`      | `t`        | result                                  |
+|---------------|---------------|------------|-----------------------------------------|
+| Continental   | Continental   | high       | ≈ +1.1 — deep inland, strongly positive |
+| Oceanic       | Oceanic       | high       | ≈ −1.1 — deep seafloor, strongly negative |
+| Continental   | Oceanic       | 0 (edge)   | 0.0 — exactly on a coast               |
+| Oceanic       | Continental   | 0 (edge)   | 0.0 — exactly on a coast, from the sea side |
+
+At `t = 0` (boundary), the weights are 0.5 / 0.5 and the two ±1 signs cancel to zero. At `t = 1` (plate center), all weight goes to `a`. The 1.1 scale factor spreads the output range so that the spline knots at the extremes (±1.1) catch the deepest continental cores and ocean trenches — it is a deliberate stretch, not an error.
+
+The continentalness image from [2.1](../part-2-overview/2.1-big-picture.mdx) is exactly this field rendered to disk: red is strongly continental (+1.1), blue is strongly oceanic (−1.1), and dark near-zero traces every coastline. You can verify that every dark boundary in the continentalness image aligns with a polygon edge in the plate-id image above — they describe the same geometry, one categorically, one continuously.
+
+## What you can now do in the code
+
+You can read `src/worldgen/plates.rs` end to end. The module is 160 lines including tests. `Plate::of` is 25 lines; `plate_at` is 35. Everything else is data types and doc comments.
+
+Once you understand `PlateLookup`, you can follow:
+
+- **`signed_continentalness`** in `heightmap.rs` — the function described above, called at the start of `HeightmapColumn::climate`.
+- **`plate_roughness_bias`** in `heightmap.rs` — maps `Plate::roughness ∈ [0.7, 1.4]` to an additive bias on the `terrain_shape` climate axis, so rougher plates get more mountainous spline output.
+- **`HeightmapColumn::climate`** in `heightmap.rs` — assembles the full climate vector including `cont`, which comes directly from `signed_continentalness(&look)`.
+- **The spline pipeline** in `config.rs` — `offset_spline`, `factor_spline`, `jaggedness_spline` are all keyed on continentalness as their outermost axis. When continentalness is high, the offset spline produces elevated terrain; when it is negative, the result is below sea level.
+
+Low boundary intensity (`t` near zero) is where tectonic effects concentrate. A column near a plate boundary has a low `t` value, which means `signed_continentalness` is near zero; the spline pipeline's midpoint knots — typically set to intermediate terrain heights — govern the output. In practice, configuring a *trough* at `c ≈ 0` in the offset spline produces ocean trenches at plate boundaries even when both adjacent plates are continental. The plate geometry is the skeleton; the spline configuration is the sculptor.
+
+## Next
+
+→ [3.2 Climate](./3.2-climate.mdx) — temperature, humidity, weirdness, terrain_shape, and depth join continentalness to form the full 6-axis climate vector that drives biome selection.
