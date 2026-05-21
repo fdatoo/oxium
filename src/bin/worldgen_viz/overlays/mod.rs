@@ -5,6 +5,7 @@
 //! reuse them. This module re-exports them and keeps the egui/UI-side
 //! `MapView` plumbing here (binary-only).
 
+#[allow(unused_imports)]
 pub use oxium::viz_render::{colormap, stages};
 
 use egui::{ColorImage, TextureHandle, TextureOptions, Ui};
