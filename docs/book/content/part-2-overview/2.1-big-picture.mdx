@@ -3,6 +3,170 @@ id: 2.1-big-picture
 title: 2.1 The Big Picture
 ---
 
-import Stub from '@site/src/components/Stub';
+This is the spine of the book. Part I taught you the primitives — hash mixers, coherent noise, FBM, Voronoi diagrams, domain warping, splines, SDFs, and trilerp. This chapter shows you the order in which those primitives compose into a finished chunk of world. Every chapter after this one zooms into exactly one stage of what you are about to read.
 
-<Stub />
+There is no math here, no widget, just images of the engine doing real work. Every image is rendered from the actual engine at the book seed (42), centered at world coordinate (0, 0). The same geography appears across all images — you can build a mental map and return to it chapter by chapter as the detail fills in.
+
+## What the pipeline takes in, what it puts out
+
+```rust
+// src/worldgen/mod.rs
+impl Generator {
+    pub fn fill_chunk(&self, coord: ChunkCoord, out: &mut DenseChunk) { ... }
+}
+```
+
+That is the entire public contract. Given `(self.seed, coord)`, the output `DenseChunk` is byte-identical every time, on every machine, with no disk state required. Everything between that input and output is what this chapter walks through.
+
+The function is pure in `(seed, coord)` — caches are only memoisation of expensive geometry that many adjacent chunks share, not state. [Chapter 5.1](../part-5-engineering/5.1-determinism.mdx) covers the determinism guarantees in depth.
+
+## Stage 1: Pre-fetch regions
+
+Before a single column is evaluated, `fill_chunk` calls `gather_chunk_regions`, which pre-fetches the 3×3 grid of *fine regions* surrounding the chunk. A fine region is a pre-built cache of per-column geography (hydrology, cave systems, biome data) keyed on a 512-block region coordinate. Fetching all nine regions up-front means the per-column hot path only pays one cheap cache lookup rather than nine mutex-protected cache misses. If a region is not yet built, `build_fine_region` computes it now and it stays warm for the adjacent chunks that share it.
+
+There is no image for this stage — regions are an implementation detail, not a spatial thing you see directly. [Chapter 5.2](../part-5-engineering/5.2-region-cache.mdx) covers the region cache design.
+
+## Stage 2: Plate decomposition
+
+The world is partitioned into tectonic plates using the jittered Voronoi grid introduced in [1.5](../part-1-foundations/1.5-voronoi.mdx). Each 1024-block cell rolls one hashed seed position. Every world coordinate belongs to whichever plate seed is nearest.
+
+![Voronoi plate decomposition at the book seed](/oxium/img/generated/plate-id-s42-0_0-z16-w256.png)
+*Tectonic plate cells. Each colour is one plate; the colour is a stable hue derived by hashing the plate's cell coordinates against the world seed. The irregular polygon boundaries are the Voronoi edges — the perpendicular bisectors between adjacent seeds. 4096 blocks across (zoom 16). Mountain ranges grow along these boundaries; oceanic trenches sink beneath them.*
+
+Each plate carries two properties: `kind` (Continental or Oceanic), and `roughness` (a per-plate FBM amplitude multiplier). The boundary-intensity field `t = (d_b - d_a) / (d_b + d_a)` is 0 at every cell edge and rises toward 1 deep inside the plate — used throughout the heightmap to blend properties smoothly across boundaries.
+
+[Chapter 3.1](../part-3-region-build/3.1-plates.mdx) covers the plate decomposition in full.
+
+## Stage 3: Continentalness
+
+The plate decomposition produces a signed scalar field called *continentalness*: positive inland, negative offshore. It is derived from the boundary intensity `t` and the `kind` of the nearest plate (and its neighbour, blended by `t`).
+
+![Continentalness field at the book seed](/oxium/img/generated/continentalness-s42-0_0-z16-w256.png)
+*Continentalness. Red is strongly continental (high positive); blue is strongly oceanic (deep negative); dark near zero is coastline. You can see the same plate geometry from the previous image expressed as a smooth signed field. 4096 blocks across.*
+
+Continentalness feeds directly into the heightmap spline pipeline as one of the six climate axes. A highly positive value biases the column toward elevated inland terrain; a strongly negative value drives it below sea level. [Chapter 3.1](../part-3-region-build/3.1-plates.mdx) explains how `signed_continentalness` is computed from the plate lookup.
+
+## Stage 4: Climate axes — temperature, humidity, weirdness
+
+Three independent FBM fields provide the remaining climate dimensions. These are sampled from the `noise::Fbm<Simplex>` type — the same kind of field covered in [1.3](../part-1-foundations/1.3-coherent-noise.mdx) and [1.4](../part-1-foundations/1.4-fbm.mdx).
+
+![Temperature noise at the book seed](/oxium/img/generated/temperature-s42-0_0-z16-w256.png)
+*Temperature. Purple-dark is cold; yellow-bright is hot. The large-scale blobs reflect the FBM's base frequency; the finer wrinkles are its upper octaves. 4096 blocks across.*
+
+![Humidity noise at the book seed](/oxium/img/generated/humidity-s42-0_0-z16-w256.png)
+*Humidity. Same viridis scale as temperature — dark is dry, bright is wet. The two fields are statistically independent (different FBM seeds), so you get every combination: hot-wet tropics, cold-dry tundra, hot-dry desert, cold-wet subarctic. 4096 blocks across.*
+
+![Weirdness noise at the book seed](/oxium/img/generated/weirdness-s42-0_0-z16-w256.png)
+*Weirdness. A mid-frequency FBM that selects rare biome variants the way Minecraft's weirdness axis does — ice-spike biomes, eroded badlands, mushroom fields. High positive weirdness combined with specific temperature/humidity values unlocks these outliers. 4096 blocks across.*
+
+Together with continentalness, `terrain_shape`, ridges, and depth (two more axes derived later in the pipeline), these form the 6-axis climate vector that the biome R-tree lookup consumes. [Chapter 3.2](../part-3-region-build/3.2-climate.mdx) covers the full climate system.
+
+## Stage 5: Pre-carve heightmap `h_pre`
+
+The climate axes drive a spline pipeline (covered in [1.7](../part-1-foundations/1.7-splines.mdx)) that maps each column's `(continentalness, terrain_shape, ridges)` triple to a *base surface elevation*. The domain-warped FBM relief is then multiplied by the plate's `roughness` and added. The result is `h_pre` — the surface height before rivers carve it.
+
+![Pre-carve heightmap at the book seed](/oxium/img/generated/h-pre-s42-0_0-z8-w256.png)
+*Pre-carve heightmap h_pre. The terrain ramp goes from cool teal (near sea level, ~64 blocks) through green-tan (mid-altitude hills) to warm sand tones (high peaks, ~160 blocks). The swirling structure reflects domain-warped FBM. 2048 blocks across (zoom 8).*
+
+The spline pipeline ensures that continental plates reliably produce land above sea level and oceanic plates produce seafloor — the FBM adds textural roughness within those constraints rather than overriding them. [Chapter 3.3](../part-3-region-build/3.3-heightmap.mdx) covers `h_pre` in detail.
+
+## Stage 6: Hydrology — flow accumulation
+
+Before rivers can be carved, the engine must know where they run. A D8 flow-direction pass assigns each fine-region cell a drainage direction (one of eight cardinal/diagonal choices), then a Planchon-Darboux sink-fill raises the `h_pre` field just enough to drain every local minimum. Accumulation counts how many upstream cells drain through each cell. Cells with high accumulation are trunk rivers; cells with low accumulation are headwaters.
+
+![Flow accumulation at the book seed](/oxium/img/generated/flow-accum-s42-0_0-z8-w256.png)
+*Flow accumulation, log-scaled. The branching tree structure is exactly the river network: bright lines are high-accumulation trunk channels; dim speckles are headwater cells with only one or two upstream neighbors. This is real drainage topology, not noise. 2048 blocks across.*
+
+The flow accumulation image is one of the most structurally distinct in the pipeline — a fractal tree rooted at the lowest point in each basin, with every branch junction visible as a step-up in brightness. [Chapter 3.4](../part-3-region-build/3.4-hydrology.mdx) covers the full hydrology pass.
+
+## Stage 7: Valley carve
+
+River segments derived from the flow accumulation drive a perpendicular-distance U-profile carve: for each point near a river centreline, the engine computes the distance to the nearest segment and uses a smooth U-shaped profile to decide how many blocks to subtract from `h_pre`. Valleys widen and deepen toward trunk rivers; headwater channels cut narrower, shallower grooves.
+
+![Valley carve depth at the book seed](/oxium/img/generated/valley-carve-s42-0_0-z8-w256.png)
+*Valley carve depth. The hot colormap runs from black (zero carve) through red and orange to yellow-white (maximum carve, ~16 blocks). Most of the image is black because carving only happens near rivers; the bright lines trace exactly the river network from the previous image, now as carved depth. 2048 blocks across.*
+
+The valley-carve image looks sparse because that is correct: the vast majority of terrain is untouched, and only the river corridors are modified. [Chapter 3.5](../part-3-region-build/3.5-rivers-lakes.mdx) covers the carve profile and lake formation.
+
+## Stage 8: Final heightmap `h_target`
+
+Subtracting the valley carve from `h_pre` gives `h_target`: the actual top of each column after rivers have cut through the terrain.
+
+```
+h_target = (h_pre - valley_carve).clamp(cave_floor + 8, max_terrain_y)
+```
+
+![Final heightmap h_target at the book seed](/oxium/img/generated/h-target-s42-0_0-z8-w256.png)
+*Final surface height h_target. Compared to h_pre, you can now see rivers as cool-colored cuts in the terrain — valleys that dive toward sea level wherever the accumulation tree ran. The overall shape is recognisable as the same terrain, but sculpted. 2048 blocks across.*
+
+This is the value `column_data` returns. Every downstream stage — surface block selection, biome lookup, density-graph seeding, aquifer placement — uses `h_target` as the canonical column height. [Chapter 3.5](../part-3-region-build/3.5-rivers-lakes.mdx) and [3.3](../part-3-region-build/3.3-heightmap.mdx) together cover the two-step heightmap.
+
+## Stage 9: Biome assignment
+
+With `h_target` known, the engine assembles the full 6-axis climate vector: `(temperature, humidity, continentalness, terrain_shape, depth, weirdness)`. A small Voronoi jitter (from the hash mixer of [1.2](../part-1-foundations/1.2-determinism.mdx)) perturbs the query point before an R-tree biome lookup selects the nearest biome by Euclidean distance in climate space. The jitter breaks up the perfectly smooth noise-contour boundaries, giving biome edges an organic, hand-drawn feel.
+
+The `biome-id` snapshot stage has a known limitation in the visualizer: the categorical colormap's `fract()` normalization maps all integer biome IDs to the same hue, producing a uniform-color image. The biome system itself is correct — see the in-game visualizer (`worldgen_viz`) for a working biome overlay. The limitation is noted here rather than silently omitting the stage. [Chapter 3.2](../part-3-region-build/3.2-climate.mdx) covers biome assignment in full.
+
+## Stage 10: Density graph and cell evaluator
+
+All of the above is 2D column-level work. The density graph is where the pipeline goes 3D.
+
+A directed acyclic graph of spline nodes maps each voxel's `(continentalness, terrain_shape, ridges_pv, depth, wy)` to a signed density value. Positive density becomes solid; negative becomes air. The base terrain shape emerges from a bias node that drives density strongly positive below `h_target` and strongly negative above it, with a falloff band at the surface. A 3D FBM adds roughness to that bias, producing overhangs, arches, and surface texture. A *slide* function clamps extreme values near the chunk boundaries to prevent seams.
+
+Evaluating the density graph at every voxel in a 32×32×32 chunk would require 32,768 expensive graph evaluations. Instead, the engine builds a 9×9×9 corner lattice — 729 evaluations — and then trilerps (from [1.9](../part-1-foundations/1.9-trilerp.mdx)) the density at each of the 32,768 voxels from its eight surrounding corners. This is a ~45× speedup on the per-voxel hot path with no visible quality loss.
+
+[Chapter 4.1](../part-4-chunk-fill/4.1-density-graph.mdx) covers the density graph node types, and [4.2](../part-4-chunk-fill/4.2-cell-evaluator.mdx) covers the 9×9×9 lattice and trilerp evaluator.
+
+## Stage 11: Caves
+
+Four independent cave-carving systems compose into the density field via signed-density operations (using the SDF composition rules from [1.8](../part-1-foundations/1.8-sdfs.mdx)):
+
+- **Graph-based cave systems** (`src/worldgen/caves.rs`) place chambers connected by spline tunnels, with surface entrances (sinkholes, cliff mouths, skylights). The `CAVE_SURFACE_BUFFER` rule preserves the grass cap except at explicit entrances.
+- **Wormhole noise** carves sparse 3D-noise passages below `WORMHOLE_BAND_Y`, adding connective tunnels between isolated cave systems.
+- **Noise carvers** (`src/worldgen/carver.rs`) implement cheese, spaghetti, and pillar volumes — the same approach as Minecraft's cave noise generators. Cheese carvers open large caverns; spaghetti carvers cut thin passages; pillars add density back inside carved volumes.
+- **Procedural carvers** rasterise per-chunk tunnel masks for a further set of geometric passages.
+
+All four systems express their carving as signed-density modifiers applied via `min(density, cave_sdf)` — pulling density negative to carve air — followed by `max(density, pillar_sdf)` to restore pillars. The composition is order-dependent and covered in depth in [Chapter 4.3](../part-4-chunk-fill/4.3-composing-caves.mdx), [3.6](../part-3-region-build/3.6-cave-systems.mdx), [4.4](../part-4-chunk-fill/4.4-noise-carvers.mdx), and [4.5](../part-4-chunk-fill/4.5-procedural-carvers.mdx).
+
+## Stage 12: Aquifers
+
+Rather than flooding the entire world below sea level with water, the engine uses an *aquifer* system: a jittered Voronoi cell grid where each cell independently holds a `y_top` (the water table height for that cell) and a fluid kind (Water or Lava). Lava aquifers appear in deep, mountainous regions; water aquifers fill coastal lowlands and underground basins.
+
+![Aquifer water-table height at the book seed](/oxium/img/generated/aquifer-y-s42-0_0-z8-w256.png)
+*Aquifer cell water-table Y. The divergent colormap runs from red (y_top well below sea level, deep dry cells) through dark (near sea level) to blue (y_top above sea level, submerged cells). The large irregular patches are individual aquifer cells — each cell is 128 blocks across, so you see roughly 16×16 cells in this view. 2048 blocks across.*
+
+The `aquifer-substance` snapshot (water vs. lava) renders as near-uniform blue at this center location because the book-seed origin sits in a water-dominant region with no lava aquifer cells visible at this zoom. The lava boundary appears at depth in mountainous inland terrain; the in-game visualizer shows it clearly in section view.
+
+During chunk fill, each voxel that was carved to air (density < 0) and sits below its aquifer cell's `y_top` is flooded to Water or Lava. An `aquifer_mask` tracks which voxels came from the aquifer (vs. ocean flood or lake flood) so the fluid settle pass handles them correctly.
+
+[Chapter 4.7](../part-4-chunk-fill/4.7-aquifers.mdx) covers the aquifer cell placement and [4.8](../part-4-chunk-fill/4.8-fluid-settle.mdx) covers the fluid settle pass.
+
+## Stage 13: Surface rules
+
+After the voxel fill loop, a top-down scan determines the visible block type for the first several solid voxels below each column's air-to-solid transition:
+
+- Cliff columns (high slope) get Stone regardless of biome.
+- Columns within the beach band of sea level get Sand.
+- Columns above the snow line, or in cold biomes, get Snow.
+- Desert columns get Sand with a stochastic sand-transition fringe on the grassy side of the desert boundary.
+- All others get Grass with a few sub-surface Dirt layers.
+
+The `depth_below_surface` counter tracks where in the solid column the scan currently is, so subsurface blocks (stone, ore layers) can be placed correctly even in columns with overhangs.
+
+[Chapter 4.6](../part-4-chunk-fill/4.6-surface-rules.mdx) covers the surface selection logic.
+
+## Stage 14: Trees
+
+As the final operation inside `fill_chunk`, `tree_in_cell` stamps tree shapes into the chunk. The world is divided into a tree-cell grid (`TREE_CELL_SIZE` blocks per side). Each cell rolls one deterministic placement using the hash mixer from [1.2](../part-1-foundations/1.2-determinism.mdx) — if the roll falls below the biome's tree rate (`TREE_RATE_TROPICAL` for tropical, a lower rate elsewhere), a tree is placed at the cell's highest solid column. Oak round-canopy or palm spreading-fronds shapes are chosen by biome.
+
+[Chapter 4.9](../part-4-chunk-fill/4.9-trees.mdx) covers tree placement and shape selection.
+
+## What you can now do in the code
+
+You can read [`Generator::fill_chunk`](https://github.com/fdatoo/oxium/blob/main/src/worldgen/mod.rs) end to end and recognize what each block of the function does. The source is organized to match this pipeline exactly: region pre-fetch at the top, then the per-column loop (h_pre, valley carve, biome), then the per-voxel density+cave+aquifer fill, then surface rules, then trees. Every stage above maps to a clearly delimited block in that function.
+
+The chapters that follow zoom into each block one at a time.
+
+## Next
+
+→ [3.1 Plates](../part-3-region-build/3.1-plates.mdx) — the foundation of all the geography. Where continents come from.
