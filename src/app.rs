@@ -92,6 +92,11 @@ pub struct AppState {
     /// (full freeze); the renderer still draws the last frame plus the
     /// UI overlay so the menu/chat is visible.
     pub ui: crate::ui::Ui,
+    /// Per-frame `world_stream` scratch: the sorted candidate-chunk
+    /// list, cached across frames and only rebuilt when the player
+    /// crosses a chunk boundary. See
+    /// [`crate::ecs::systems::world_stream::WorldStreamCache`].
+    pub world_stream_cache: crate::ecs::systems::world_stream::WorldStreamCache,
 }
 
 /// Per-frame counters shown in the debug HUD. Cheap to keep around;
@@ -284,6 +289,8 @@ impl AppState {
             }),
             frame_edit_count: 0,
             ui,
+            world_stream_cache:
+                crate::ecs::systems::world_stream::WorldStreamCache::default(),
         }
     }
 
@@ -364,6 +371,7 @@ impl AppState {
                     &self.persistence,
                     &mut self.save_index,
                     &self.saves_dir,
+                    &mut self.world_stream_cache,
                 )
             });
             time(prof, "drain_jobs", || {
