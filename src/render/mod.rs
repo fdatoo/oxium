@@ -11,6 +11,7 @@
 //! are owned per subsystem (sky, opaque voxels, water, cursor, HUD).
 
 pub mod atlas;
+pub mod bloom;
 pub mod camera;
 pub mod font;
 pub mod gpu;
