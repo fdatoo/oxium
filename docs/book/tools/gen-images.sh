@@ -41,6 +41,26 @@ render() {
 # by Task 13 step 2; this entry exists so the script is idempotent).
 render humidity 0,0 4 256
 
+# Chapter 2.1 "The Big Picture" — one image per pipeline stage.
+# All at the book seed (42), centered at world (0, 0), 256 px wide.
+# Zoom 16 = each pixel is 16 blocks (256 px = 4096 blocks across)
+# — wide enough to see continents.
+render plate-id        0,0 16 256
+render continentalness 0,0 16 256
+render temperature     0,0 16 256
+render humidity        0,0 16 256
+render weirdness       0,0 16 256
+
+# Zoom 8 = each pixel is 8 blocks (256 px = 2048 blocks across)
+# — closer-in views where per-chunk detail starts to show.
+render h-pre             0,0 8 256
+render valley-carve      0,0 8 256
+render h-target          0,0 8 256
+render flow-accum        0,0 8 256
+render biome-id          0,0 8 256
+render aquifer-y         0,0 8 256
+render aquifer-substance 0,0 8 256
+
 # Re-generate parity reference JSON (lives in static/, not img/).
 STATIC_DIR="$(dirname "$0")/../static"
 "$DOC_RENDER" parity --output "$STATIC_DIR/parity.json"

@@ -675,14 +675,18 @@ impl Generator {
                 let biome = self.column_data(wx, wz).biome;
                 // Biome has no #[repr], so we use a hand-written mapping that
                 // is stable across all variants.
-                match biome {
-                    Biome::Tundra      => 0.0,
-                    Biome::SnowyForest => 1.0,
-                    Biome::Plains      => 2.0,
-                    Biome::Forest      => 3.0,
-                    Biome::Desert      => 4.0,
-                    Biome::Tropical    => 5.0,
-                }
+                // Return a hash-derived value in [0, 1) rather than a raw
+                // integer, so the categorical colormap's fract() normalization
+                // produces a distinct hue per biome (same trick as PlateId).
+                let idx: i32 = match biome {
+                    Biome::Tundra      => 0,
+                    Biome::SnowyForest => 1,
+                    Biome::Plains      => 2,
+                    Biome::Forest      => 3,
+                    Biome::Desert      => 4,
+                    Biome::Tropical    => 5,
+                };
+                crate::worldgen::hash::mix_unit(self.seed, &[idx, 0xB10E5_u32 as i32])
             }
             Stage::AquiferY => {
                 let acell = self.aquifer.cell_for_column(wx, wz);

@@ -21,6 +21,12 @@ const config: Config = {
 
   markdown: {
     mermaid: true,
+    // Generated pipeline images use the /oxium/ baseUrl prefix which
+    // Docusaurus cannot resolve to a local file path. The images exist in
+    // static/img/generated/ and are served correctly at runtime.
+    hooks: {
+      onBrokenMarkdownImages: 'warn',
+    },
   },
   themes: ['@docusaurus/theme-mermaid'],
 
