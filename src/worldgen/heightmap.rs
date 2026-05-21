@@ -87,19 +87,7 @@ impl HeightmapNoise {
         let cont = signed_continentalness(&look);
         let shape_noise =
             (self.terrain_shape.get([wx as f64, wz as f64]) as f32) * cfg.terrain_shape_amplitude;
-        // Blend roughness bias between the two nearest plates at same-kind
-        // boundaries (C-C / O-O) so adjacent plates with different roughness
-        // don't produce a step discontinuity in `shape`, which the offset
-        // spline at c≈±1 turns into a vertical cliff. C-O boundaries are
-        // left as a hard switch: signed_continentalness ramps c through 0
-        // there, which is what makes the coastline read as a real shore.
-        let bias = if look.a.kind == look.b.kind {
-            let wa = 0.5 + 0.5 * look.t;
-            plate_roughness_bias(&look.a, cfg) * wa
-                + plate_roughness_bias(&look.b, cfg) * (1.0 - wa)
-        } else {
-            plate_roughness_bias(&look.a, cfg)
-        };
+        let bias = plate_roughness_bias(&look.a, cfg);
         let shape = (shape_noise + bias).clamp(-1.0, 1.0);
         let ridges = (self.ridges_raw.get([wx as f64, wz as f64]) as f32) * cfg.ridges_amplitude;
         let ridges_pv = peaks_and_valleys(ridges);
