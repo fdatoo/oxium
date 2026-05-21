@@ -3,6 +3,283 @@ id: 3.2-climate
 title: 3.2 Climate
 ---
 
-import Stub from '@site/src/components/Stub';
+Biomes look discrete — you walk from desert into forest and the ground changes colour, the trees change shape, the sky might tint differently. But the engine never stores a biome label per column. What it stores is six continuous numbers — a *climate vector* — and a lookup table that maps points in that six-dimensional space to biome names. The two concerns are fully decoupled: climate is where in the world you are; biome is which name wins that position. Swap the lookup table and the same climate field produces a completely different biome distribution, without touching the noise or the heightmap.
 
-<Stub />
+## The picture
+
+![Temperature map at the book seed](/oxium/img/generated/temperature-s42-0_0-z16-w256.png)
+
+*Temperature at the book seed (42), centered at world (0, 0). Cool tones (blue-violet) mark cold regions that resolve to Tundra or SnowyForest; warm tones (yellow-orange) mark hot regions that resolve to Desert or Tropical. The field is a 2-octave Simplex FBM with a 512-block base period — one full gradient cycle covers roughly half a kilometre. 4096 blocks across (zoom 16).*
+
+![Humidity map at the book seed](/oxium/img/generated/humidity-s42-0_0-z16-w256.png)
+
+*Humidity at the same view. Independently seeded from temperature so the two axes drift apart: a column can be cold-dry (Tundra), cold-wet (SnowyForest), warm-dry (Plains), or warm-wet (Forest). The biome table carves the (temperature × humidity) plane into those four regions plus Desert and Tropical at the hot extreme.*
+
+![Weirdness map at the book seed](/oxium/img/generated/weirdness-s42-0_0-z16-w256.png)
+
+*Weirdness — the rare-variant axis. Currently the biome table spans the full weirdness range for every entry, so it does not alter the map here. Future expansions will narrow entries to specific weirdness windows, unlocking unusual biomes (ice spikes, mushroom fields) without perturbing the main temperature/humidity layout.*
+
+![Biome map at the book seed](/oxium/img/generated/biome-id-s42-0_0-z8-w256.png)
+
+*Biome ID at the book seed, zoom 8 (2048 blocks across). Each biome is assigned a distinct hue via the same hash-based trick used for plate colours in [3.1](./3.1-plates.mdx). The organic, slightly frayed edges between biome regions are produced by the per-block Voronoi jitter described below.*
+
+## Build it — the six climate axes
+
+The climate vector has six always-active components. Four come from noise fields; one is derived from plates (carried over from [3.1](./3.1-plates.mdx)); one is derived from the column's world-Y coordinate.
+
+### 1. Temperature
+
+A 2-octave Simplex FBM with a 512-block base period. Built in `Generator::new_internal` with its own seed offset:
+
+```rust
+let temperature_map = Fbm::<Simplex>::new(seed.wrapping_add(8) as u32)
+    .set_octaves(2)
+    .set_frequency(1.0 / 512.0)
+    .set_persistence(0.5);
+```
+
+Output is in roughly `[-1, 1]`. Negative values are cold; positive values are warm. The 512-block period means a player walks for about 30–40 seconds between temperature extremes — a biome transition feels like a journey, not a step.
+
+### 2. Humidity
+
+Identical construction to temperature but with a different seed offset (`seed + 9`), so the two axes are statistically independent:
+
+```rust
+let humidity_map = Fbm::<Simplex>::new(seed.wrapping_add(9) as u32)
+    .set_octaves(2)
+    .set_frequency(1.0 / 512.0)
+    .set_persistence(0.5);
+```
+
+Because they drift independently, every corner of the cold/warm × dry/wet square appears somewhere in a large world. A belt of cold temperature can be dry (Tundra) in one region and humid (SnowyForest) in another a few hundred blocks away.
+
+### 3. Continentalness
+
+Carried directly from the plate system. `HeightmapNoise::climate` calls `plate_at` and then `signed_continentalness` to produce a value in `[-1, 1]`: strongly positive over deep continental cores, strongly negative under open ocean, near zero at coastlines. The full derivation is in [3.1](./3.1-plates.mdx); from climate's perspective it is just a third independent axis that gates ocean-only biomes (or future sub-ocean variants) from continental ones.
+
+### 4. Terrain shape
+
+A 3-octave Simplex FBM (~2000-block base period by default) combined with a per-plate roughness bias:
+
+```rust
+// from src/worldgen/heightmap.rs::HeightmapNoise::climate
+let terrain_shape = Fbm::<Simplex>::new(seed.wrapping_add(303) as u32)
+    .set_octaves(3)
+    .set_frequency(1.0 / cfg.terrain_shape_period as f64)
+    .set_persistence(0.5);
+```
+
+After adding the plate roughness bias and clamping to `[-1, 1]`, high `terrain_shape` pushes the heightmap splines toward elevated, dramatic terrain; low values push toward flat, plateau-like terrain. This is both a climate axis *and* the primary input to the offset spline — the same number that biome lookup queries is the same number that governs how tall the terrain grows.
+
+### 5. Ridges PV ("peaks and valleys")
+
+A 2-octave FBM folded through a triangle-wave function called `peaks_and_valleys`:
+
+```rust
+let ridges_raw = Fbm::<Simplex>::new(seed.wrapping_add(404) as u32)
+    .set_octaves(2)
+    .set_frequency(1.0 / cfg.ridges_period as f64)
+    .set_persistence(0.5);
+let ridges_pv = peaks_and_valleys(ridges);
+```
+
+The folding converts the bipolar FBM output into a signal that is high at extreme values and low near zero — the opposite of the raw wave. When `ridges_pv` is high, the spline pipeline can produce sharp ridgelines; when low, the same `terrain_shape` produces more rounded hills. In the biome lookup the variable is passed as the `terrain_shape` axis parameter `s` (the fourth axis of `TargetPoint`). Note that `ridges_pv` feeds the heightmap but is not a separate input to the biome R-tree — the four climate noise axes that reach the lookup are temperature, humidity, continentalness, and terrain_shape.
+
+### 6. Depth
+
+Derived entirely from the column's surface world-Y — no noise field involved:
+
+```rust
+// from src/worldgen/mod.rs::column_data_with
+let depth_t = (height as f32 - cfg.density.y_min as f32)
+    / (cfg.density.y_max - cfg.density.y_min) as f32;
+let depth = 1.0 - 2.0 * depth_t; // +1 at world floor, -1 at world top
+```
+
+`depth_t` is a linear ramp from 0 (sea floor) to 1 (sky limit). Flipping and rescaling gives `depth ∈ [-1, 1]` where `+1` is the deepest cave floor and `-1` is the highest mountain peak. The current biome table spans the full range for every entry, but the axis exists so future expansions can register cave-only biomes (lava caverns, bioluminescent grottos) that activate only when `depth` is strongly positive — i.e. far underground.
+
+### 7. Weirdness
+
+A 2-octave mid-frequency Simplex FBM, seeded far from temperature and humidity:
+
+```rust
+let weirdness_noise = Fbm::<Simplex>::new(seed.wrapping_add(501) as u32)
+    .set_octaves(2)
+    .set_frequency(1.0 / bundled.biomes.weirdness_period as f64)
+    .set_persistence(0.5);
+```
+
+`weirdness_period` defaults to 800 blocks. The amplitude is a configurable multiplier (`weirdness_amplitude`, default 1.0). Weirdness is Minecraft's "rare variant" axis: narrow a biome entry to a specific weirdness range and that biome only appears where the weirdness field is in that slice, even if temperature and humidity would otherwise produce it everywhere. Currently no entries use narrow weirdness windows — every entry spans the full `[-2, 2]` range — but the infrastructure is in place for ice spikes, sunflower plains, mushroom fields, and similar rare-variant biomes in future content passes.
+
+The six axes together form the `TargetPoint`:
+
+```rust
+pub struct TargetPoint {
+    pub temperature: i64,
+    pub humidity: i64,
+    pub continentalness: i64,
+    pub terrain_shape: i64,
+    pub depth: i64,
+    pub weirdness: i64,
+    pub offset: i64,   // synthetic tie-breaker, always 0 for normal queries
+}
+```
+
+All values are stored as `i64` after quantizing by 10 000 (`f32` × 10000 → `i64`). Integer arithmetic gives byte-deterministic comparison across platforms — no floating-point rounding surprise can change which biome a column selects.
+
+## Build it — the biome table and R-tree lookup
+
+Each biome claims a *hyperbox* in the six-dimensional climate space. For every axis the claim is a closed interval `[min, max]`. A biome that does not care about an axis uses `Parameter::any()`, which spans `[-2, 2]` — the full quantized range.
+
+Here are two entries from `assets/worldgen/default.ron`:
+
+```ron
+// Tundra — cold, dry to medium humidity, any other axis.
+(
+    temperature:     (min: -20000, max: -3000),
+    humidity:        (min: -20000, max:  3000),
+    continentalness: (min: -20000, max: 20000),
+    terrain_shape:   (min: -20000, max: 20000),
+    depth:           (min: -20000, max: 20000),
+    weirdness:       (min: -20000, max: 20000),
+    offset: 0,
+    biome: Tundra,
+),
+// SnowyForest — cold + humid.
+(
+    temperature:     (min: -20000, max: -3000),
+    humidity:        (min:      0, max: 20000),
+    ...
+    biome: SnowyForest,
+),
+```
+
+The six active biomes are `Tundra`, `SnowyForest`, `Plains`, `Forest`, `Desert`, and `Tropical`. Their placement in climate space:
+
+| Biome        | Temperature   | Humidity       | Notes                                      |
+|--------------|---------------|----------------|--------------------------------------------|
+| Tundra       | cold (< −0.3) | any (< 0.3)    | Snow cap; no trees                         |
+| SnowyForest  | cold (< −0.3) | humid (> 0)    | Snow cap; taiga-style tree cover           |
+| Plains       | temperate     | dry (< 0.05)   | Grass; sparse trees                        |
+| Forest       | temperate     | humid (> 0.05) | Grass; dense tree cover                    |
+| Desert       | hot (> 0.3)   | any            | Sand; no trees                             |
+| Tropical     | hot (> 0.3)   | humid          | Grass; palm trees (placeholder)            |
+
+The lookup structure is a genuine **R-tree** — not a kd-tree, not a linear scan. `ParameterList` owns both the entry list and a built `RTree`:
+
+```rust
+pub struct ParameterList {
+    pub entries: Vec<ParameterPoint>,
+    pub tree: RTree,
+}
+```
+
+`RTree` is a bounded, bucket-sorted tree with fanout 6 (matching Minecraft's `Climate.java`). Inner nodes hold up to 6 children and a bounding hyperbox that tightly covers all descendants; leaves hold a single `ParameterPoint`. The tree is built once at world creation by `RTree::build`, which recursively buckets entries along the axis that minimises total bucket-span cost — a greedy heuristic that keeps the bounding boxes tight.
+
+The query picks the **nearest** entry by squared-L2 distance over per-axis gaps:
+
+```rust
+// from ParameterPoint::fitness
+fn fitness(&self, target: &TargetPoint) -> i64 {
+    let dt = self.temperature.distance(target.temperature);
+    let dh = self.humidity.distance(target.humidity);
+    // ... all six axes + offset ...
+    dt*dt + dh*dh + dc*dc + ds*ds + dd*dd + dw*dw + do_*do_
+}
+```
+
+`Parameter::distance` returns 0 when `target` is inside the interval and the gap to the nearest edge otherwise. So a query inside a biome's hyperbox scores 0 on that axis — which means it matches perfectly. When multiple hyperboxes contain the query point (overlap is common — Tundra and SnowyForest share the entire cold temperature range), the one with the smaller total squared gap wins. That is the tie-break: entries with tighter, more specific intervals win over entries with `any()` on most axes, because the tighter entries score 0 on more axes when the query is squarely inside them.
+
+Tree search prunes subtrees whose bounding-box distance is already equal to or greater than the current best. The engine also keeps a per-thread cache of the last winning leaf:
+
+```rust
+thread_local! {
+    static LAST_LEAF: Cell<u32> = const { Cell::new(0) };
+}
+```
+
+Adjacent voxels almost always resolve to the same biome. Seeding the search with the previous leaf's fitness sets a tight initial bound, and the tree prunes most branches on the first depth-level comparison. In practice the lookup is O(1) amortised for spatially coherent traversal patterns.
+
+## Build it — per-block Voronoi jitter
+
+Before querying the climate axes, the engine perturbs the query position by a small hash-derived offset:
+
+```rust
+// from src/worldgen/mod.rs::column_data_with
+let (jx, jz) = climate::voronoi_jitter_offset(self.seed, wx, height, wz);
+let qwx = wx + jx;
+let qwz = wz + jz;
+// All climate fields sampled at (qwx, qwz) instead of (wx, wz)
+let temperature = self.temperature_map.get([qwx as f64, qwz as f64]) as f32;
+let humidity    = self.humidity_map.get([qwx as f64, qwz as f64]) as f32;
+```
+
+`voronoi_jitter_offset` samples the 2×2×2 neighbourhood of quart-grid corners surrounding `(wx, wy, wz)` (quart = 4-block grid), hashes each corner to produce a jitter displacement, and picks the corner whose jittered world position is nearest to the query:
+
+```rust
+pub fn voronoi_jitter_offset(seed: u64, wx: i32, wy: i32, wz: i32) -> (i32, i32) {
+    // ...8 corner candidates, each jittered by hash::mix_unit...
+    let jitter_x = jx * 0.9 - 0.45;   // jitter amplitude ≈ ±0.45 quarts = ±1.8 blocks
+    let jitter_z = jz * 0.9 - 0.45;
+    // ... pick nearest jittered corner, return (best_qx*4+2 - wx, ...)
+}
+```
+
+The amplitude is bounded: tests assert `|dx| ≤ 8` and `|dz| ≤ 8` blocks. At that scale the macro biome geography is preserved — a large desert stays a large desert — but the *edge* between two biomes frays into an organic squiggle instead of aligning perfectly with an FBM contour line.
+
+This is the per-block analogue of the Voronoi jitter used for plate seeds in [3.1](./3.1-plates.mdx): same `hash::mix_unit` machinery, different scale. Plates jitter seed points by up to half a cell (~512 blocks) to avoid grid regularity. Climate jitters query positions by a few blocks to avoid mathematical-looking biome edges. Both tricks produce "naturally irregular" geometry from a hash function alone.
+
+## In the engine
+
+The full sequence in `Generator::column_data_with`:
+
+```rust
+// 1. Voronoi jitter
+let (jx, jz) = climate::voronoi_jitter_offset(self.seed, wx, height, wz);
+let qwx = wx + jx;
+let qwz = wz + jz;
+let xz_jitter = [qwx as f64, qwz as f64];
+
+// 2. Sample the six axes
+let temperature = self.temperature_map.get(xz_jitter) as f32;
+let humidity    = self.humidity_map.get(xz_jitter) as f32;
+let (c, s, _pv, _look) = self.heightmap.climate(self.seed, qwx as f32, qwz as f32, &cfg.climate);
+let weirdness   = self.weirdness_noise.get(xz_jitter) as f32 * cfg.biomes.weirdness_amplitude;
+let depth_t     = (height as f32 - cfg.density.y_min as f32)
+                  / (cfg.density.y_max - cfg.density.y_min) as f32;
+let depth       = 1.0 - 2.0 * depth_t;
+
+// 3. Build the TargetPoint (quantizes all f32 values to i64)
+let target = climate::TargetPoint::new(temperature, humidity, c, s, depth, weirdness);
+
+// 4. R-tree lookup → Biome
+let biome = self.biome_list.lookup(&target);
+```
+
+`ParameterList::lookup` is two lines:
+
+```rust
+pub fn lookup(&self, target: &TargetPoint) -> Biome {
+    let idx = self.tree.search(&self.entries, target);
+    self.entries[idx as usize].biome
+}
+```
+
+The entire path from world coordinate to `Biome` variant is deterministic, stateless between calls (aside from the per-thread last-leaf cache), and produces the same result from any thread.
+
+## What you can now do
+
+Read `src/worldgen/climate.rs` end to end — it is well under 500 lines including tests. The `ParameterPoint`, `RTree`, and `ParameterList` types are all in that file. `voronoi_jitter_offset` is also there.
+
+To experiment with biome layout, edit `assets/worldgen/default.ron`. In development mode the config file is watched; on save the new biome table is rebuilt and applied to newly generated chunks without restarting the server. The biome table is just RON data — no Rust recompilation needed to shift a temperature boundary or add a new entry.
+
+To add a new biome:
+
+1. Add a variant to the `Biome` enum in `src/worldgen/mod.rs`.
+2. Implement `snow_capped`, `tree_rate_percentile`, and `tree_kind` arms.
+3. Add one or more `ParameterPoint` entries to `default.ron`.
+4. Run `cargo test -p oxium` — the R-tree unit tests will pick up any table-parse failures immediately.
+
+## Next
+
+→ [3.3 Heightmap](./3.3-heightmap.mdx) — the spline pipeline that converts (continentalness, terrain_shape, ridges_pv) into a surface elevation, and how the density noise field carves the surface into overhangs and cave ceilings.

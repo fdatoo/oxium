@@ -3,6 +3,254 @@ id: 3.3-heightmap
 title: 3.3 Heightmap (h_pre)
 ---
 
-import Stub from '@site/src/components/Stub';
+The heightmap is the engine's most carefully tuned subsystem. Climate axes go in; a target surface elevation per column comes out. The trick is that the mapping is *authored*, not computed — three spline curves (`offset`, `factor`, `jaggedness`) shape every continent's altitude profile, and a 3D FBM adds the fine roughness that makes cliffs, overhangs, and plateaus feel hand-sculpted rather than mathematically regular.
 
-<Stub />
+## The picture
+
+![Pre-carve heightmap at the book seed](/oxium/img/generated/h-pre-s42-0_0-z8-w256.png)
+
+*Pre-carve heightmap `h_pre`. Terrain ramps from teal (near sea level, y ≈ 62) through green-tan (mid-altitude hills) to warm tones (peaks). The swirling structure reflects the spline outputs perturbed by 3D FBM. 2048 blocks across.*
+
+## Build it — the climate inputs
+
+`HeightmapNoise::climate` produces the three-axis tuple `(continentalness, terrain_shape, ridges_pv)` that feeds every spline. All three were introduced in [3.2](./3.2-climate.mdx); their roles in the heightmap are:
+
+- **`continentalness` `c` ∈ `[-1.1, 1.1]`** — the dominant elevation driver. The `offset` spline's outer layer keys on `c`, so continental cores (positive) map to land and oceanic plates (negative) map to seafloor.
+- **`terrain_shape` `s` ∈ `[-1, 1]`** — a 3-octave Simplex FBM (~2000-block period) plus a per-plate roughness bias. The `offset` spline's middle layer keys on `s` to choose how tall land actually grows: same continentalness, low `s` → flat plains; high `s` → mountain ranges.
+- **`ridges_pv` `r` ∈ `[-1, 1]`** — a 2-octave FBM folded through a triangle-wave (`peaks_and_valleys`) so extreme raw values become high ridge-signal and near-zero values become valley-signal. It feeds the `jaggedness` spline's innermost layer.
+
+The function signature is:
+
+```rust
+// src/worldgen/heightmap.rs
+pub fn climate(
+    &self,
+    seed: u64,
+    wx: f32,
+    wz: f32,
+    cfg: &ClimateConfig,
+) -> (f32, f32, f32, PlateLookup)
+// returns (continentalness, terrain_shape, ridges_pv, plate_lookup)
+```
+
+The `PlateLookup` is returned so callers (cliff detection, hydrology) can inspect plate identity without re-running `plate_at`.
+
+## Build it — the spline pipeline
+
+The three splines live on `ClimateConfig` in `src/worldgen/config.rs`:
+
+```rust
+pub struct ClimateConfig {
+    pub offset_spline:     NestedSpline,
+    pub factor_spline:     NestedSpline,
+    pub jaggedness_spline: NestedSpline,
+    // ...
+}
+```
+
+Each is a `NestedSpline` — not the flat `CubicSpline` from [1.7](../part-1-foundations/1.7-splines.mdx), but a recursive extension of it.
+
+### NestedSpline — tuple-walking cubic Hermite
+
+A `NestedSpline` is an enum:
+
+```rust
+pub enum NestedSpline {
+    Constant(f32),
+    Multipoint(Vec<NestedKnot>),
+}
+
+pub struct NestedKnot {
+    pub loc:   f32,
+    pub val:   NestedSpline,   // ← each knot's value is itself a spline
+    pub slope: f32,
+}
+```
+
+`evaluate(c, s, r)` starts at depth 0. The outer layer keys on `c` (index 0). Each knot's `val` is another `NestedSpline` keyed on `s` (depth 1), whose own knots' values are keyed on `r` (depth 2). A `Constant` at any depth short-circuits the recursion. The interpolation between two adjacent knots is the same cubic Hermite formula from [1.7](../part-1-foundations/1.7-splines.mdx):
+
+```rust
+let t = (input - k1.loc) / (k2.loc - k1.loc);
+let a = k1.slope * dx - (v2 - v1);
+let b = -k2.slope * dx + (v2 - v1);
+lerp_y + t * (1.0 - t) * (a + t * (b - a))
+```
+
+where `v1` and `v2` are themselves the results of recursing into the inner spline at depth + 1.
+
+Because `val` is a full spline (not a scalar), the *shape* of the output curve in the `s` dimension changes continuously as `c` moves from knot to knot. A continental plate at high `c` might ramp steeply with `s`; the same `s` at an oceanic plate (`c` near -1) might produce a flat, gently varying seafloor regardless of `terrain_shape`.
+
+### The three splines
+
+**`offset_spline_at(c, s, r)`** → a signed *target elevation* in normalised units. This is the dominant signal. The conversion to world-Y blocks is:
+
+```text
+surface_y = y_min + (y_max - y_min) * (1 + offset / y_gradient_amplitude) * 0.5
+```
+
+Continental cores (`c` ≈ +1) get large positive offsets → elevated terrain. Oceanic plates (`c` ≈ -1) get negative offsets → seafloor below sea level (y = 62). The slope knobs in the RON config determine how steeply elevation rises with continentalness — a gentle slope knob at the coast → gradual shoreline; a steep knob → dramatic continental shelf drop-off.
+
+**`factor_spline_at(c, s, r)`** → a *roughness multiplier* applied to the `(depth + jagged_noise)` term. Mountainous, high-terrain-shape regions typically receive a high `factor`; flat ocean floors receive a low one. This is what keeps plains actually flat even when the base 3D noise would otherwise inject fine-scale variation.
+
+**`jaggedness_spline_at(c, s, r)`** → a *sharpness modifier*. Determines whether `ridges_pv` injects sharp ridgelines (high `jagged`) or the terrain stays round and smooth (near zero). Mountain peaks near the continental interior get high jaggedness; beaches get near-zero jaggedness.
+
+### `h_pre` — composing the splines into a height
+
+```rust
+// src/worldgen/heightmap.rs
+pub fn h_pre(
+    &self,
+    seed: u64,
+    wx: f32,
+    wz: f32,
+    cfg: &ClimateConfig,
+    density: &DensityConfig,
+) -> f32 {
+    let (c, s, r, _) = self.climate(seed, wx, wz, cfg);
+    let offset = cfg.offset_spline.evaluate(c, s, r);
+    offset_to_world_y(offset, density)
+        .clamp((CAVE_FLOOR_Y + 8) as f32, MAX_TERRAIN_Y as f32)
+}
+```
+
+`h_pre` is purely 2D — one call per column, no per-voxel sampling. The output is a world-Y block coordinate in `[-112, 140]`. Everything below is the 3D density function's job.
+
+## Build it — the density composition
+
+The per-voxel density function uses `h_pre`'s offset, plus the `factor` and `jaggedness` spline outputs, to compute whether each voxel is solid or air. The composition (from `DensityNoise::evaluate`) is:
+
+```rust
+// simplified — see src/worldgen/heightmap.rs DensityNoise::evaluate
+let y_gradient = y_gradient_amplitude * (1.0 - 2.0 * t);  // +amp at y_min, -amp at y_max
+let depth = y_gradient + offset;                            // positive = below surface
+
+let j_noise = evaluate_base_3d(wx, wy, wz);               // 3D FBM rider
+let shaped_raw = (depth + jagged * j_noise) * factor;
+let shaped = if shaped_raw > 0.0 {
+    shaped_raw
+} else {
+    shaped_raw * above_surface_softening                   // soften above the surface
+};
+let base_3d = evaluate_base_3d(wx, wy, wz);
+let density = composition_scale * shaped + base_3d;
+slide(density, wy, density_cfg)                            // boundary clamping
+```
+
+The key terms:
+
+- **`y_gradient`** is the "gravity" of the composition — strongly positive deep underground, strongly negative high in the sky. Most voxels are unambiguously solid or air; only a band of a few dozen blocks near the surface is contested.
+- **`depth = y_gradient + offset`** shifts where the contested band sits. High `offset` (continental plateau) pushes the zero-crossing up; negative `offset` (ocean trench) pushes it down.
+- **`jagged * j_noise * factor`** adds the 3D FBM roughness. Above the surface (negative `depth`), the `above_surface_softening` multiplier (0.25 by default) reduces the magnitude of `shaped`, allowing overhangs and cave ceilings to form without punching solid ground into the sky.
+- **`base_3d`** adds one more pass of 3D noise after the `composition_scale` step, contributing fine surface texture and thin stalactites.
+
+`DensityNoise` is built once per `Generator::new`:
+
+```rust
+pub struct DensityNoise {
+    relief: Fbm<Simplex>,
+}
+
+impl DensityNoise {
+    pub fn new(seed: u64, density: &DensityConfig) -> Self {
+        // seed offset 701 — salted differently from HeightmapNoise (303/404)
+        // so the two noise channels do not correlate.
+        let relief = Fbm::<Simplex>::new(seed.wrapping_add(701) as u32)
+            .set_octaves(3)
+            .set_frequency(1.0 / density.base_3d_period as f64)
+            .set_persistence(0.5);
+        Self { relief }
+    }
+}
+```
+
+The seed offset 701 is deliberately far from `HeightmapNoise`'s offsets (303, 404) so the relief field is statistically independent from the climate fields. Correlated noise would make mountains and roughness always co-locate — the separation lets the `factor` spline deliberately *decouple* them.
+
+## Build it — slopes and cliffs
+
+`h_pre` is also the source of the cliff signal. `slope_at` takes a cheap 8-block finite difference:
+
+```rust
+pub fn slope_at(&self, seed, wx, wz, cfg, density) -> f32 {
+    let step = 4.0;
+    let gx = (h_pre(wx + step, wz) - h_pre(wx - step, wz)).abs() / (2.0 * step);
+    let gz = (h_pre(wx, wz + step) - h_pre(wx, wz - step)).abs() / (2.0 * step);
+    gx.max(gz)   // blocks risen per block traveled
+}
+```
+
+The window is ±4 blocks — wide enough that small-scale FBM jitter in `h_pre` doesn't register as a cliff, narrow enough to catch spline-driven terrain transitions.
+
+`is_cliff` combines the slope threshold with a coastal safety check:
+
+```rust
+pub fn is_cliff(&self, seed, wx, wz, cfg, density) -> bool {
+    // If any stencil sample dips below sea level, this is a coastal column.
+    // Coastlines are not marked as cliffs so shorelines don't render as continuous
+    // stone walls.
+    if hxp < sea || hxn < sea || hzp < sea || hzn < sea {
+        return false;
+    }
+    slope > CLIFF_SLOPE_THRESH   // 2.2 blocks/block
+}
+```
+
+Chapter [4.6](../part-4-chunk-fill/4.6-surface-rules.mdx) shows how the surface-rule system consumes the `is_cliff` flag to place bare stone instead of soil on steep faces.
+
+## In the engine
+
+`Generator::column_data_with` calls `h_pre` and `is_cliff` near the top of its column loop:
+
+```rust
+let h_pre = self
+    .heightmap
+    .h_pre(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
+
+let is_cliff = self
+    .heightmap
+    .is_cliff(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
+```
+
+The result feeds hydrology (`h_pre` drives the D8 flow direction table — chapter [3.4](./3.4-hydrology.mdx)), valley carving, tree anchor search (`DensityNoise::topmost_solid` narrows its scan to `h_target ± 16`), and chunk fill.
+
+`HeightmapNoise` is built once in `Generator::new` from a config snapshot:
+
+```rust
+pub struct HeightmapNoise {
+    terrain_shape: Fbm<Simplex>,   // seed + 303, baked at construction
+    ridges_raw:    Fbm<Simplex>,   // seed + 404, baked at construction
+}
+```
+
+The frequencies are baked at construction time. Hot-reloading `terrain_shape_period` or `ridges_period` therefore requires a generator restart. All other `ClimateConfig` knobs — spline knot tables, amplitude multipliers, roughness bias range — hot-reload freely because the spline is evaluated fresh on every column call.
+
+## The `slide` function
+
+The world has hard vertical boundaries: a deepest Y (`y_min`) below which the void floor must be solid, and a highest Y (`y_max`) above which the sky must be air. The `slide` function enforces these without a hard step:
+
+```rust
+pub fn slide(density: f32, wy: i32, cfg: &DensityConfig) -> f32 {
+    // Hard floor: below y_min, return an unoverridable +100 (solid).
+    if wy < cfg.y_min {
+        return 100.0;
+    }
+    // Top slide: within slide_top_blocks of y_max, lerp toward slide_top_target (< 0).
+    // Bottom slide: within slide_bottom_blocks of y_min, lerp toward slide_bottom_target (> 0).
+    // ...
+}
+```
+
+Near the world ceiling (`y_max`), density is lerped toward a small negative value (`slide_top_target`) — air wins regardless of what the composition computed. Near the world floor (`y_min`), density is lerped toward a small positive value (`slide_bottom_target`) — solid wins. The lerp width is tunable (`slide_top_blocks`, `slide_bottom_blocks`); without it, columns that extend very close to `y_max` would have a hard discontinuity where 3D noise could push individual voxels from solid to air in a single step, creating floating carpets at the sky limit.
+
+## What you can now do
+
+Read `src/worldgen/heightmap.rs` and `src/worldgen/config.rs` (`ClimateConfig` section) end to end. The spline evaluation logic in `NestedSpline::evaluate_inner` is around 30 lines. The density composition in `DensityNoise::evaluate` is another 30.
+
+To reshape global terrain character, edit the spline knot tables in `assets/worldgen/default.ron`. No Rust recompilation is needed — the config file is watched and hot-reloads into new chunks immediately. Some useful experiments:
+
+- Raise every `offset` knot at high continentalness to push continental interiors higher. The coastline shape stays the same because the coast is where `c ≈ 0`.
+- Increase `factor` at high `terrain_shape` to make mountainous regions feel more dramatic without touching elevation.
+- Set `jaggedness` to zero everywhere to produce smooth, rolling Minecraft-beta-style terrain with no ridgelines.
+
+## Next
+
+→ [3.4 Hydrology](./3.4-hydrology.mdx) — how `h_pre` feeds the D8 flow-direction table and how rivers, lakes, and valleys are carved before chunks are filled.

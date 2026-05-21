@@ -3,6 +3,209 @@ id: 3.5-rivers-lakes
 title: 3.5 Rivers, Valleys, Lakes
 ---
 
-import Stub from '@site/src/components/Stub';
+Chapter 3.4 produced a *graph*: every fine cell knows its drainage area, which cells cross the river threshold, and which downstream cell each one flows into. That graph says *where* rivers are. This chapter is about what a player actually sees on the ground — meandering channels, U-profile valleys, lakes that fill their basins, and deltas that flare where a river meets the ocean.
 
-<Stub />
+## The picture
+
+![Valley carve at the book seed](/oxium/img/generated/valley-carve-s42-0_0-z8-w256.png)
+
+*Valley carve. Mostly black — most pixels aren't near a river — with bright lines tracing rivers. The brightness at each river column is the depth being subtracted from `h_pre` to produce `h_target`. 2048 blocks across.*
+
+![Final heightmap with rivers carved](/oxium/img/generated/h-target-s42-0_0-z8-w256.png)
+
+*`h_target = h_pre - valley_carve`. Rivers are now visible cuts in the terrain.*
+
+## Build it — segments
+
+River cells from chapter 3.4 each point to their downhill neighbour via `flow_dir`. Connecting consecutive cell centers produces a piecewise-linear centerline. Each cell-to-cell step becomes a `RiverSegment`:
+
+```rust
+// src/worldgen/region.rs
+pub struct RiverSegment {
+    /// Centerline endpoints in world coordinates.
+    pub from: (i32, i32),
+    pub to:   (i32, i32),
+    pub width: f32,
+    /// True for an ocean-mouth segment (flared by MOUTH_FLARE_MULT).
+    pub mouth: bool,
+}
+```
+
+Both endpoints are cell centers in world blocks. Endpoints are separated by `FINE_CELL = 8` blocks (one cell) on cardinal edges, or `8 × √2` on diagonal steps. The `width` is copied from the cell's computed river width (see below). `mouth` is a flag computed once at segment-build time.
+
+Segments are built once per region, stored in `FineRegion::segments`, and reused for every chunk-fill query that touches that region.
+
+## Build it — width
+
+Width comes directly from flow accumulation:
+
+```
+width = clamp(sqrt(acc) × RIVER_WIDTH_SCALE, MIN_RIVER_WIDTH, MAX_RIVER_WIDTH)
+       = clamp(sqrt(acc) × 0.30,              1.5 blocks,       32.0 blocks)
+```
+
+This is the square-root relationship from [3.4](./3.4-hydrology.mdx) — the same one used to set the threshold. A cell at the threshold (`acc = 50`) gets `sqrt(50) × 0.30 ≈ 2.1` blocks wide. A continental trunk at `acc = 10,000` gets `sqrt(10,000) × 0.30 = 30` blocks — nearly the maximum.
+
+## Build it — meander warp
+
+A straight cell-center-to-cell-center segment looks like what it is: a grid-aligned staircase. The engine perturbs the centerline before measuring distance to it, using the same domain-warping principle as [1.6](../part-1-foundations/1.6-domain-warping.mdx) — here applied to the *segment's own axis* rather than the whole heightmap.
+
+For a given query point, `perpendicular_distance` finds the closest point along the segment (parametric `t ∈ [0, 1]`), then samples a smooth 1D hash-noise field along the physical length of the segment to produce a perpendicular offset:
+
+```rust
+// src/worldgen/hydrology.rs — perpendicular_distance (condensed)
+let amp = (seg.width * MEANDER_AMP_PER_WIDTH).min(MAX_MEANDER_AMP);
+//  = (seg.width × 0.4).min(16.0)
+
+// Hash-interpolated noise at 8-block buckets along the centerline:
+let bucket = (along_world / 8.0).floor() as i32;
+let frac   = along_world / 8.0 - bucket as f32;
+let h0 = mix_range(seed, &[seg.from.0, seg.from.1, bucket    ], -1.0, 1.0);
+let h1 = mix_range(seed, &[seg.from.0, seg.from.1, bucket + 1], -1.0, 1.0);
+let offset = (h0 * (1.0 - frac) + h1 * frac) * amp;
+
+// Apply offset perpendicular to the segment direction, then measure distance.
+let perturbed = proj + perp * offset;
+```
+
+Amplitude scales with width: `MEANDER_AMP_PER_WIDTH = 0.4`, capped at `MAX_MEANDER_AMP = 16.0` blocks. A 4-block-wide stream meanders by at most 1.6 blocks — nearly straight. A 32-block trunk river gets the full 16-block meander amplitude, bending noticeably across the landscape.
+
+Crucially, the noise input includes `seg.from` (the segment's fixed world-space anchor), so two adjacent segments share the same local coordinate system. The meander field is therefore continuous across the whole river path, not independently randomized per segment.
+
+## Build it — perpendicular lookup
+
+At chunk-fill time, `ChunkRegions::valley_carve(wx, wz, seed)` finds all segments in the current region *and* its 8 immediate neighbours, then iterates over every segment to find the deepest carve:
+
+```rust
+// src/worldgen/mod.rs — ChunkRegions::valley_carve
+pub fn valley_carve(wx: i32, wz: i32, region, neighbours, seed) -> f32 {
+    let mut max_depth: f32 = 0.0;
+    for_each_segment(region, neighbours, |seg| {
+        let d = perpendicular_distance(wx, wz, seg, seed);
+        // ... compute depth from d (see U-profile below)
+        if depth > max_depth { max_depth = depth; }
+    });
+    max_depth
+}
+```
+
+There is no kd-tree. The segment count per region is small — at most 64 × 64 = 4096 river cells per region, but in practice far fewer pass the threshold — so a linear scan over the 3 × 3 neighbourhood of segments is fast enough. The `for_each_segment` helper simply iterates `region.segments` and then `neighbours[i].segments` for each of the 8 neighbours. The 8-neighbour inclusion is what makes rivers carve continuously into adjacent regions without visible seams at region boundaries.
+
+## Build it — U-profile carve depth
+
+Given distance `d` from the warped centerline and the segment's effective `width` (post-flare for mouths), the carve depth is:
+
+```rust
+// src/worldgen/hydrology.rs — valley_carve inner loop (verbatim)
+let half_w      = width * 0.5;
+let half_valley = width * VALLEY_HALF_WIDTH_MULT;  // width × 3.0
+
+let depth = if d <= half_w {
+    RIVER_BED_DEPTH as f32                          // 4 blocks — flat bottom
+} else if d < half_valley {
+    let t = (d - half_w) / (half_valley - half_w);
+    let s = 1.0 - t * t * (3.0 - 2.0 * t);        // smoothstep(1 → 0)
+    s * RIVER_BED_DEPTH as f32
+} else {
+    0.0
+};
+```
+
+Three zones:
+
+| Zone | Range | Depth |
+|------|-------|-------|
+| Channel bed | `d ≤ width/2` | `RIVER_BED_DEPTH = 4` blocks (constant) |
+| Valley walls | `width/2 < d < width × 3.0` | 4 blocks → 0, smoothstepped |
+| Unaffected | `d ≥ width × 3.0` | 0 |
+
+The flat bottom is what makes river beds look like channels rather than narrow V-notches. The smoothstep wall (not a sine, not linear) is what makes the transition from valley floor to undisturbed hillside look naturalistic. A 10-block-wide river carves a valley 60 blocks wide at grade — wide enough to feel like an actual floodplain.
+
+`valley_carve` returns the *maximum* depth across all nearby segments, so overlapping valleys from converging tributaries merge seamlessly rather than leaving a ridge between them.
+
+## Build it — mouth flare
+
+A segment is classified as a *mouth* if its downstream neighbour's `h_pre` is at or below `SEA_LEVEL`. The check happens at segment-build time:
+
+```rust
+// src/worldgen/hydrology.rs — segment extraction
+let mouth = nx >= 0 && nz >= 0 && nx < inner && nz < inner
+    && region.h_pre[nz * inner + nx] <= SEA_LEVEL as i16;
+region.segments.push(RiverSegment { from, to, width, mouth });
+```
+
+At carve time, mouth segments have their width inflated:
+
+```rust
+let width = if seg.mouth { seg.width * MOUTH_FLARE_MULT } else { seg.width };
+//                                    × 1.6
+```
+
+A river at its maximum width of 32 blocks flares to 51 blocks at the mouth. Because the valley half-width multiplier is 3.0, the affected terrain zone widens from 96 blocks to 153 blocks — a pronounced delta fan that reads clearly as "this is where the river hits the ocean."
+
+## Build it — lakes
+
+Lakes come from the Planchon–Darboux sink-fill pass (chapter 3.4). Any cell whose *filled* height `h_fill` exceeds its natural height `h_pre` has been raised above the landscape — it sits in a basin that the fill algorithm had to raise in order to route water outward. Those cells form the interior of a lake; their filled height is the water surface:
+
+```rust
+// src/worldgen/hydrology.rs — region data extraction
+if grid.h_fill[src] > grid.h[src] {
+    bitset_set(&mut region.is_lake, dst, true);
+    region.lake_rim[dst] = grid.h_fill[src];
+}
+```
+
+`lake_rim` stores the filled elevation as an `i16` world-block height. At chunk-fill time, `ChunkRegions::lake_rim_at(wx, wz)` queries the current cell and its neighbours (to avoid visible water surface terracing at fine-cell boundaries):
+
+```rust
+// src/worldgen/mod.rs — ChunkRegions::lake_rim_at (condensed)
+fn lake_rim_at(&self, wx: i32, wz: i32) -> Option<i32> {
+    // Check the column's own cell and 8 surrounding cells
+    // (offset by ±FINE_CELL each). Return the maximum rim found.
+}
+```
+
+The maximum-rim rule means that a column on the edge of a lake inherits the lake's water surface even if the column's own fine cell wasn't classified as `is_lake`. This prevents the water surface from terracing at cell boundaries.
+
+`fill_chunk` uses the result with a two-line rule:
+
+```rust
+// src/worldgen/mod.rs — fill_chunk, block resolution
+let in_lake  = lake_rim.map_or(false, |rim| wy <= rim);
+let in_ocean = height <= SEA_LEVEL && wy <= SEA_LEVEL;
+if in_lake || in_ocean {
+    block = Block::Water;
+}
+```
+
+Any non-solid voxel at or below `lake_rim` becomes water — that is all that is required to flood the basin up to the PD-computed surface height.
+
+## In the engine
+
+The entry point at chunk time is `ChunkRegions::valley_carve`:
+
+```rust
+// src/worldgen/mod.rs — column_data_with
+let carve  = regions.valley_carve(wx, wz, self.seed);
+let height = (h_pre - carve).clamp(CAVE_FLOOR_Y as f32 + 8.0, MAX_TERRAIN_Y as f32) as i32;
+```
+
+`valley_carve` pulls segments from `primary` (the column's own region) and up to 8 surrounding `FineRegion`s and iterates over all of them. The column height is clamped so that even deep carving cannot punch through the cave floor.
+
+The `lake_rim` is fetched by a parallel call to `regions.lake_rim_at(wx, wz)` and stored in `ColumnData::lake_rim`. `fill_chunk` reads both `height` (which already reflects the valley carve) and `lake_rim` to decide block types.
+
+## What you can now do
+
+Read `src/worldgen/hydrology.rs`, functions `valley_carve` (line 687) and `perpendicular_distance` (line 743) for the full carve implementation. The segment-build loop starts at line 640. The lake-rim query is at line 784.
+
+Tuning levers in `src/worldgen/tuning.rs`:
+
+- **`RIVER_WIDTH_SCALE = 0.30`** — scale every river width up or down uniformly. Larger values make all rivers wider and their valleys broader.
+- **`VALLEY_HALF_WIDTH_MULT = 3.0`** — controls how wide the valley is relative to the channel. Increase for broad floodplains; decrease for narrow gorges.
+- **`RIVER_BED_DEPTH = 4`** — how many blocks the channel sits below the surrounding terrain. Raising this makes rivers more sunken and dramatic.
+- **`MEANDER_AMP_PER_WIDTH = 0.4`** and **`MAX_MEANDER_AMP = 16.0`** — together control how much rivers bend. The amplitude is proportional to width, so trunk rivers meander more than headwater streams; the cap prevents giant rivers from becoming unrealistically wiggly.
+- **`MOUTH_FLARE_MULT = 1.6`** — the width multiplier at ocean outlets. Increase it to make deltas more dramatic.
+
+## Next
+
+→ [3.6 Cave Systems](./3.6-cave-systems.mdx)
