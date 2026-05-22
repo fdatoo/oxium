@@ -103,6 +103,26 @@ pub struct CaveConfig {
     /// it (deeper underground), all carvers operate.
     pub underground_density_threshold: f32,
 
+    // ── Terasology depth-driven ambient ──────────────────────────────
+    /// 4-octave FBM-Simplex channels for the two-noise intersection
+    /// that defines the meandering tubes of the ambient cave layer.
+    pub tera_a: ChannelParams,
+    pub tera_b: ChannelParams,
+    /// Noise wavelength in blocks. Default 200.
+    pub tera_wave: f32,
+    /// Surface-band suppression magnitude — shift applied to noise B
+    /// near the heightmap to push the cave region off-axis. Default 0.17.
+    pub tera_supp: f32,
+    /// Block depth over which the suppression fades to zero. Default 123.
+    pub tera_supp_depth: f32,
+    /// Base radius of the cave region in noise space (at depth 0). Default 0.073.
+    pub tera_thresh_base: f32,
+    /// Depth-divisor: threshold += depth / this. Default 2229.
+    pub tera_thresh_depth: f32,
+    /// Y-anisotropy: multiplier on wy when sampling tera noise. Higher
+    /// values force tube iso-surfaces to bend horizontal. Default 3.56.
+    pub tera_y_factor: f32,
+
 }
 
 /// PR 4 biome lookup config. The 6 existing biomes (Tundra,

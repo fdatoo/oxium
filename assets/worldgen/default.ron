@@ -383,6 +383,19 @@
         // own surface-suppression term keeps cheese pockets from
         // blooming through the surface.
         underground_density_threshold: 0.0,
+
+        // ── Terasology depth-driven ambient ─────────────────────────
+        // Two 4-octave FBM-Simplex channels whose |cross-product|
+        // defines meandering tube cave regions. Carver is wired in
+        // PR1.4; these values set the noise shape and thresholds.
+        tera_a: (first_octave: -7, amplitudes: [1.0, 1.0, 1.0, 1.0]),
+        tera_b: (first_octave: -7, amplitudes: [1.0, 1.0, 1.0, 1.0]),
+        tera_wave: 200.0,
+        tera_supp: 0.17,
+        tera_supp_depth: 123.0,
+        tera_thresh_base: 0.073,
+        tera_thresh_depth: 2229.0,
+        tera_y_factor: 3.56,
     ),
 
     // ── Aquifer system (PR 7) ────────────────────────────────────────
