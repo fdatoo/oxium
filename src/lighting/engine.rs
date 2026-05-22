@@ -29,9 +29,7 @@ impl ChannelEngine {
     /// True iff there is no pending work in any of the three fields.
     /// Used by `LightEngine::is_idle` and by tests.
     pub fn is_idle(&self) -> bool {
-        self.block_nodes_to_check.is_empty()
-            && self.increase.is_empty()
-            && self.decrease.is_empty()
+        self.block_nodes_to_check.is_empty() && self.increase.is_empty() && self.decrease.is_empty()
     }
 }
 
@@ -46,8 +44,10 @@ pub struct LightEngine {
     /// Maps each changed position to its (old_block, new_block) tuple so
     /// the tick can compute the right combination of increase/decrease ops
     /// per channel without re-querying World state mid-tick.
-    pub pending_block_changes:
-        std::collections::HashMap<crate::voxel::coords::BlockPos, (crate::voxel::block::Block, crate::voxel::block::Block)>,
+    pub pending_block_changes: std::collections::HashMap<
+        crate::voxel::coords::BlockPos,
+        (crate::voxel::block::Block, crate::voxel::block::Block),
+    >,
 }
 
 impl Default for LightEngine {
@@ -92,6 +92,18 @@ impl LightEngine {
             && self.block_rgb.iter().all(ChannelEngine::is_idle)
     }
 
+    /// Total pending work across all channels: pending block-change records,
+    /// plus every entry in every increase/decrease queue for sky and RGB.
+    /// O(constant) — sums 13 lengths (1 HashMap + 4 channels × 3 fields).
+    /// Intended for budget decisions and HUD display; avoid in the hot tick path.
+    pub fn pending_ops_count(&self) -> usize {
+        let ch =
+            |c: &ChannelEngine| c.block_nodes_to_check.len() + c.increase.len() + c.decrease.len();
+        self.pending_block_changes.len()
+            + ch(&self.sky)
+            + self.block_rgb.iter().map(ch).sum::<usize>()
+    }
+
     /// Record a block change for the tick to process. Stores the
     /// (old, new) tuple in `pending_block_changes` and inserts the
     /// position into each channel's `block_nodes_to_check` so the tick
@@ -102,7 +114,8 @@ impl LightEngine {
         old_block: crate::voxel::block::Block,
         new_block: crate::voxel::block::Block,
     ) {
-        self.pending_block_changes.insert(pos, (old_block, new_block));
+        self.pending_block_changes
+            .insert(pos, (old_block, new_block));
         self.sky.block_nodes_to_check.insert(pos);
         for ch in 0..3 {
             self.block_rgb[ch].block_nodes_to_check.insert(pos);
@@ -156,7 +169,9 @@ impl LightEngine {
         // immutably via dense().
         {
             use crate::voxel::world::ChunkSlot;
-            let opacity_coords: std::collections::HashSet<_> = self.pending_block_changes.iter()
+            let opacity_coords: std::collections::HashSet<_> = self
+                .pending_block_changes
+                .iter()
                 .filter_map(|(pos, (old, new))| {
                     if registry.info(*old).opaque != registry.info(*new).opaque {
                         Some(pos.to_chunk())
@@ -184,11 +199,18 @@ impl LightEngine {
         // Phase B — drain per-channel decrease queues.
         if remaining > 0 {
             remaining = drain_decrease_channel(
-                &mut self.sky, &mut cache, chunks, registry, Channel::Sky, remaining,
+                &mut self.sky,
+                &mut cache,
+                chunks,
+                registry,
+                Channel::Sky,
+                remaining,
             );
         }
         for ch_i in 0..3 {
-            if remaining == 0 { break }
+            if remaining == 0 {
+                break;
+            }
             remaining = drain_decrease_channel(
                 &mut self.block_rgb[ch_i],
                 &mut cache,
@@ -202,11 +224,18 @@ impl LightEngine {
         // Phase C — drain per-channel increase queues.
         if remaining > 0 {
             remaining = drain_increase_channel(
-                &mut self.sky, &mut cache, chunks, registry, Channel::Sky, remaining,
+                &mut self.sky,
+                &mut cache,
+                chunks,
+                registry,
+                Channel::Sky,
+                remaining,
             );
         }
         for ch_i in 0..3 {
-            if remaining == 0 { break }
+            if remaining == 0 {
+                break;
+            }
             remaining = drain_increase_channel(
                 &mut self.block_rgb[ch_i],
                 &mut cache,
@@ -229,7 +258,7 @@ impl LightEngine {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Channel {
     Sky,
-    BlockRgb(usize),  // 0=R, 1=G, 2=B
+    BlockRgb(usize), // 0=R, 1=G, 2=B
 }
 
 /// Per-tick decompress cache. The engine touches each chunk at most a few
@@ -251,7 +280,10 @@ enum Channel {
 ///    `meta.light_gpu_dirty = true`.
 #[derive(Default)]
 pub(crate) struct TickCache {
-    inner: std::collections::HashMap<crate::voxel::coords::ChunkCoord, crate::voxel::chunk::DenseChunk>,
+    inner: std::collections::HashMap<
+        crate::voxel::coords::ChunkCoord,
+        crate::voxel::chunk::DenseChunk,
+    >,
     written: std::collections::HashSet<crate::voxel::coords::ChunkCoord>,
 }
 
@@ -269,7 +301,9 @@ impl TickCache {
     ) -> Option<&'a mut crate::voxel::chunk::DenseChunk> {
         use crate::voxel::world::ChunkSlot;
         if !self.inner.contains_key(&coord) {
-            let ChunkSlot::Stored { data, .. } = chunks.get(&coord)? else { return None };
+            let ChunkSlot::Stored { data, .. } = chunks.get(&coord)? else {
+                return None;
+            };
             self.inner.insert(coord, data.decompress());
         }
         self.inner.get_mut(&coord)
@@ -291,8 +325,12 @@ impl TickCache {
     ) {
         use crate::voxel::world::ChunkSlot;
         for coord in self.written {
-            let Some(ChunkSlot::Stored { data, meta }) = chunks.get_mut(&coord) else { continue };
-            let Some(dense) = self.inner.get(&coord) else { continue };
+            let Some(ChunkSlot::Stored { data, meta }) = chunks.get_mut(&coord) else {
+                continue;
+            };
+            let Some(dense) = self.inner.get(&coord) else {
+                continue;
+            };
             *data = std::sync::Arc::new(crate::voxel::chunk::PalettedChunk::compress(dense));
             meta.light_gpu_dirty = true;
         }
@@ -321,7 +359,9 @@ fn drain_pending_block_changes(
 
     for (pos, (old_block, new_block)) in entries {
         if budget == 0 {
-            engine.pending_block_changes.insert(pos, (old_block, new_block));
+            engine
+                .pending_block_changes
+                .insert(pos, (old_block, new_block));
             continue;
         }
         budget -= 1;
@@ -341,9 +381,7 @@ fn drain_pending_block_changes(
         // at the OLD emission level so the tear-down chain knows how
         // bright the source was.
         for ch_i in 0..3 {
-            if new_info.emission[ch_i] < old_info.emission[ch_i]
-                && old_info.emission[ch_i] > 0
-            {
+            if new_info.emission[ch_i] < old_info.emission[ch_i] && old_info.emission[ch_i] > 0 {
                 // Zero the cell on this channel first so the decrease
                 // wave doesn't see this cell as still-lit-by-source.
                 let chunk = pos.to_chunk();
@@ -353,7 +391,8 @@ fn drain_pending_block_changes(
                         let (r, g, b) = crate::voxel::chunk::unpack_rgb(dense.block_rgb[idx]);
                         let mut chans = [r, g, b];
                         chans[ch_i] = 0;
-                        dense.block_rgb[idx] = crate::voxel::chunk::pack_rgb(chans[0], chans[1], chans[2]);
+                        dense.block_rgb[idx] =
+                            crate::voxel::chunk::pack_rgb(chans[0], chans[1], chans[2]);
                         true
                     } else {
                         false
@@ -362,11 +401,13 @@ fn drain_pending_block_changes(
                 if zeroed {
                     cache.mark_written(chunk);
                 }
-                engine.block_rgb[ch_i].decrease.push(crate::lighting::queue::QueueEntry {
-                    pos,
-                    from_level: old_info.emission[ch_i],
-                    propagation_mask: 0,
-                });
+                engine.block_rgb[ch_i]
+                    .decrease
+                    .push(crate::lighting::queue::QueueEntry {
+                        pos,
+                        from_level: old_info.emission[ch_i],
+                        propagation_mask: 0,
+                    });
             }
         }
 
@@ -381,7 +422,8 @@ fn drain_pending_block_changes(
                         let (r, g, b) = crate::voxel::chunk::unpack_rgb(dense.block_rgb[idx]);
                         let mut chans = [r, g, b];
                         chans[ch_i] = new_info.emission[ch_i];
-                        dense.block_rgb[idx] = crate::voxel::chunk::pack_rgb(chans[0], chans[1], chans[2]);
+                        dense.block_rgb[idx] =
+                            crate::voxel::chunk::pack_rgb(chans[0], chans[1], chans[2]);
                         true
                     } else {
                         false
@@ -389,11 +431,13 @@ fn drain_pending_block_changes(
                 };
                 if written {
                     cache.mark_written(chunk);
-                    engine.block_rgb[ch_i].increase.push(crate::lighting::queue::QueueEntry {
-                        pos,
-                        from_level: new_info.emission[ch_i],
-                        propagation_mask: 0,
-                    });
+                    engine.block_rgb[ch_i]
+                        .increase
+                        .push(crate::lighting::queue::QueueEntry {
+                            pos,
+                            from_level: new_info.emission[ch_i],
+                            propagation_mask: 0,
+                        });
                 }
             }
         }
@@ -424,7 +468,7 @@ fn recompute_chunk_light_in_cache(
     registry: &crate::voxel::block::BlockRegistry,
     coord: crate::voxel::coords::ChunkCoord,
 ) {
-    use crate::voxel::coords::{BlockPos, LocalPos, CHUNK_DIM, CHUNK_DIM_U};
+    use crate::voxel::coords::{BlockPos, CHUNK_DIM, CHUNK_DIM_U, LocalPos};
     use glam::UVec3;
 
     let chunk_bottom_y = coord.0.y * CHUNK_DIM;
@@ -438,7 +482,9 @@ fn recompute_chunk_light_in_cache(
 
     // Scope the dense borrow so we can call cache.mark_written afterward.
     {
-        let Some(dense) = cache.dense(chunks, coord) else { return };
+        let Some(dense) = cache.dense(chunks, coord) else {
+            return;
+        };
 
         dense.sky_light.iter_mut().for_each(|v| *v = 0);
         dense.block_rgb.iter_mut().for_each(|v| *v = 0);
@@ -460,9 +506,14 @@ fn recompute_chunk_light_in_cache(
                             chunk_bottom_y + ly as i32,
                             coord.0.z * CHUNK_DIM + lz as i32,
                         ));
-                        engine.sky.increase.push(crate::lighting::queue::QueueEntry {
-                            pos, from_level: 15, propagation_mask: 0,
-                        });
+                        engine
+                            .sky
+                            .increase
+                            .push(crate::lighting::queue::QueueEntry {
+                                pos,
+                                from_level: 15,
+                                propagation_mask: 0,
+                            });
                     }
                 }
             }
@@ -487,11 +538,13 @@ fn recompute_chunk_light_in_cache(
                         ));
                         for ch_i in 0..3 {
                             if info.emission[ch_i] > 0 {
-                                engine.block_rgb[ch_i].increase.push(crate::lighting::queue::QueueEntry {
-                                    pos,
-                                    from_level: info.emission[ch_i],
-                                    propagation_mask: 0,
-                                });
+                                engine.block_rgb[ch_i].increase.push(
+                                    crate::lighting::queue::QueueEntry {
+                                        pos,
+                                        from_level: info.emission[ch_i],
+                                        propagation_mask: 0,
+                                    },
+                                );
                             }
                         }
                     }
@@ -522,16 +575,23 @@ fn drain_increase_channel(
     use crate::voxel::coords::BlockPos;
 
     let face_deltas: [(i32, i32, i32); 6] = [
-        ( 1,  0,  0), (-1,  0,  0),
-        ( 0,  1,  0), ( 0, -1,  0),
-        ( 0,  0,  1), ( 0,  0, -1),
+        (1, 0, 0),
+        (-1, 0, 0),
+        (0, 1, 0),
+        (0, -1, 0),
+        (0, 0, 1),
+        (0, 0, -1),
     ];
     let opposite_face: [u8; 6] = [1, 0, 3, 2, 5, 4];
 
     while budget > 0 {
-        let Some(entry) = ch_engine.increase.pop_highest() else { break };
+        let Some(entry) = ch_engine.increase.pop_highest() else {
+            break;
+        };
         budget -= 1;
-        if entry.from_level <= 1 { continue; }
+        if entry.from_level <= 1 {
+            continue;
+        }
 
         // Source self-write — ensure the source cell holds at least
         // `from_level`. Cache makes this cheap.
@@ -543,7 +603,8 @@ fn drain_increase_channel(
                     let cur = match channel {
                         Channel::Sky => dense.sky_light[src_idx],
                         Channel::BlockRgb(c) => {
-                            let (r, g, b) = crate::voxel::chunk::unpack_rgb(dense.block_rgb[src_idx]);
+                            let (r, g, b) =
+                                crate::voxel::chunk::unpack_rgb(dense.block_rgb[src_idx]);
                             [r, g, b][c]
                         }
                     };
@@ -551,10 +612,12 @@ fn drain_increase_channel(
                         match channel {
                             Channel::Sky => dense.sky_light[src_idx] = entry.from_level,
                             Channel::BlockRgb(c) => {
-                                let (r, g, b) = crate::voxel::chunk::unpack_rgb(dense.block_rgb[src_idx]);
+                                let (r, g, b) =
+                                    crate::voxel::chunk::unpack_rgb(dense.block_rgb[src_idx]);
                                 let mut chans = [r, g, b];
                                 chans[c] = entry.from_level;
-                                dense.block_rgb[src_idx] = crate::voxel::chunk::pack_rgb(chans[0], chans[1], chans[2]);
+                                dense.block_rgb[src_idx] =
+                                    crate::voxel::chunk::pack_rgb(chans[0], chans[1], chans[2]);
                             }
                         }
                         true
@@ -571,7 +634,9 @@ fn drain_increase_channel(
         }
 
         for face_i in 0..6 {
-            if (entry.propagation_mask >> face_i) & 1 == 1 { continue; }
+            if (entry.propagation_mask >> face_i) & 1 == 1 {
+                continue;
+            }
             let (dx, dy, dz) = face_deltas[face_i];
             let npos = BlockPos(glam::IVec3::new(
                 entry.pos.0.x + dx,
@@ -584,14 +649,20 @@ fn drain_increase_channel(
             // Single cache.dense call: read, check, write all in one borrow.
             // NLL ends the borrow at the last use of `dense` (the write),
             // allowing cache.mark_written afterward.
-            let Some(dense) = cache.dense(chunks, nchunk_coord) else { continue };
+            let Some(dense) = cache.dense(chunks, nchunk_coord) else {
+                continue;
+            };
             let nblock = dense.blocks[nidx];
             let ninfo = registry.info(nblock);
-            if ninfo.opaque { continue; }
+            if ninfo.opaque {
+                continue;
+            }
 
             let cost: u8 = if nblock == Block::Water { 3 } else { 1 };
             let prop_level = entry.from_level.saturating_sub(cost);
-            if prop_level == 0 { continue; }
+            if prop_level == 0 {
+                continue;
+            }
 
             let cur_level = match channel {
                 Channel::Sky => dense.sky_light[nidx],
@@ -600,7 +671,9 @@ fn drain_increase_channel(
                     [r, g, b][c]
                 }
             };
-            if prop_level <= cur_level { continue; }
+            if prop_level <= cur_level {
+                continue;
+            }
 
             match channel {
                 Channel::Sky => dense.sky_light[nidx] = prop_level,
@@ -608,7 +681,8 @@ fn drain_increase_channel(
                     let (r, g, b) = crate::voxel::chunk::unpack_rgb(dense.block_rgb[nidx]);
                     let mut chans = [r, g, b];
                     chans[c] = prop_level;
-                    dense.block_rgb[nidx] = crate::voxel::chunk::pack_rgb(chans[0], chans[1], chans[2]);
+                    dense.block_rgb[nidx] =
+                        crate::voxel::chunk::pack_rgb(chans[0], chans[1], chans[2]);
                 }
             }
             // dense last used above; NLL ends its borrow here.
@@ -651,18 +725,25 @@ fn drain_decrease_channel(
     use crate::voxel::coords::BlockPos;
 
     let face_deltas: [(i32, i32, i32); 6] = [
-        ( 1,  0,  0), (-1,  0,  0),
-        ( 0,  1,  0), ( 0, -1,  0),
-        ( 0,  0,  1), ( 0,  0, -1),
+        (1, 0, 0),
+        (-1, 0, 0),
+        (0, 1, 0),
+        (0, -1, 0),
+        (0, 0, 1),
+        (0, 0, -1),
     ];
     let opposite_face: [u8; 6] = [1, 0, 3, 2, 5, 4];
 
     while budget > 0 {
-        let Some(entry) = ch_engine.decrease.pop_highest() else { break };
+        let Some(entry) = ch_engine.decrease.pop_highest() else {
+            break;
+        };
         budget -= 1;
 
         for face_i in 0..6 {
-            if (entry.propagation_mask >> face_i) & 1 == 1 { continue; }
+            if (entry.propagation_mask >> face_i) & 1 == 1 {
+                continue;
+            }
             let (dx, dy, dz) = face_deltas[face_i];
             let npos = BlockPos(glam::IVec3::new(
                 entry.pos.0.x + dx,
@@ -672,7 +753,9 @@ fn drain_decrease_channel(
             let nchunk = npos.to_chunk();
             let nidx = npos.to_local().to_index();
 
-            let Some(dense) = cache.dense(chunks, nchunk) else { continue };
+            let Some(dense) = cache.dense(chunks, nchunk) else {
+                continue;
+            };
 
             let cur = match channel {
                 Channel::Sky => dense.sky_light[nidx],
@@ -690,7 +773,8 @@ fn drain_decrease_channel(
                         let (r, g, b) = crate::voxel::chunk::unpack_rgb(dense.block_rgb[nidx]);
                         let mut chans = [r, g, b];
                         chans[c] = 0;
-                        dense.block_rgb[nidx] = crate::voxel::chunk::pack_rgb(chans[0], chans[1], chans[2]);
+                        dense.block_rgb[nidx] =
+                            crate::voxel::chunk::pack_rgb(chans[0], chans[1], chans[2]);
                     }
                 }
                 let nblock = dense.blocks[nidx];
@@ -710,7 +794,8 @@ fn drain_decrease_channel(
                                 let (r, g, b) = crate::voxel::chunk::unpack_rgb(d.block_rgb[nidx]);
                                 let mut chans = [r, g, b];
                                 chans[c] = emission;
-                                d.block_rgb[nidx] = crate::voxel::chunk::pack_rgb(chans[0], chans[1], chans[2]);
+                                d.block_rgb[nidx] =
+                                    crate::voxel::chunk::pack_rgb(chans[0], chans[1], chans[2]);
                             }
                         }
                     }
@@ -751,9 +836,11 @@ fn sky_emission_for(
         crate::voxel::world::ChunkSlot,
     >,
 ) -> u8 {
-    use crate::voxel::coords::{LocalPos, CHUNK_DIM};
+    use crate::voxel::coords::{CHUNK_DIM, LocalPos};
     use crate::voxel::world::ChunkSlot;
-    let Some(ChunkSlot::Stored { meta, .. }) = chunks.get(&coord) else { return 0 };
+    let Some(ChunkSlot::Stored { meta, .. }) = chunks.get(&coord) else {
+        return 0;
+    };
     let lp = LocalPos::from_index(local_idx);
     let lsy = meta.sky_sources.lowest_source_y(lp.0.x, lp.0.z);
     if lsy == crate::lighting::NO_SOURCE_FLOOR {
@@ -796,7 +883,10 @@ mod tests {
 
     #[test]
     fn rgb_channel_all_lists_three_in_order() {
-        assert_eq!(RgbChannel::ALL, [RgbChannel::R, RgbChannel::G, RgbChannel::B]);
+        assert_eq!(
+            RgbChannel::ALL,
+            [RgbChannel::R, RgbChannel::G, RgbChannel::B]
+        );
         assert_eq!(RgbChannel::ALL.len(), 3);
     }
 
@@ -821,10 +911,16 @@ mod tests {
         e.enqueue_block_change(pos, Block::Air, Block::Stone);
 
         assert!(!e.is_idle(), "engine should not be idle after enqueue");
-        assert_eq!(e.pending_block_changes.get(&pos), Some(&(Block::Air, Block::Stone)));
+        assert_eq!(
+            e.pending_block_changes.get(&pos),
+            Some(&(Block::Air, Block::Stone))
+        );
         assert!(e.sky.block_nodes_to_check.contains(&pos));
         for ch in &e.block_rgb {
-            assert!(ch.block_nodes_to_check.contains(&pos), "all RGB channels should see the change");
+            assert!(
+                ch.block_nodes_to_check.contains(&pos),
+                "all RGB channels should see the change"
+            );
         }
     }
 
@@ -839,7 +935,10 @@ mod tests {
         e.enqueue_block_change(pos, Block::Stone, Block::Air);
         // The second call's (old, new) wins — the engine only ever sees one
         // composite delta per pos per tick.
-        assert_eq!(e.pending_block_changes.get(&pos), Some(&(Block::Stone, Block::Air)));
+        assert_eq!(
+            e.pending_block_changes.get(&pos),
+            Some(&(Block::Stone, Block::Air))
+        );
         // Set still contains pos exactly once (it's a HashSet).
         assert_eq!(e.sky.block_nodes_to_check.len(), 1);
     }
@@ -847,7 +946,7 @@ mod tests {
     #[test]
     fn tick_with_propagates_torch_light_within_a_chunk() {
         use crate::voxel::block::{Block, BlockRegistry};
-        use crate::voxel::chunk::{pack_rgb, unpack_rgb, DenseChunk, PalettedChunk};
+        use crate::voxel::chunk::{DenseChunk, PalettedChunk, pack_rgb, unpack_rgb};
         use crate::voxel::coords::{BlockPos, ChunkCoord, LocalPos};
         use crate::voxel::world::ChunkSlot;
         use glam::{IVec3, UVec3};
@@ -861,29 +960,44 @@ mod tests {
         let coord = ChunkCoord(IVec3::ZERO);
 
         let mut chunks: HashMap<ChunkCoord, ChunkSlot> = HashMap::new();
-        chunks.insert(coord, ChunkSlot::Stored {
-            data: std::sync::Arc::new(chunk),
-            meta: crate::voxel::chunk::ChunkMeta {
-                sky_sources: crate::lighting::ChunkSkyLightSources::build_from_dense(
-                    &dense, coord, &registry,
-                ),
-                ..Default::default()
+        chunks.insert(
+            coord,
+            ChunkSlot::Stored {
+                data: std::sync::Arc::new(chunk),
+                meta: crate::voxel::chunk::ChunkMeta {
+                    sky_sources: crate::lighting::ChunkSkyLightSources::build_from_dense(
+                        &dense, coord, &registry,
+                    ),
+                    ..Default::default()
+                },
             },
-        });
+        );
 
         let mut engine = LightEngine::default();
         let torch_pos = BlockPos(IVec3::new(16, 16, 16));
         // Simulate "the chunk just loaded": enqueue the torch as a source.
         let torch_info = registry.info(Block::Torch);
-        engine.block_rgb[0].increase.push(crate::lighting::queue::QueueEntry {
-            pos: torch_pos, from_level: torch_info.emission[0], propagation_mask: 0,
-        });
-        engine.block_rgb[1].increase.push(crate::lighting::queue::QueueEntry {
-            pos: torch_pos, from_level: torch_info.emission[1], propagation_mask: 0,
-        });
-        engine.block_rgb[2].increase.push(crate::lighting::queue::QueueEntry {
-            pos: torch_pos, from_level: torch_info.emission[2], propagation_mask: 0,
-        });
+        engine.block_rgb[0]
+            .increase
+            .push(crate::lighting::queue::QueueEntry {
+                pos: torch_pos,
+                from_level: torch_info.emission[0],
+                propagation_mask: 0,
+            });
+        engine.block_rgb[1]
+            .increase
+            .push(crate::lighting::queue::QueueEntry {
+                pos: torch_pos,
+                from_level: torch_info.emission[1],
+                propagation_mask: 0,
+            });
+        engine.block_rgb[2]
+            .increase
+            .push(crate::lighting::queue::QueueEntry {
+                pos: torch_pos,
+                from_level: torch_info.emission[2],
+                propagation_mask: 0,
+            });
 
         // Tick to convergence.
         engine.tick_with(&mut chunks, &registry, 50_000);
@@ -893,7 +1007,9 @@ mod tests {
         }
 
         // Verify the torch cell and an adjacent cell have RGB values.
-        let ChunkSlot::Stored { data, .. } = chunks.get(&coord).unwrap() else { panic!() };
+        let ChunkSlot::Stored { data, .. } = chunks.get(&coord).unwrap() else {
+            panic!()
+        };
         let dense = data.decompress();
         let center_idx = LocalPos(UVec3::new(16, 16, 16)).to_index();
         let adj_idx = LocalPos(UVec3::new(17, 16, 16)).to_index();
@@ -901,9 +1017,17 @@ mod tests {
         let (ar, _ag, _ab) = unpack_rgb(dense.block_rgb[adj_idx]);
         // Torch emission is [13, 13, 13]. Center holds 13; an adjacent
         // air cell receives one step of attenuation (cost 1), so >= 12.
-        assert!(cr >= 13, "torch cell R should hold its own emission: got {}", cr);
-        assert!(ar >= 12, "adjacent cell R should be lit at least 12: got {}", ar);
-        let _ = pack_rgb(0, 0, 0);  // silence unused import on warn build
+        assert!(
+            cr >= 13,
+            "torch cell R should hold its own emission: got {}",
+            cr
+        );
+        assert!(
+            ar >= 12,
+            "adjacent cell R should be lit at least 12: got {}",
+            ar
+        );
+        let _ = pack_rgb(0, 0, 0); // silence unused import on warn build
     }
 
     #[test]
@@ -943,15 +1067,18 @@ mod tests {
         let coord = ChunkCoord(IVec3::ZERO);
         let chunk = PalettedChunk::compress(&dense);
         let mut chunks: HashMap<ChunkCoord, ChunkSlot> = HashMap::new();
-        chunks.insert(coord, ChunkSlot::Stored {
-            data: std::sync::Arc::new(chunk),
-            meta: crate::voxel::chunk::ChunkMeta {
-                sky_sources: crate::lighting::ChunkSkyLightSources::build_from_dense(
-                    &dense, coord, &registry,
-                ),
-                ..Default::default()
+        chunks.insert(
+            coord,
+            ChunkSlot::Stored {
+                data: std::sync::Arc::new(chunk),
+                meta: crate::voxel::chunk::ChunkMeta {
+                    sky_sources: crate::lighting::ChunkSkyLightSources::build_from_dense(
+                        &dense, coord, &registry,
+                    ),
+                    ..Default::default()
+                },
             },
-        });
+        );
 
         let mut engine = LightEngine::default();
         // Simulate placing stone at (16, 20, 16): opacity changes 0 → 1.
@@ -970,7 +1097,9 @@ mod tests {
 
         // Verify cell directly below stone (16, 19, 16) is no longer at 15
         // (it should be dark because stone blocks the column).
-        let ChunkSlot::Stored { data, meta } = chunks.get(&coord).unwrap() else { panic!() };
+        let ChunkSlot::Stored { data, meta } = chunks.get(&coord).unwrap() else {
+            panic!()
+        };
         let dense = data.decompress();
         let below_idx = LocalPos(UVec3::new(16, 19, 16)).to_index();
         // The lowest_source_y for column (16, 16) should now be 21 (cell
@@ -999,10 +1128,13 @@ mod tests {
         dense.sky_light[0] = 9;
         let coord = ChunkCoord(IVec3::ZERO);
         let mut chunks: HashMap<ChunkCoord, ChunkSlot> = HashMap::new();
-        chunks.insert(coord, ChunkSlot::Stored {
-            data: std::sync::Arc::new(PalettedChunk::compress(&dense)),
-            meta: Default::default(),
-        });
+        chunks.insert(
+            coord,
+            ChunkSlot::Stored {
+                data: std::sync::Arc::new(PalettedChunk::compress(&dense)),
+                meta: Default::default(),
+            },
+        );
 
         let mut cache = TickCache::default();
         // First access: should decompress and return the data.
@@ -1031,10 +1163,13 @@ mod tests {
         let dense = DenseChunk::empty();
         let coord = ChunkCoord(IVec3::ZERO);
         let mut chunks: HashMap<ChunkCoord, ChunkSlot> = HashMap::new();
-        chunks.insert(coord, ChunkSlot::Stored {
-            data: std::sync::Arc::new(PalettedChunk::compress(&dense)),
-            meta: Default::default(),
-        });
+        chunks.insert(
+            coord,
+            ChunkSlot::Stored {
+                data: std::sync::Arc::new(PalettedChunk::compress(&dense)),
+                meta: Default::default(),
+            },
+        );
 
         let mut cache = TickCache::default();
         {
@@ -1044,9 +1179,14 @@ mod tests {
         cache.mark_written(coord);
         cache.flush(&mut chunks);
 
-        let ChunkSlot::Stored { data, meta } = chunks.get(&coord).unwrap() else { panic!() };
+        let ChunkSlot::Stored { data, meta } = chunks.get(&coord).unwrap() else {
+            panic!()
+        };
         assert_eq!(data.sky_light_at(42), 11);
-        assert!(meta.light_gpu_dirty, "flush must mark chunk light_gpu_dirty");
+        assert!(
+            meta.light_gpu_dirty,
+            "flush must mark chunk light_gpu_dirty"
+        );
     }
 
     #[test]
@@ -1060,10 +1200,13 @@ mod tests {
         let dense = DenseChunk::empty();
         let coord = ChunkCoord(IVec3::ZERO);
         let mut chunks: HashMap<ChunkCoord, ChunkSlot> = HashMap::new();
-        chunks.insert(coord, ChunkSlot::Stored {
-            data: std::sync::Arc::new(PalettedChunk::compress(&dense)),
-            meta: Default::default(),
-        });
+        chunks.insert(
+            coord,
+            ChunkSlot::Stored {
+                data: std::sync::Arc::new(PalettedChunk::compress(&dense)),
+                meta: Default::default(),
+            },
+        );
 
         let mut cache = TickCache::default();
         {
@@ -1073,14 +1216,19 @@ mod tests {
         // Note: NO mark_written call.
         cache.flush(&mut chunks);
 
-        let ChunkSlot::Stored { meta, .. } = chunks.get(&coord).unwrap() else { panic!() };
-        assert!(!meta.light_gpu_dirty, "flush must not mark untouched chunks dirty");
+        let ChunkSlot::Stored { meta, .. } = chunks.get(&coord).unwrap() else {
+            panic!()
+        };
+        assert!(
+            !meta.light_gpu_dirty,
+            "flush must not mark untouched chunks dirty"
+        );
     }
 
     #[test]
     fn decrease_dims_only_cells_lit_by_removed_torch() {
         use crate::voxel::block::{Block, BlockRegistry};
-        use crate::voxel::chunk::{unpack_rgb, DenseChunk, PalettedChunk};
+        use crate::voxel::chunk::{DenseChunk, PalettedChunk, unpack_rgb};
         use crate::voxel::coords::{BlockPos, ChunkCoord, LocalPos};
         use crate::voxel::world::ChunkSlot;
         use glam::{IVec3, UVec3};
@@ -1091,15 +1239,18 @@ mod tests {
         dense.set(LocalPos(UVec3::new(16, 16, 16)), Block::Torch);
         let coord = ChunkCoord(IVec3::ZERO);
         let mut chunks: HashMap<ChunkCoord, ChunkSlot> = HashMap::new();
-        chunks.insert(coord, ChunkSlot::Stored {
-            data: std::sync::Arc::new(PalettedChunk::compress(&dense)),
-            meta: crate::voxel::chunk::ChunkMeta {
-                sky_sources: crate::lighting::ChunkSkyLightSources::build_from_dense(
-                    &dense, coord, &registry,
-                ),
-                ..Default::default()
+        chunks.insert(
+            coord,
+            ChunkSlot::Stored {
+                data: std::sync::Arc::new(PalettedChunk::compress(&dense)),
+                meta: crate::voxel::chunk::ChunkMeta {
+                    sky_sources: crate::lighting::ChunkSkyLightSources::build_from_dense(
+                        &dense, coord, &registry,
+                    ),
+                    ..Default::default()
+                },
             },
-        });
+        );
 
         let mut engine = LightEngine::default();
 
@@ -1108,18 +1259,27 @@ mod tests {
         let torch_emission = registry.info(Block::Torch).emission;
         for ch_i in 0..3 {
             if torch_emission[ch_i] > 0 {
-                engine.block_rgb[ch_i].increase.push(crate::lighting::queue::QueueEntry {
-                    pos: torch_pos, from_level: torch_emission[ch_i], propagation_mask: 0,
-                });
+                engine.block_rgb[ch_i]
+                    .increase
+                    .push(crate::lighting::queue::QueueEntry {
+                        pos: torch_pos,
+                        from_level: torch_emission[ch_i],
+                        propagation_mask: 0,
+                    });
             }
         }
         engine.tick_with(&mut chunks, &registry, 50_000);
         // Confirm: adjacent cell is lit.
         let adj_idx = LocalPos(UVec3::new(17, 16, 16)).to_index();
         {
-            let ChunkSlot::Stored { data, .. } = chunks.get(&coord).unwrap() else { panic!() };
+            let ChunkSlot::Stored { data, .. } = chunks.get(&coord).unwrap() else {
+                panic!()
+            };
             let (r0, _, _) = unpack_rgb(data.decompress().block_rgb[adj_idx]);
-            assert!(r0 >= 12, "torch should light adjacent cell first; got R={r0}");
+            assert!(
+                r0 >= 12,
+                "torch should light adjacent cell first; got R={r0}"
+            );
         }
 
         // Step 2: remove the torch — replace with Air, enqueue the block change.
@@ -1132,15 +1292,20 @@ mod tests {
         engine.tick_with(&mut chunks, &registry, 50_000);
 
         // Confirm: adjacent cell is now dark on R channel.
-        let ChunkSlot::Stored { data, .. } = chunks.get(&coord).unwrap() else { panic!() };
+        let ChunkSlot::Stored { data, .. } = chunks.get(&coord).unwrap() else {
+            panic!()
+        };
         let (r1, _, _) = unpack_rgb(data.decompress().block_rgb[adj_idx]);
-        assert_eq!(r1, 0, "adjacent cell should be fully dark after torch removal; got R={r1}");
+        assert_eq!(
+            r1, 0,
+            "adjacent cell should be fully dark after torch removal; got R={r1}"
+        );
     }
 
     #[test]
     fn decrease_preserves_cells_lit_by_independent_torch() {
         use crate::voxel::block::{Block, BlockRegistry};
-        use crate::voxel::chunk::{unpack_rgb, DenseChunk, PalettedChunk};
+        use crate::voxel::chunk::{DenseChunk, PalettedChunk, unpack_rgb};
         use crate::voxel::coords::{BlockPos, ChunkCoord, LocalPos};
         use crate::voxel::world::ChunkSlot;
         use glam::{IVec3, UVec3};
@@ -1153,15 +1318,18 @@ mod tests {
         dense.set(LocalPos(UVec3::new(20, 16, 16)), Block::Torch);
         let coord = ChunkCoord(IVec3::ZERO);
         let mut chunks: HashMap<ChunkCoord, ChunkSlot> = HashMap::new();
-        chunks.insert(coord, ChunkSlot::Stored {
-            data: std::sync::Arc::new(PalettedChunk::compress(&dense)),
-            meta: crate::voxel::chunk::ChunkMeta {
-                sky_sources: crate::lighting::ChunkSkyLightSources::build_from_dense(
-                    &dense, coord, &registry,
-                ),
-                ..Default::default()
+        chunks.insert(
+            coord,
+            ChunkSlot::Stored {
+                data: std::sync::Arc::new(PalettedChunk::compress(&dense)),
+                meta: crate::voxel::chunk::ChunkMeta {
+                    sky_sources: crate::lighting::ChunkSkyLightSources::build_from_dense(
+                        &dense, coord, &registry,
+                    ),
+                    ..Default::default()
+                },
             },
-        });
+        );
 
         let mut engine = LightEngine::default();
         let pos_a = BlockPos(IVec3::new(10, 16, 16));
@@ -1170,9 +1338,13 @@ mod tests {
         for pos in [pos_a, pos_b] {
             for ch_i in 0..3 {
                 if torch_emission[ch_i] > 0 {
-                    engine.block_rgb[ch_i].increase.push(crate::lighting::queue::QueueEntry {
-                        pos, from_level: torch_emission[ch_i], propagation_mask: 0,
-                    });
+                    engine.block_rgb[ch_i]
+                        .increase
+                        .push(crate::lighting::queue::QueueEntry {
+                            pos,
+                            from_level: torch_emission[ch_i],
+                            propagation_mask: 0,
+                        });
                 }
             }
         }
@@ -1181,10 +1353,15 @@ mod tests {
         // Cell at (15, 16, 16) is midway — lit by both torches.
         let mid_idx = LocalPos(UVec3::new(15, 16, 16)).to_index();
         let mid_before = {
-            let ChunkSlot::Stored { data, .. } = chunks.get(&coord).unwrap() else { panic!() };
+            let ChunkSlot::Stored { data, .. } = chunks.get(&coord).unwrap() else {
+                panic!()
+            };
             unpack_rgb(data.decompress().block_rgb[mid_idx]).0
         };
-        assert!(mid_before >= 7, "midway cell should be lit by both torches; got R={mid_before}");
+        assert!(
+            mid_before >= 7,
+            "midway cell should be lit by both torches; got R={mid_before}"
+        );
 
         // Remove torch A.
         if let Some(ChunkSlot::Stored { data, .. }) = chunks.get_mut(&coord) {
@@ -1197,12 +1374,39 @@ mod tests {
 
         // The midway cell should STILL be lit (by torch B).
         let mid_after = {
-            let ChunkSlot::Stored { data, .. } = chunks.get(&coord).unwrap() else { panic!() };
+            let ChunkSlot::Stored { data, .. } = chunks.get(&coord).unwrap() else {
+                panic!()
+            };
             unpack_rgb(data.decompress().block_rgb[mid_idx]).0
         };
         assert!(
             mid_after >= 4,
             "midway cell should remain lit by torch B after torch A removed; got R={mid_after} (was {mid_before})",
         );
+    }
+
+    #[test]
+    fn pending_ops_count_reports_queue_depth() {
+        use crate::lighting::queue::QueueEntry;
+        use crate::voxel::coords::BlockPos;
+        use glam::IVec3;
+
+        let mut e = LightEngine::default();
+        assert_eq!(e.pending_ops_count(), 0, "fresh engine has no pending ops");
+
+        // Push one entry into the sky increase queue directly.
+        e.sky.increase.push(QueueEntry {
+            pos: BlockPos(IVec3::ZERO),
+            from_level: 15,
+            propagation_mask: 0,
+        });
+        assert!(
+            e.pending_ops_count() > 0,
+            "count should be non-zero after enqueue"
+        );
+
+        // Drain it.
+        let _ = e.sky.increase.pop_highest();
+        assert_eq!(e.pending_ops_count(), 0, "count should be zero after drain");
     }
 }

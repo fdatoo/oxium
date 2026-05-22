@@ -99,9 +99,8 @@ impl BucketQueue {
         self.nonempty_mask == 0
     }
 
-    /// Total entries across all buckets. O(16) — fine for tests, avoid in
-    /// hot paths.
-    #[cfg(test)]
+    /// Total entries across all buckets. O(16) — fine for debug/HUD, avoid in
+    /// hot propagation paths.
     pub fn len(&self) -> usize {
         self.buckets.iter().map(|b| b.len()).sum()
     }
@@ -226,7 +225,10 @@ mod tests {
         }
         assert_eq!(q.len(), 11);
         q.purge_chunk(ChunkCoord(IVec3::ZERO));
-        assert!(q.is_empty(), "mask should be fully cleared after purge of all-matching chunk");
+        assert!(
+            q.is_empty(),
+            "mask should be fully cleared after purge of all-matching chunk"
+        );
         assert_eq!(q.pop_highest(), None);
     }
 }
