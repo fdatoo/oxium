@@ -17,8 +17,12 @@ use crate::voxel::coords::{LocalPos, CHUNK_DIM_U};
 use glam::UVec3;
 use std::collections::VecDeque;
 
+pub mod engine;
+pub mod queue;
 pub mod sky_sources;
 
+pub use engine::{ChannelEngine, LightEngine, RgbChannel};
+pub use queue::{BucketQueue, QueueEntry};
 pub use sky_sources::{ChunkSkyLightSources, NO_SOURCE_FLOOR};
 
 /// Chunk side length as a signed integer (mirrors `D` in the mesher).

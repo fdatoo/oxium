@@ -37,6 +37,11 @@ pub struct World {
     pub chunks: HashMap<ChunkCoord, ChunkSlot>,
     pub registry: BlockRegistry,
     pub seed: u64,
+    /// Per-voxel graph light propagator. PR2 ships this as an idle
+    /// skeleton; nothing calls `light_engine.tick` yet. PR3 wires
+    /// `set_block` and chunk-load to enqueue work here, and the
+    /// frame loop ticks the engine each frame.
+    pub light_engine: crate::lighting::LightEngine,
 }
 
 impl World {
@@ -47,6 +52,7 @@ impl World {
             chunks: HashMap::new(),
             registry: BlockRegistry::new(),
             seed,
+            light_engine: crate::lighting::LightEngine::default(),
         }
     }
 
@@ -268,5 +274,17 @@ mod tests {
                 assert_eq!(meta.sky_sources.lowest_source_y(lx, lz), NO_SOURCE_FLOOR);
             }
         }
+    }
+
+    /// World::new must construct a default LightEngine alongside the
+    /// chunks map and registry. The engine is idle (no queued work)
+    /// on a fresh world — PR3 will start feeding it.
+    #[test]
+    fn new_world_has_idle_light_engine() {
+        let w = World::new(42);
+        assert!(
+            w.light_engine.is_idle(),
+            "freshly-constructed World must have an idle LightEngine",
+        );
     }
 }
