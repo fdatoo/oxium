@@ -876,6 +876,8 @@ struct CarverCorner {
     pillar: f32,
     pillar_rare: f32,
     pillar_thick: f32,
+    tera_a: f32,
+    tera_b: f32,
 }
 
 /// Pre-sampled noise lattice for the carver layers. Built once per
@@ -926,12 +928,27 @@ impl CarverEvaluator {
                         .get([wx as f64, wy as f64, wz as f64])
                         as f32;
 
+                    let tera_freq = 1.0 / cfg.tera_wave;
+                    let tera_wy = wy as f32 * cfg.tera_y_factor;
+                    let tera_a = carvers.tera_a.get([
+                        (wx as f32 * tera_freq) as f64,
+                        (tera_wy * tera_freq) as f64,
+                        (wz as f32 * tera_freq) as f64,
+                    ]) as f32;
+                    let tera_b = carvers.tera_b.get([
+                        (wx as f32 * tera_freq) as f64,
+                        (tera_wy * tera_freq) as f64,
+                        (wz as f32 * tera_freq) as f64,
+                    ]) as f32;
+
                     corners[idx] = CarverCorner {
                         cheese,
                         cave_layer,
                         pillar,
                         pillar_rare,
                         pillar_thick,
+                        tera_a,
+                        tera_b,
                     };
                 }
             }
@@ -1010,6 +1027,22 @@ impl CarverEvaluator {
         }
         let depth = (raw - cfg.pillar_cutoff).clamp(0.0, 1.0);
         cfg.pillar_intensity * depth
+    }
+
+    /// Trilerp the pre-sampled tera_a and tera_b noise values, then run the
+    /// same `terasology_ambient` arithmetic on the lerped result. Exact at
+    /// corners by construction.
+    pub fn terasology_ambient_at(
+        &self, wx: i32, wy: i32, wz: i32, cfg: &CaveConfig, surface_y: f32,
+    ) -> f32 {
+        let lc = self.lerp_coords(wx, wy, wz);
+        let n0_raw = self.trilerp(&lc, |c| c.tera_a);
+        let n1_raw = self.trilerp(&lc, |c| c.tera_b);
+        let depth = (surface_y - wy as f32).max(0.0);
+        let freq_reduction = (cfg.tera_supp - depth / cfg.tera_supp_depth).max(0.0);
+        let freq_depth     = cfg.tera_thresh_base + depth / cfg.tera_thresh_depth;
+        let n1 = n1_raw + freq_reduction;
+        ((n0_raw * n0_raw + n1 * n1).sqrt() - freq_depth) * 5.0
     }
 
 }
@@ -1327,6 +1360,13 @@ mod tests {
                     assert!(
                         (direct - lerped).abs() < 1e-5,
                         "pillar mismatch at ({wx},{wy},{wz}): direct={direct} lerp={lerped}"
+                    );
+
+                    let direct = terasology_ambient(wx, wy, wz, &nc, &cfg.cave, 64.0);
+                    let lerped = eval.terasology_ambient_at(wx, wy, wz, &cfg.cave, 64.0);
+                    assert!(
+                        (direct - lerped).abs() < 1e-5,
+                        "tera mismatch at ({wx},{wy},{wz}): direct={direct} lerp={lerped}"
                     );
                 }
             }

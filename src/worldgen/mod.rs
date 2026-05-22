@@ -800,6 +800,15 @@ impl Generator {
         } else {
             0.0
         };
+        // Terasology ambient carver — same surface buffer + floor gate.
+        let probe_surface_y = self
+            .heightmap
+            .h_pre(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
+        let tera = if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
+            caves::terasology_ambient(wx, wy, wz, &self.noise_carvers, &cfg.cave, probe_surface_y)
+        } else {
+            0.0
+        };
 
         // Compose to a signed final density the same way fill_chunk
         // does: start from `raw_density`, then `min()` in each cave
@@ -818,6 +827,9 @@ impl Generator {
         }
         if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
             final_density = final_density.min(cheese);
+        }
+        if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
+            final_density = final_density.min(tera);
         }
         if pillar > 0.0 {
             final_density = final_density.max(pillar);
@@ -880,6 +892,12 @@ impl Generator {
                         ),
                     );
                 }
+                if scan_approx_depth > CAVE_SURFACE_BUFFER && scan_y > CAVE_FLOOR_Y {
+                    let scan_tera = caves::terasology_ambient(
+                        wx, scan_y, wz, &self.noise_carvers, &cfg.cave, probe_surface_y,
+                    );
+                    scan_cave = scan_cave.max(scan_tera);
+                }
                 let scan_pillar = if scan_approx_depth > CAVE_SURFACE_BUFFER && scan_y > CAVE_FLOOR_Y {
                     caves::pillar_contribution(wx, scan_y, wz, &self.noise_carvers, &cfg.cave)
                 } else {
@@ -931,6 +949,7 @@ impl Generator {
             base_3d,
             cave_sdf: cave_sdf_val,
             cheese,
+            tera,
             pillar,
             final_density,
             block,
@@ -1016,6 +1035,12 @@ impl Generator {
                 let col = self.column_data_with(wx, wz, &regions);
                 let height = col.height;
                 let lake_rim = col.lake_rim;
+                // h_pre is the pre-carve surface Y, used by the tera
+                // surface-suppression depth term. Computed once per
+                // XZ column so the inner y-loop pays no noise cost.
+                let surface_y = self
+                    .heightmap
+                    .h_pre(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
 
                 // PR A: density-based top-down scan. The "surface" is
                 // wherever density transitions from negative (air) to
@@ -1117,6 +1142,18 @@ impl Generator {
                     {
                         let cheese = carver_eval.cheese_at(wx, wy, wz, raw_density, &cfg.cave);
                         composed = composed.min(cheese);
+                    }
+
+                    // Terasology ambient carver: depth-driven 2-noise
+                    // cave layer. Same surface buffer + floor gate as
+                    // cheese.
+                    // Tera intentionally skips the underground_density_threshold gate;
+                    // its own freq_reduction provides surface suppression.
+                    if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
+                        let tera = carver_eval.terasology_ambient_at(
+                            wx, wy, wz, &cfg.cave, surface_y,
+                        );
+                        composed = composed.min(tera);
                     }
 
                     // MC-style procedural carver mask. Hard carve to

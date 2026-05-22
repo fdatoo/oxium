@@ -54,6 +54,7 @@ pub fn show(ui: &mut Ui, snapshot: &ColumnProbe, breakdown: Option<&DensityBreak
             kv(ui, "base_3d", fmt(b.base_3d));
             kv(ui, "cave_sdf", fmt(b.cave_sdf));
             kv(ui, "cheese", fmt(b.cheese));
+            kv(ui, "tera", fmt(b.tera));
             kv(ui, "pillar", fmt(b.pillar));
             kv(ui, "final_density", fmt(b.final_density));
             kv(ui, "block", format!("{:?}", b.block));

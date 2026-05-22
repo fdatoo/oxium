@@ -73,6 +73,8 @@ pub struct DensityBreakdown {
     pub cave_sdf: f32,
     /// Cheese carver contribution.
     pub cheese: f32,
+    /// Terasology ambient carver contribution.
+    pub tera: f32,
     /// Pillar contribution (adds back density inside carved volumes).
     pub pillar: f32,
     /// Composed density after all contributions (post-slide).
