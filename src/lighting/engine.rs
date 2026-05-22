@@ -42,6 +42,12 @@ impl ChannelEngine {
 pub struct LightEngine {
     pub sky: ChannelEngine,
     pub block_rgb: [ChannelEngine; 3],
+    /// Side-table populated by `on_block_changed`, drained by `tick`.
+    /// Maps each changed position to its (old_block, new_block) tuple so
+    /// the tick can compute the right combination of increase/decrease ops
+    /// per channel without re-querying World state mid-tick.
+    pub pending_block_changes:
+        std::collections::HashMap<crate::voxel::coords::BlockPos, (crate::voxel::block::Block, crate::voxel::block::Block)>,
 }
 
 impl Default for LightEngine {
@@ -51,6 +57,7 @@ impl Default for LightEngine {
             // [ChannelEngine; 3] doesn't auto-derive Default (ChannelEngine
             // isn't Copy because of HashSet/VecDeque), so build via from_fn.
             block_rgb: std::array::from_fn(|_| ChannelEngine::default()),
+            pending_block_changes: std::collections::HashMap::new(),
         }
     }
 }
@@ -80,7 +87,26 @@ impl RgbChannel {
 impl LightEngine {
     /// True iff every channel reports `is_idle`.
     pub fn is_idle(&self) -> bool {
-        self.sky.is_idle() && self.block_rgb.iter().all(ChannelEngine::is_idle)
+        self.pending_block_changes.is_empty()
+            && self.sky.is_idle()
+            && self.block_rgb.iter().all(ChannelEngine::is_idle)
+    }
+
+    /// Record a block change for the tick to process. Stores the
+    /// (old, new) tuple in `pending_block_changes` and inserts the
+    /// position into each channel's `block_nodes_to_check` so the tick
+    /// knows to look at this position on every channel.
+    pub fn enqueue_block_change(
+        &mut self,
+        pos: crate::voxel::coords::BlockPos,
+        old_block: crate::voxel::block::Block,
+        new_block: crate::voxel::block::Block,
+    ) {
+        self.pending_block_changes.insert(pos, (old_block, new_block));
+        self.sky.block_nodes_to_check.insert(pos);
+        for ch in 0..3 {
+            self.block_rgb[ch].block_nodes_to_check.insert(pos);
+        }
     }
 
     /// Drain up to `budget` queued nodes from the engine's queues. PR2
@@ -146,5 +172,40 @@ mod tests {
         for ch in RgbChannel::ALL {
             assert!(e.block_rgb[usize::from(ch)].is_idle());
         }
+    }
+
+    #[test]
+    fn enqueue_block_change_populates_side_table_and_all_channels() {
+        use crate::voxel::block::Block;
+        use crate::voxel::coords::BlockPos;
+        use glam::IVec3;
+        let mut e = LightEngine::default();
+        assert!(e.is_idle());
+
+        let pos = BlockPos(IVec3::new(1, 2, 3));
+        e.enqueue_block_change(pos, Block::Air, Block::Stone);
+
+        assert!(!e.is_idle(), "engine should not be idle after enqueue");
+        assert_eq!(e.pending_block_changes.get(&pos), Some(&(Block::Air, Block::Stone)));
+        assert!(e.sky.block_nodes_to_check.contains(&pos));
+        for ch in &e.block_rgb {
+            assert!(ch.block_nodes_to_check.contains(&pos), "all RGB channels should see the change");
+        }
+    }
+
+    #[test]
+    fn enqueue_block_change_overwrites_repeat_at_same_pos() {
+        use crate::voxel::block::Block;
+        use crate::voxel::coords::BlockPos;
+        use glam::IVec3;
+        let mut e = LightEngine::default();
+        let pos = BlockPos(IVec3::ZERO);
+        e.enqueue_block_change(pos, Block::Air, Block::Stone);
+        e.enqueue_block_change(pos, Block::Stone, Block::Air);
+        // The second call's (old, new) wins — the engine only ever sees one
+        // composite delta per pos per tick.
+        assert_eq!(e.pending_block_changes.get(&pos), Some(&(Block::Stone, Block::Air)));
+        // Set still contains pos exactly once (it's a HashSet).
+        assert_eq!(e.sky.block_nodes_to_check.len(), 1);
     }
 }
