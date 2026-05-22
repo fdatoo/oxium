@@ -779,10 +779,10 @@ impl Generator {
         let approx_depth = height - wy;
 
         // Graph-cave SDF + entrance SDF (gated by CAVE_SURFACE_BUFFER + CAVE_FLOOR_Y
-        // + SURFACE_BAND upper bound so chambers never carve above h_target + SURFACE_BAND).
+        // upper bound so chambers never carve above h_target).
         let mut cave_sdf_val = 0.0_f32;
         if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y
-            && wy <= height + SURFACE_BAND
+            && wy <= height
         {
             if approx_depth > CAVE_SURFACE_BUFFER {
                 cave_sdf_val = cave_sdf_val.max(
@@ -912,7 +912,7 @@ impl Generator {
                 let scan_approx_depth = height - scan_y;
                 let mut scan_cave = 0.0_f32;
                 if !cave_systems.is_empty() && scan_y > CAVE_FLOOR_Y
-                    && scan_y <= height + SURFACE_BAND
+                    && scan_y <= height
                 {
                     if scan_approx_depth > CAVE_SURFACE_BUFFER {
                         scan_cave = scan_cave.max(caves::cave_sdf(wx, scan_y, wz, &cave_systems));
@@ -1164,7 +1164,7 @@ impl Generator {
                     // toward (or below) zero. smin(k>0) additionally
                     // blends nearly-touching cave volumes together.
                     if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y
-                        && wy <= height + SURFACE_BAND
+                        && wy <= height
                     {
                         if approx_depth > CAVE_SURFACE_BUFFER {
                             let sdf = caves::cave_sdf(wx, wy, wz, &cave_systems);
@@ -1428,14 +1428,21 @@ impl Generator {
                     }
 
                     // Scan downward for the first solid voxel in this chunk.
+                    // Limit search to MAX_BREACH_SEARCH_DEPTH: a voxel that's
+                    // Air with solid stone 30 blocks below is a buried chamber,
+                    // not a surface breach, and shouldn't get a surface stamp.
+                    const MAX_BREACH_SEARCH_DEPTH: i32 = 4;
                     let mut floor_ly = ly_at_h - 1;
+                    let mut steps = 0;
                     while floor_ly >= 0
                         && out.get(LocalPos(UVec3::new(x, floor_ly as u32, z))) == Block::Air
+                        && steps < MAX_BREACH_SEARCH_DEPTH
                     {
                         floor_ly -= 1;
+                        steps += 1;
                     }
-                    if floor_ly < 0 {
-                        continue; // Floor is below chunk bottom; skip.
+                    if floor_ly < 0 || steps >= MAX_BREACH_SEARCH_DEPTH {
+                        continue; // Floor is too deep; this is a buried chamber, not a surface breach.
                     }
 
                     // Determine the appropriate surface block for this
@@ -1491,14 +1498,18 @@ impl Generator {
                             }
                             // The neighbour's floor: scan from the same
                             // ly_at_h level downward to find *its* floor.
+                            // Same MAX_BREACH_SEARCH_DEPTH cap as the primary scan.
                             let mut nly = ly_at_h - 1;
+                            let mut nsteps = 0;
                             while nly >= 0
                                 && out.get(LocalPos(UVec3::new(nx as u32, nly as u32, nz as u32)))
                                     == Block::Air
+                                && nsteps < MAX_BREACH_SEARCH_DEPTH
                             {
                                 nly -= 1;
+                                nsteps += 1;
                             }
-                            if nly < 0 {
+                            if nly < 0 || nsteps >= MAX_BREACH_SEARCH_DEPTH {
                                 continue;
                             }
                             let n_floor_pos =
