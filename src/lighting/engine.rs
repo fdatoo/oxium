@@ -581,6 +581,144 @@ fn drain_increase_channel(
     budget
 }
 
+/// Phase B — drain a single channel's decrease queue using the Minecraft
+/// algorithm: for each popped entry, walk the 6 faces; if the neighbour
+/// was lit BY this source (cur < entry.from_level), tear down its value
+/// to 0 and push the neighbour as a decrease op so the tear-down chain
+/// continues. If the neighbour is at least as bright (cur >= from_level),
+/// it's lit by an independent source — re-flood from there via the
+/// increase queue.
+///
+/// Special case: if the torn-down cell is itself an emitter (torch on
+/// block-light channel, source cell on sky channel), restore its
+/// emission and re-flood. This handles the "decrease wave passes through
+/// a torch" case without erasing the torch's contribution.
+fn drain_decrease_channel(
+    ch_engine: &mut ChannelEngine,
+    cache: &mut TickCache,
+    chunks: &std::collections::HashMap<
+        crate::voxel::coords::ChunkCoord,
+        crate::voxel::world::ChunkSlot,
+    >,
+    registry: &crate::voxel::block::BlockRegistry,
+    channel: Channel,
+    mut budget: usize,
+) -> usize {
+    use crate::voxel::coords::BlockPos;
+
+    let face_deltas: [(i32, i32, i32); 6] = [
+        ( 1,  0,  0), (-1,  0,  0),
+        ( 0,  1,  0), ( 0, -1,  0),
+        ( 0,  0,  1), ( 0,  0, -1),
+    ];
+    let opposite_face: [u8; 6] = [1, 0, 3, 2, 5, 4];
+
+    while budget > 0 {
+        let Some(entry) = ch_engine.decrease.pop_highest() else { break };
+        budget -= 1;
+
+        for face_i in 0..6 {
+            if (entry.propagation_mask >> face_i) & 1 == 1 { continue; }
+            let (dx, dy, dz) = face_deltas[face_i];
+            let npos = BlockPos(glam::IVec3::new(
+                entry.pos.0.x + dx,
+                entry.pos.0.y + dy,
+                entry.pos.0.z + dz,
+            ));
+            let nchunk = npos.to_chunk();
+            let nidx = npos.to_local().to_index();
+
+            let Some(dense) = cache.dense(chunks, nchunk) else { continue };
+
+            let cur = match channel {
+                Channel::Sky => dense.sky_light[nidx],
+                Channel::BlockRgb(c) => {
+                    let (r, g, b) = crate::voxel::chunk::unpack_rgb(dense.block_rgb[nidx]);
+                    [r, g, b][c]
+                }
+            };
+
+            if cur != 0 && cur < entry.from_level {
+                // Neighbour was lit by us — tear it down to 0.
+                match channel {
+                    Channel::Sky => dense.sky_light[nidx] = 0,
+                    Channel::BlockRgb(c) => {
+                        let (r, g, b) = crate::voxel::chunk::unpack_rgb(dense.block_rgb[nidx]);
+                        let mut chans = [r, g, b];
+                        chans[c] = 0;
+                        dense.block_rgb[nidx] = crate::voxel::chunk::pack_rgb(chans[0], chans[1], chans[2]);
+                    }
+                }
+                let nblock = dense.blocks[nidx];
+                // dense last written above; read nblock while still alive.
+                let emission = match channel {
+                    Channel::Sky => sky_emission_for(nchunk, nidx, chunks),
+                    Channel::BlockRgb(c) => registry.info(nblock).emission[c],
+                };
+                cache.mark_written(nchunk);
+
+                if emission > 0 {
+                    // Restore independent emission and re-flood from this cell.
+                    if let Some(d) = cache.dense(chunks, nchunk) {
+                        match channel {
+                            Channel::Sky => d.sky_light[nidx] = emission,
+                            Channel::BlockRgb(c) => {
+                                let (r, g, b) = crate::voxel::chunk::unpack_rgb(d.block_rgb[nidx]);
+                                let mut chans = [r, g, b];
+                                chans[c] = emission;
+                                d.block_rgb[nidx] = crate::voxel::chunk::pack_rgb(chans[0], chans[1], chans[2]);
+                            }
+                        }
+                    }
+                    ch_engine.increase.push(crate::lighting::queue::QueueEntry {
+                        pos: npos,
+                        from_level: emission,
+                        propagation_mask: 0,
+                    });
+                }
+
+                ch_engine.decrease.push(crate::lighting::queue::QueueEntry {
+                    pos: npos,
+                    from_level: cur,
+                    propagation_mask: 1u8 << opposite_face[face_i],
+                });
+            } else if cur >= entry.from_level && cur > 0 {
+                // Neighbour is independently sourced — re-flood to repair.
+                ch_engine.increase.push(crate::lighting::queue::QueueEntry {
+                    pos: npos,
+                    from_level: cur,
+                    propagation_mask: 0,
+                });
+            }
+        }
+    }
+
+    budget
+}
+
+/// Helper for the sky channel's "is this cell itself a sky source?"
+/// check during decrease. Returns 15 if the cell at `(coord, idx)` sits
+/// at or above the column's `lowest_source_y`, else 0.
+fn sky_emission_for(
+    coord: crate::voxel::coords::ChunkCoord,
+    local_idx: usize,
+    chunks: &std::collections::HashMap<
+        crate::voxel::coords::ChunkCoord,
+        crate::voxel::world::ChunkSlot,
+    >,
+) -> u8 {
+    use crate::voxel::coords::{LocalPos, CHUNK_DIM};
+    use crate::voxel::world::ChunkSlot;
+    let Some(ChunkSlot::Stored { meta, .. }) = chunks.get(&coord) else { return 0 };
+    let lp = LocalPos::from_index(local_idx);
+    let lsy = meta.sky_sources.lowest_source_y(lp.0.x, lp.0.z);
+    if lsy == crate::lighting::NO_SOURCE_FLOOR {
+        return 15;
+    }
+    let world_y = coord.0.y * CHUNK_DIM + lp.0.y as i32;
+    if world_y >= lsy { 15 } else { 0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
