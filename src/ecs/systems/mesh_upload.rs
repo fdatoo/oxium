@@ -63,25 +63,12 @@ pub fn drain_jobs(
 
                 // Hand the new chunk to the graph engine. on_chunk_loaded
                 // enqueues sky sources, emissives, and neighbour boundary
-                // cells; the engine's next tick spreads them.
+                // cells; the engine's next tick spreads them. Replaces the
+                // old "mark_below_dirty + self+6 cascade" bandaids that
+                // sat here before the graph-engine cutover — those tried
+                // to compensate for the per-chunk BFS not knowing about
+                // out-of-order neighbour arrivals.
                 world.on_chunk_loaded(coord);
-
-                // Used to cascade `dirty.light` to self + 6
-                // neighbours here for "underground chunks generated
-                // with no above-neighbour need re-lighting." But the
-                // mark rate from initial stream-in (`~16 gens/frame
-                // × 7 marks each = 112 marks/frame`) buried the
-                // rayon pool: relight jobs piled up faster than the
-                // pump could drain them, and the mesh jobs for the
-                // freshly-generated chunks waited behind that pile.
-                // Result: huge white voids where chunks should be.
-                //
-                // Accepting slightly-too-bright underground lighting
-                // is a much better trade than chunks failing to
-                // render at all. Cascade still fires on real
-                // boundary changes from the Relit handler's
-                // `changed_faces` path, so light propagation
-                // through tunnels still works after player edits.
 
                 // Spawn LOD0 mesh for this chunk AND any already-
                 // loaded neighbours — when an out-of-order arrival
@@ -150,10 +137,24 @@ pub fn drain_jobs(
                     meta,
                 }) = world.chunks.get_mut(&coord)
                 {
+                    // Preserve any `dirty.light` mark added *during the
+                    // in-flight window* — between the pump clearing the
+                    // flag (`relight_pump`) and this result landing.
+                    // Such marks come from a cascade chain or a
+                    // `+Y`-arrival mark that reached this chunk after
+                    // its relight was dispatched but before it
+                    // returned, and they want a fresh relight against
+                    // even-newer neighbour state. Unconditionally
+                    // resetting to `false` here used to drop those
+                    // marks, leaving stale lighting in cells the
+                    // cascade had already passed (visible as the
+                    // "lit/dark patchwork" reported on adjacent
+                    // chunks under deep water).
+                    let still_dirty = meta.dirty.light;
                     *cur = data_arc.clone();
                     meta.dirty = ChunkDirty {
                         mesh: true,
-                        light: false,
+                        light: still_dirty,
                     };
                     meta.state = ChunkState::Generated;
                     // Deliberately NOT bumping `mesh_version` here.
