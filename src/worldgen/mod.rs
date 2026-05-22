@@ -784,6 +784,9 @@ impl Generator {
                 cave_sdf_val = cave_sdf_val.max(
                     caves::cave_sdf(wx, wy, wz, &cave_systems),
                 );
+                cave_sdf_val = cave_sdf_val.max(
+                    caves::trunks_sdf(wx, wy, wz, &cave_systems, self.seed, cfg.cave.trunk_r, cfg.cave.trunk_prob),
+                );
             }
             cave_sdf_val = cave_sdf_val.max(
                 caves::entrance_sdf(wx, wy, wz, &cave_systems),
@@ -882,6 +885,7 @@ impl Generator {
                 if !cave_systems.is_empty() && scan_y > CAVE_FLOOR_Y {
                     if scan_approx_depth > CAVE_SURFACE_BUFFER {
                         scan_cave = scan_cave.max(caves::cave_sdf(wx, scan_y, wz, &cave_systems));
+                        scan_cave = scan_cave.max(caves::trunks_sdf(wx, scan_y, wz, &cave_systems, self.seed, cfg.cave.trunk_r, cfg.cave.trunk_prob));
                     }
                     scan_cave = scan_cave.max(caves::entrance_sdf(wx, scan_y, wz, &cave_systems));
                 }
@@ -1128,6 +1132,10 @@ impl Generator {
                             let sdf = caves::cave_sdf(wx, wy, wz, &cave_systems);
                             if sdf > 0.0 {
                                 composed = composed.min(-sdf);
+                            }
+                            let trunk_sdf = caves::trunks_sdf(wx, wy, wz, &cave_systems, self.seed, cfg.cave.trunk_r, cfg.cave.trunk_prob);
+                            if trunk_sdf > 0.0 {
+                                composed = composed.min(-trunk_sdf);
                             }
                         }
                         let ent = caves::entrance_sdf(wx, wy, wz, &cave_systems);

@@ -174,6 +174,11 @@ pub struct CaveConfig {
     pub vertical_connector_prob: f32,
     /// Vertical-connector tunnel radius.
     pub vertical_connector_r: f32,
+    /// Probability that a cave system has a cross-region trunk to a
+    /// neighbour-region system's chamber 0.
+    pub trunk_prob: f32,
+    /// Cross-region trunk radius.
+    pub trunk_r: f32,
 }
 
 /// PR 4 biome lookup config. The 6 existing biomes (Tundra,

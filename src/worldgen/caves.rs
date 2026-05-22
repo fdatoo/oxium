@@ -203,6 +203,98 @@ pub fn build_vertical_connectors(
     }
 }
 
+/// For each cave system in the centre region of `regions`, roll
+/// `trunk_prob`. If passing, link to the nearest chamber-0 in any 8-
+/// neighbour region. The trunk runs from the system's chamber 0 through
+/// a 40-block perpendicular-offset midpoint to the other system's
+/// chamber 0.
+///
+/// Architecture note: trunks are cross-region features — a single
+/// `FineRegion` build cannot see neighbour regions (they may not exist
+/// yet in the cache). `build_trunks` takes an owned `[(RegionCoord,
+/// FineRegion)]` slice that covers all regions of interest and is
+/// called:
+///   * from tests (on owned data — `trunk` field verified directly), and
+///   * from `cave_sdf` / `cave_air` on-the-fly (trunk geometry
+///     recomputed from the flat `&[&CaveSystem]` slice already
+///     aggregated across the 3×3 region halo).
+///
+/// Salt 9000 = trunk probability roll; 9001 = midpoint offset roll.
+pub fn build_trunks(
+    seed: u64,
+    cfg: &crate::worldgen::config::CaveConfig,
+    regions: &mut [(RegionCoord, FineRegion)],
+) {
+    if cfg.trunk_prob <= 0.0 {
+        return;
+    }
+    // Snapshot (region_index, system_index, coord, chamber-0 center)
+    // for lookup — avoids borrow conflict when writing .trunk later.
+    let snap: Vec<(usize, usize, RegionCoord, glam::Vec3)> = regions
+        .iter()
+        .enumerate()
+        .flat_map(|(ri, (coord, region))| {
+            region
+                .cave_systems
+                .iter()
+                .enumerate()
+                .filter_map(|(si, sys)| {
+                    sys.chambers.first().map(|c| (ri, si, *coord, c.center))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    // For each system, find the nearest chamber-0 in an 8-neighbour region.
+    for &(ri, si, coord, my_center) in &snap {
+        // Stable salt: chamber-0 center coords (integer-rounded). Stable
+        // across chunks because chamber centers are immutable; unique per
+        // system within a region because Poisson sampling enforces
+        // min_spacing > 0.
+        let salt_x = my_center.x as i32;
+        let salt_y = my_center.y as i32;
+        let salt_z = my_center.z as i32;
+        let u = mix_unit(seed, &[coord.x, coord.z, salt_x, salt_y, salt_z, 9000]);
+        if u > cfg.trunk_prob {
+            continue;
+        }
+        // Find nearest neighbour-region chamber-0 (different region index,
+        // within 1 step in both x and z).
+        let mut best: Option<(glam::Vec3, f32)> = None;
+        for &(ori, _osi, other_coord, other_center) in &snap {
+            if ori == ri {
+                continue;
+            }
+            let dx = (other_coord.x - coord.x).abs();
+            let dz = (other_coord.z - coord.z).abs();
+            if dx > 1 || dz > 1 {
+                continue;
+            }
+            let d = (other_center - my_center).length();
+            if best.map_or(true, |(_, bd)| d < bd) {
+                best = Some((other_center, d));
+            }
+        }
+        let Some((other_center, _)) = best else {
+            continue;
+        };
+        // Mid-arc: midpoint with a 40-block perpendicular offset in XZ.
+        let axis = other_center - my_center;
+        let len = (axis.x * axis.x + axis.z * axis.z).sqrt().max(1.0);
+        let perp = glam::Vec3::new(-axis.z / len, 0.0, axis.x / len);
+        let o = (mix_unit(seed, &[coord.x, coord.z, salt_x, salt_y, salt_z, 9001]) * 2.0 - 1.0) * 40.0;
+        let mid = glam::Vec3::new(
+            (my_center.x + other_center.x) * 0.5 + perp.x * o,
+            (my_center.y + other_center.y) * 0.5,
+            (my_center.z + other_center.z) * 0.5 + perp.z * o,
+        );
+        regions[ri].1.cave_systems[si].trunk = Some(Tunnel {
+            control_points: vec![my_center, mid, other_center],
+            radius: cfg.trunk_r,
+        });
+    }
+}
+
 /// Per-style parameter set extracted from the style table.
 struct StyleParams {
     chamber_count: (u32, u32),
@@ -671,6 +763,135 @@ pub fn cave_sdf(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> f32 {
                 }
             }
         }
+        // Cross-region trunk (populated by build_trunks; None in the
+        // production cache path, Some in test-built regions).
+        if let Some(trunk) = &sys.trunk {
+            for i in 0..trunk.control_points.len().saturating_sub(1) {
+                let a = trunk.control_points[i];
+                let b = trunk.control_points[i + 1];
+                let ab = b - a;
+                let len_sq = ab.length_squared();
+                if len_sq < 1e-6 {
+                    continue;
+                }
+                let t_param = ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+                let closest = a + ab * t_param;
+                let dist = (p - closest).length();
+                if dist <= trunk.radius {
+                    let sdf = (1.0 - dist / trunk.radius) * CAVE_SDF_INTENSITY;
+                    if sdf > max_sdf {
+                        max_sdf = sdf;
+                    }
+                }
+            }
+        }
+    }
+    max_sdf
+}
+
+/// Compute the cross-region trunk SDF on the fly from a flat `systems`
+/// slice spanning multiple regions. Called at chunk-fill time where
+/// `sys.trunk` is always `None` (regions are immutable in the Arc
+/// cache). Returns the maximum trunk SDF value (positive inside,
+/// 0 outside).
+///
+/// For each system, derives its region coord from its chamber-0
+/// world position, finds the nearest chamber-0 in a different region,
+/// and evaluates the deterministic 3-point capsule trunk.
+pub fn trunks_sdf(
+    wx: i32,
+    wy: i32,
+    wz: i32,
+    systems: &[&CaveSystem],
+    seed: u64,
+    trunk_r: f32,
+    trunk_prob: f32,
+) -> f32 {
+    if trunk_prob <= 0.0 || systems.len() < 2 {
+        return 0.0;
+    }
+    let p = Vec3::new(wx as f32 + 0.5, wy as f32 + 0.5, wz as f32 + 0.5);
+    let mut max_sdf = 0.0_f32;
+
+    // Snapshot chamber-0 center + derived region coord for each system.
+    let snap: Vec<(RegionCoord, Vec3)> = systems
+        .iter()
+        .filter_map(|s| {
+            s.chambers.first().map(|c| {
+                (
+                    RegionCoord::containing(c.center.x as i32, c.center.z as i32),
+                    c.center,
+                )
+            })
+        })
+        .collect();
+
+    for (si, sys) in systems.iter().enumerate() {
+        let Some(c0) = sys.chambers.first() else { continue; };
+        let my_coord = RegionCoord::containing(c0.center.x as i32, c0.center.z as i32);
+        let my_center = c0.center;
+
+        // Stable salt: chamber-0 center coords (integer-rounded). Stable
+        // across chunks because chamber centers are immutable; unique per
+        // system within a region because Poisson sampling enforces
+        // min_spacing > 0.
+        let salt_x = c0.center.x as i32;
+        let salt_y = c0.center.y as i32;
+        let salt_z = c0.center.z as i32;
+
+        let u = mix_unit(seed, &[my_coord.x, my_coord.z, salt_x, salt_y, salt_z, 9000]);
+        if u > trunk_prob {
+            continue;
+        }
+
+        // Find nearest chamber-0 in a neighbouring region (different
+        // region, within 1 step in both x and z).
+        let mut best_center: Option<Vec3> = None;
+        let mut best_dist = f32::MAX;
+        for (j, (other_coord, other_center)) in snap.iter().enumerate() {
+            if j == si { continue; }
+            let dx = (other_coord.x - my_coord.x).abs();
+            let dz = (other_coord.z - my_coord.z).abs();
+            if dx > 1 || dz > 1 { continue; }
+            // Require different region (not same region coord).
+            if *other_coord == my_coord { continue; }
+            let d = (*other_center - my_center).length();
+            if d < best_dist {
+                best_dist = d;
+                best_center = Some(*other_center);
+            }
+        }
+        let Some(other_center) = best_center else { continue; };
+
+        // Build trunk geometry (mirrors build_trunks).
+        let axis = other_center - my_center;
+        let len = (axis.x * axis.x + axis.z * axis.z).sqrt().max(1.0);
+        let perp = Vec3::new(-axis.z / len, 0.0, axis.x / len);
+        let o = (mix_unit(seed, &[my_coord.x, my_coord.z, salt_x, salt_y, salt_z, 9001]) * 2.0 - 1.0) * 40.0;
+        let mid = Vec3::new(
+            (my_center.x + other_center.x) * 0.5 + perp.x * o,
+            (my_center.y + other_center.y) * 0.5,
+            (my_center.z + other_center.z) * 0.5 + perp.z * o,
+        );
+        let control = [my_center, mid, other_center];
+
+        // Capsule SDF along the 3-point polyline.
+        for i in 0..2 {
+            let a = control[i];
+            let b = control[i + 1];
+            let ab = b - a;
+            let len_sq = ab.length_squared();
+            if len_sq < 1e-6 { continue; }
+            let t_param = ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+            let closest = a + ab * t_param;
+            let dist = (p - closest).length();
+            if dist <= trunk_r {
+                let sdf = (1.0 - dist / trunk_r) * CAVE_SDF_INTENSITY;
+                if sdf > max_sdf {
+                    max_sdf = sdf;
+                }
+            }
+        }
     }
     max_sdf
 }
@@ -806,6 +1027,20 @@ pub fn cave_air(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> bool {
                 let t_param = ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0);
                 let closest = a + ab * t_param;
                 if (p - closest).length() <= t.radius {
+                    return true;
+                }
+            }
+        }
+        // Cross-region trunk (populated by build_trunks; None in the
+        // production cache path, Some in test-built regions).
+        if let Some(trunk) = &sys.trunk {
+            for i in 0..trunk.control_points.len().saturating_sub(1) {
+                let a = trunk.control_points[i];
+                let b = trunk.control_points[i + 1];
+                let ab = b - a;
+                let t_param = ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0);
+                let closest = a + ab * t_param;
+                if (p - closest).length() <= trunk.radius {
                     return true;
                 }
             }
@@ -1841,6 +2076,59 @@ mod tests {
                     "band {name}, style index {i}: expected {expected_weight:.2}, got {actual:.2}");
             }
         }
+    }
+
+    #[test]
+    fn trunk_links_nearest_neighbour_region_system() {
+        let mut cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        cfg.cave.trunk_prob = 1.0;
+        let hm = HeightmapNoise::new(42, &cfg.climate);
+
+        // Build all systems in a 3×3 region grid (owned FineRegions).
+        let mut regions: Vec<(RegionCoord, FineRegion)> = vec![];
+        for rx in 0..3_i32 {
+            for rz in 0..3_i32 {
+                let coord = RegionCoord { x: rx, z: rz };
+                let mut region = FineRegion::empty(coord);
+                build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut region, &cfg.cave);
+                regions.push((coord, region));
+            }
+        }
+
+        // Run build_trunks across the 3×3 grid.
+        build_trunks(42, &cfg.cave, &mut regions);
+
+        // After the trunk pass, find at least one system with .trunk set,
+        // and verify its endpoint matches a chamber center of some
+        // neighbour-region system.
+        let mut found = false;
+        // Snapshot (region_index, coord, system centers) for lookup.
+        let snap: Vec<(usize, RegionCoord, Vec<glam::Vec3>)> = regions.iter().enumerate().map(|(i, (coord, region))| {
+            let centers: Vec<glam::Vec3> = region.cave_systems.iter()
+                .filter_map(|s| s.chambers.first().map(|c| c.center))
+                .collect();
+            (i, *coord, centers)
+        }).collect();
+
+        'outer: for (i, (coord, region)) in regions.iter().enumerate() {
+            for sys in &region.cave_systems {
+                let Some(trunk) = &sys.trunk else { continue; };
+                let endpoint = *trunk.control_points.last().unwrap();
+                // Check if endpoint matches any chamber-0 center in a
+                // neighbouring region (8-connected, different region index).
+                for (j, other_coord, centers) in &snap {
+                    if *j == i { continue; }
+                    if (other_coord.x - coord.x).abs() > 1 || (other_coord.z - coord.z).abs() > 1 { continue; }
+                    for &c in centers {
+                        if (c - endpoint).length() < 0.5 {
+                            found = true;
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(found, "no trunk linked to any neighbour-region chamber center");
     }
 
 }
