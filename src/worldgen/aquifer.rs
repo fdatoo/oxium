@@ -177,11 +177,7 @@ impl AquiferSystem {
             .set_octaves(2)
             .set_frequency(1.0 / cfg.barrier_period as f64)
             .set_persistence(0.5);
-        Self {
-            seed,
-            cfg,
-            barrier,
-        }
+        Self { seed, cfg, barrier }
     }
 
     /// Resolve the [`AquiferCell`] at integer cell coords. Pure in
@@ -337,12 +333,9 @@ impl AquiferSystem {
             // Aquifer wants to flood — check if its pressure can
             // overcome the rock. Both the asymmetric falloff and the
             // 3D barrier are summed before subtracting from density.
-            let pressure = asymmetric_pressure(
-                wy,
-                a.y_top,
-                self.cfg.top_falloff,
-                self.cfg.bottom_falloff,
-            ) + self.barrier_noise(wx, wy, wz);
+            let pressure =
+                asymmetric_pressure(wy, a.y_top, self.cfg.top_falloff, self.cfg.bottom_falloff)
+                    + self.barrier_noise(wx, wy, wz);
             if density - pressure > 0.0 {
                 Substance::Density // rock holds; solid
             } else {
@@ -366,12 +359,9 @@ impl AquiferSystem {
                 // fluid wins; otherwise leave it as air (this is
                 // how dry cave pockets appear inside otherwise
                 // wet zones).
-                let pressure = asymmetric_pressure(
-                    wy,
-                    a.y_top,
-                    self.cfg.top_falloff,
-                    self.cfg.bottom_falloff,
-                ) + self.barrier_noise(wx, wy, wz);
+                let pressure =
+                    asymmetric_pressure(wy, a.y_top, self.cfg.top_falloff, self.cfg.bottom_falloff)
+                        + self.barrier_noise(wx, wy, wz);
                 if pressure > 0.0 {
                     Substance::Block(a.fluid)
                 } else {
@@ -569,12 +559,18 @@ mod tests {
                 }
                 let wy = cell.y_top - 1;
                 let r = s.substance(cell.center_x, wy, cell.center_z, -5.0);
-                if matches!(r, Substance::Block(Block::Water) | Substance::Block(Block::Lava)) {
+                if matches!(
+                    r,
+                    Substance::Block(Block::Water) | Substance::Block(Block::Lava)
+                ) {
                     found_fluid = true;
                     break 'outer;
                 }
             }
         }
-        assert!(found_fluid, "no fluid found in any of 1024 deep aquifer cells");
+        assert!(
+            found_fluid,
+            "no fluid found in any of 1024 deep aquifer cells"
+        );
     }
 }

@@ -76,5 +76,10 @@ fn make_mip(device: &wgpu::Device, w: u32, h: u32, level: u32) -> BloomMip {
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    BloomMip { texture, view, width, height }
+    BloomMip {
+        texture,
+        view,
+        width,
+        height,
+    }
 }

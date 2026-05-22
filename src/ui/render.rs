@@ -8,22 +8,22 @@
 //! plies through.
 
 use crate::render::hud::HudFrame;
+use crate::ui::Ui;
 use crate::ui::menu::TOP_MENU;
 use crate::ui::state::{MenuNav, UiState};
-use crate::ui::Ui;
 
 const DIM_COLOR: [u8; 4] = [0, 0, 0, 0x80];
-const PANEL_BG:  [u8; 4] = [20, 20, 24, 0xE0];
-const TEXT_WHITE:[u8; 4] = [255, 255, 255, 255];
-const TEXT_DIM:  [u8; 4] = [180, 180, 180, 255];
-const HOVER:     [u8; 4] = [255, 220, 120, 255];
+const PANEL_BG: [u8; 4] = [20, 20, 24, 0xE0];
+const TEXT_WHITE: [u8; 4] = [255, 255, 255, 255];
+const TEXT_DIM: [u8; 4] = [180, 180, 180, 255];
+const HOVER: [u8; 4] = [255, 220, 120, 255];
 
 // Base values are calibrated for a 720 px-tall framebuffer; the actual
 // rendered size is `BASE_* * ui_scale(screen_h)`.
 const BASE_PANEL_W: f32 = 440.0;
 const BASE_PANEL_H: f32 = 280.0;
 const BASE_TITLE_SCALE: f32 = 4.0;
-const BASE_ITEM_SCALE:  f32 = 2.5;
+const BASE_ITEM_SCALE: f32 = 2.5;
 const BASE_ITEM_LINE_H: f32 = 28.0;
 const BASE_TITLE_PAD_Y: f32 = 32.0;
 const BASE_ITEMS_TOP_Y: f32 = 120.0;
@@ -36,7 +36,7 @@ const BASE_CHAT_BOTTOM_GAP: f32 = 80.0;
 const CHAT_VISIBLE_PLAYING: usize = 5;
 const CHAT_VISIBLE_OPEN: usize = 8;
 const CHAT_FADE_START_SEC: f32 = 6.0;
-const CHAT_FADE_END_SEC:   f32 = 8.0;
+const CHAT_FADE_END_SEC: f32 = 8.0;
 
 /// UI scale factor. 1.0 at a 720 px-tall framebuffer; doubles by 1440 px;
 /// clamped so on a 360-px-tall window the overlay doesn't shrink past
@@ -51,7 +51,9 @@ fn ui_scale(screen_h: f32) -> f32 {
 /// minus padding so it doesn't bleed off the right edge.
 fn chat_block_width(screen_w: f32, scale: f32) -> f32 {
     let pad = BASE_CHAT_PAD * scale;
-    (screen_w * 0.5).max(560.0 * scale).min(screen_w - 2.0 * pad)
+    (screen_w * 0.5)
+        .max(560.0 * scale)
+        .min(screen_w - 2.0 * pad)
 }
 
 pub fn draw_overlay(ui: &Ui, screen_px: (u32, u32), frame: &mut HudFrame) {
@@ -64,9 +66,9 @@ pub fn draw_overlay(ui: &Ui, screen_px: (u32, u32), frame: &mut HudFrame) {
 
 fn line_color(kind: crate::ui::chat::LineKind, alpha: u8) -> [u8; 4] {
     let [r, g, b] = match kind {
-        crate::ui::chat::LineKind::Player       => [255, 255, 255],
-        crate::ui::chat::LineKind::System       => [255, 220, 120],
-        crate::ui::chat::LineKind::CommandEcho  => [120, 220, 255],
+        crate::ui::chat::LineKind::Player => [255, 255, 255],
+        crate::ui::chat::LineKind::System => [255, 220, 120],
+        crate::ui::chat::LineKind::CommandEcho => [120, 220, 255],
         crate::ui::chat::LineKind::CommandError => [255, 100, 100],
     };
     [r, g, b, alpha]
@@ -88,7 +90,9 @@ fn draw_chat_open(
     let block_w = chat_block_width(sw, s);
     let block_h = line_h * (CHAT_VISIBLE_OPEN as f32 + 1.5);
     let block_y = sh - block_h - bottom_gap;
-    frame.icons.push_rect(0.0, block_y, block_w, block_h, [0, 0, 0, 0xA0]);
+    frame
+        .icons
+        .push_rect(0.0, block_y, block_w, block_h, [0, 0, 0, 0xA0]);
 
     let lines: Vec<_> = ui.log.iter().rev().take(CHAT_VISIBLE_OPEN).collect();
     for (i, line) in lines.iter().enumerate() {
@@ -109,11 +113,12 @@ fn draw_chat_open(
     };
     if blink_on {
         let prefix_chars = 2 + input.buf[..input.cursor].chars().count();
-        let caret_x = pad + prefix_chars as f32
-            * crate::render::font::CELL_W as f32 * text_scale;
+        let caret_x = pad + prefix_chars as f32 * crate::render::font::CELL_W as f32 * text_scale;
         let caret_w = crate::render::font::GLYPH_W as f32 * text_scale;
         let caret_h = crate::render::font::GLYPH_H as f32 * text_scale;
-        frame.icons.push_rect(caret_x, input_y, caret_w, caret_h, [255, 255, 255, 180]);
+        frame
+            .icons
+            .push_rect(caret_x, input_y, caret_w, caret_h, [255, 255, 255, 180]);
     }
 }
 
@@ -129,9 +134,13 @@ fn draw_idle_log(ui: &Ui, screen_px: (u32, u32), frame: &mut HudFrame) {
     let block_y = sh - line_h * (CHAT_VISIBLE_PLAYING as f32) - bottom_gap;
     let mut drawn = 0usize;
     for line in ui.log.iter().rev() {
-        if drawn >= CHAT_VISIBLE_PLAYING { break }
+        if drawn >= CHAT_VISIBLE_PLAYING {
+            break;
+        }
         let age = now.duration_since(line.posted_at).as_secs_f32();
-        if age > CHAT_FADE_END_SEC { continue }
+        if age > CHAT_FADE_END_SEC {
+            continue;
+        }
         let alpha = if age < CHAT_FADE_START_SEC {
             1.0
         } else {
@@ -192,26 +201,39 @@ fn draw_pause(menu: &MenuNav, screen_px: (u32, u32), frame: &mut HudFrame) {
     frame.icons.push_rect(0.0, 0.0, sw, sh, DIM_COLOR);
 
     let l = pause_layout(screen_px);
-    frame.icons.push_rect(l.panel_x, l.panel_y, l.panel_w, l.panel_h, PANEL_BG);
+    frame
+        .icons
+        .push_rect(l.panel_x, l.panel_y, l.panel_w, l.panel_h, PANEL_BG);
 
     match menu {
         MenuNav::Top { hovered } => draw_top_menu(*hovered, &l, frame),
-        MenuNav::Settings        => draw_settings(&l, frame),
+        MenuNav::Settings => draw_settings(&l, frame),
     }
 }
 
 fn draw_top_menu(hovered: usize, l: &PauseLayout, frame: &mut HudFrame) {
     let title = "PAUSED";
-    let title_w = title.chars().count() as f32
-        * crate::render::font::CELL_W as f32 * l.title_scale;
+    let title_w = title.chars().count() as f32 * crate::render::font::CELL_W as f32 * l.title_scale;
     let title_x = l.panel_x + (l.panel_w - title_w) * 0.5;
-    frame.push_text(title_x, l.panel_y + l.title_pad_y, title, l.title_scale, TEXT_WHITE);
+    frame.push_text(
+        title_x,
+        l.panel_y + l.title_pad_y,
+        title,
+        l.title_scale,
+        TEXT_WHITE,
+    );
 
     for (i, item) in TOP_MENU.iter().enumerate() {
         let y = l.items_top + i as f32 * l.item_line_h;
         let color = if i == hovered { HOVER } else { TEXT_WHITE };
         if i == hovered {
-            frame.push_text(l.items_left - l.item_cell_w * 1.5, y, ">", l.item_scale, HOVER);
+            frame.push_text(
+                l.items_left - l.item_cell_w * 1.5,
+                y,
+                ">",
+                l.item_scale,
+                HOVER,
+            );
         }
         frame.push_text(l.items_left, y, item.label(), l.item_scale, color);
     }
@@ -219,15 +241,25 @@ fn draw_top_menu(hovered: usize, l: &PauseLayout, frame: &mut HudFrame) {
 
 fn draw_settings(l: &PauseLayout, frame: &mut HudFrame) {
     let title = "SETTINGS";
-    let title_w = title.chars().count() as f32
-        * crate::render::font::CELL_W as f32 * l.title_scale;
+    let title_w = title.chars().count() as f32 * crate::render::font::CELL_W as f32 * l.title_scale;
     let title_x = l.panel_x + (l.panel_w - title_w) * 0.5;
-    frame.push_text(title_x, l.panel_y + l.title_pad_y, title, l.title_scale, TEXT_WHITE);
+    frame.push_text(
+        title_x,
+        l.panel_y + l.title_pad_y,
+        title,
+        l.title_scale,
+        TEXT_WHITE,
+    );
     let body_x = l.items_left - l.item_cell_w * 1.5;
     let body_y = l.items_top;
     frame.push_text(body_x, body_y, "(coming soon)", l.item_scale, TEXT_DIM);
-    frame.push_text(body_x, body_y + l.item_line_h * 2.0,
-                    "Esc - back", l.item_scale, TEXT_DIM);
+    frame.push_text(
+        body_x,
+        body_y + l.item_line_h * 2.0,
+        "Esc - back",
+        l.item_scale,
+        TEXT_DIM,
+    );
 }
 
 /// Pixel rect of the i-th top-menu item. Used by mouse hit-testing in
@@ -237,5 +269,10 @@ pub fn top_menu_item_rect(i: usize, screen_px: (u32, u32)) -> (f32, f32, f32, f3
     let y = l.items_top + i as f32 * l.item_line_h;
     let width = l.panel_w - (l.items_left - l.panel_x) * 2.0;
     let pad_y = 4.0 * ui_scale(screen_px.1 as f32);
-    (l.items_left - l.item_cell_w * 1.5, y - pad_y, width, l.item_line_h)
+    (
+        l.items_left - l.item_cell_w * 1.5,
+        y - pad_y,
+        width,
+        l.item_line_h,
+    )
 }

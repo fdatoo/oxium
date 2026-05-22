@@ -3,7 +3,7 @@
 //! follow). 64×64 px so each render is ~4k generator samples — slow
 //! enough to debounce on edits but fast enough to feel interactive.
 
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use egui::{Color32, ColorImage, TextureHandle, TextureOptions, Ui};
 use oxium::worldgen::Generator;
 use std::sync::Arc;
@@ -269,7 +269,12 @@ impl CrossSection {
                         Color32::from_rgba_premultiplied(rgba[0], rgba[1], rgba[2], rgba[3]);
                 }
             }
-            let _ = tx.send(RenderResult { key, width: w, height: h, pixels });
+            let _ = tx.send(RenderResult {
+                key,
+                width: w,
+                height: h,
+                pixels,
+            });
         });
     }
 
@@ -302,7 +307,10 @@ impl CrossSection {
                 .selected_text(self.orientation.label())
                 .show_ui(ui, |ui| {
                     for o in [Orientation::Xz, Orientation::Xy, Orientation::Yz] {
-                        if ui.selectable_label(self.orientation == o, o.label()).clicked() {
+                        if ui
+                            .selectable_label(self.orientation == o, o.label())
+                            .clicked()
+                        {
                             self.orientation = o;
                             dirty = true;
                         }
@@ -368,12 +376,14 @@ impl CrossSection {
             self.spawn_render(generator.clone(), desired.clone());
             // Request a repaint a few hundred ms out so the channel
             // gets drained even if the user stops poking the UI.
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(60));
         }
         // While a render is in flight, keep poking the runtime so
         // the eventual result drains promptly.
         if self.pending_key.is_some() {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(60));
         }
         let (w_px, h_px) = self.orientation.dimensions();
         if let Some(tex) = self.texture.as_ref() {
@@ -486,10 +496,20 @@ fn density_color(d: f32) -> [u8; 4] {
     let t = (d / 8.0).clamp(-1.0, 1.0);
     if t < 0.0 {
         let s = -t;
-        [(20.0 * (1.0 - s)) as u8, (60.0 * (1.0 - s) + 60.0 * s) as u8, (60.0 * (1.0 - s) + 220.0 * s) as u8, 255]
+        [
+            (20.0 * (1.0 - s)) as u8,
+            (60.0 * (1.0 - s) + 60.0 * s) as u8,
+            (60.0 * (1.0 - s) + 220.0 * s) as u8,
+            255,
+        ]
     } else {
         let s = t;
-        [(20.0 * (1.0 - s) + 220.0 * s) as u8, (60.0 * (1.0 - s) + 30.0 * s) as u8, (60.0 * (1.0 - s) + 30.0 * s) as u8, 255]
+        [
+            (20.0 * (1.0 - s) + 220.0 * s) as u8,
+            (60.0 * (1.0 - s) + 30.0 * s) as u8,
+            (60.0 * (1.0 - s) + 30.0 * s) as u8,
+            255,
+        ]
     }
 }
 

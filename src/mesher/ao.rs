@@ -89,8 +89,12 @@ fn face_axes(face: Face) -> (Off, Off, Off) {
 }
 
 type Off = (i32, i32, i32);
-fn add(a: Off, b: Off) -> Off { (a.0 + b.0, a.1 + b.1, a.2 + b.2) }
-fn scale(a: Off, k: i32) -> Off { (a.0 * k, a.1 * k, a.2 * k) }
+fn add(a: Off, b: Off) -> Off {
+    (a.0 + b.0, a.1 + b.1, a.2 + b.2)
+}
+fn scale(a: Off, k: i32) -> Off {
+    (a.0 * k, a.1 * k, a.2 * k)
+}
 
 /// Minecraft-style AO function. The "both sides solid" shortcut is
 /// important — without it a corner with side1=side2=true but corner=false
@@ -126,7 +130,10 @@ mod tests {
                 Some(Block::Air)
             }
         });
-        assert_eq!(ao[0], 0, "corner 0 should be fully occluded (two sides solid)");
+        assert_eq!(
+            ao[0], 0,
+            "corner 0 should be fully occluded (two sides solid)"
+        );
     }
 
     #[test]

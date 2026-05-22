@@ -24,7 +24,7 @@
 //! - MC `net/minecraft/world/level/levelgen/carver/WorldCarver.java`
 //! - MC `data/minecraft/worldgen/configured_carver/cave.json`
 
-use crate::voxel::coords::{ChunkCoord, CHUNK_DIM};
+use crate::voxel::coords::{CHUNK_DIM, ChunkCoord};
 use crate::worldgen::hash;
 use glam::{IVec3, Vec3};
 use std::f32::consts::{FRAC_PI_2, PI, TAU};

@@ -25,7 +25,7 @@
 
 use crate::voxel::block::{Block, BlockRegistry};
 use crate::voxel::chunk::DenseChunk;
-use crate::voxel::coords::{LocalPos, CHUNK_DIM_U};
+use crate::voxel::coords::{CHUNK_DIM_U, LocalPos};
 use glam::UVec3;
 use std::collections::HashMap;
 
@@ -177,11 +177,7 @@ pub fn downsample(src: &DenseChunk, factor: u32) -> LodChunk {
 /// smaller (the cells are already coarser) and the simpler emitter
 /// makes each downsampled cube a single quad per visible face. Also,
 /// AO is skipped (it'd compound the downsampling artefacts).
-pub fn mesh_lod(
-    lod: &LodChunk,
-    factor: u32,
-    reg: &BlockRegistry,
-) -> crate::mesher::ChunkMesh {
+pub fn mesh_lod(lod: &LodChunk, factor: u32, reg: &BlockRegistry) -> crate::mesher::ChunkMesh {
     use crate::mesher::{ChunkMesh, Face};
     let mut mesh = ChunkMesh::empty();
     let dim = lod.dim as i32;
@@ -293,9 +289,7 @@ pub fn mesh_lod(
                 (0, 1, Face::PosZ),
                 (0, -1, Face::NegZ),
             ] {
-                let neighbour_top = height(x + dx, z + dz)
-                    .map(|h| h + 1)
-                    .unwrap_or(0);
+                let neighbour_top = height(x + dx, z + dz).map(|h| h + 1).unwrap_or(0);
                 if neighbour_top >= top_y_u32 {
                     continue;
                 }

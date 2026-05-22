@@ -77,7 +77,12 @@ impl Ui {
     /// Route a key event. Returns `Consumed` if the UI handled it (in
     /// which case `main.rs` does NOT forward the key to `InputBuf`),
     /// `Forward` otherwise.
-    pub fn on_key(&mut self, code: KeyCode, state: ElementState, text: Option<&str>) -> InputDisposition {
+    pub fn on_key(
+        &mut self,
+        code: KeyCode,
+        state: ElementState,
+        text: Option<&str>,
+    ) -> InputDisposition {
         // Always forward release events so `InputBuf` can clean up its
         // `keys_down` set. A press → pause → release sequence (W held
         // when the player Escs, then W released while paused) must not
@@ -111,23 +116,41 @@ impl Ui {
     fn handle_toggle_key(&mut self, code: KeyCode, _text: Option<&str>) -> bool {
         match (&self.state, code) {
             (UiState::Playing, KeyCode::Escape) => {
-                self.state = UiState::Paused { menu: MenuNav::Top { hovered: 0 } };
+                self.state = UiState::Paused {
+                    menu: MenuNav::Top { hovered: 0 },
+                };
                 true
             }
             (UiState::Playing, KeyCode::KeyT) => {
-                self.state = UiState::Chat { input: ChatInput::new("") };
+                self.state = UiState::Chat {
+                    input: ChatInput::new(""),
+                };
                 true
             }
             (UiState::Playing, KeyCode::Slash) => {
-                self.state = UiState::Chat { input: ChatInput::new("/") };
+                self.state = UiState::Chat {
+                    input: ChatInput::new("/"),
+                };
                 true
             }
-            (UiState::Paused { menu: MenuNav::Top { .. } }, KeyCode::Escape) => {
+            (
+                UiState::Paused {
+                    menu: MenuNav::Top { .. },
+                },
+                KeyCode::Escape,
+            ) => {
                 self.state = UiState::Playing;
                 true
             }
-            (UiState::Paused { menu: MenuNav::Settings }, KeyCode::Escape) => {
-                self.state = UiState::Paused { menu: MenuNav::Top { hovered: 0 } };
+            (
+                UiState::Paused {
+                    menu: MenuNav::Settings,
+                },
+                KeyCode::Escape,
+            ) => {
+                self.state = UiState::Paused {
+                    menu: MenuNav::Top { hovered: 0 },
+                };
                 true
             }
             (UiState::Chat { .. }, KeyCode::Escape) => {
@@ -141,7 +164,9 @@ impl Ui {
     /// Handle non-toggle keys while the UI is open.
     fn consume_in_ui(&mut self, code: KeyCode, text: Option<&str>) {
         match &mut self.state {
-            UiState::Paused { menu: MenuNav::Top { hovered } } => {
+            UiState::Paused {
+                menu: MenuNav::Top { hovered },
+            } => {
                 let action = match code {
                     KeyCode::ArrowUp | KeyCode::KeyW => {
                         *hovered = (*hovered + TOP_MENU.len() - 1) % TOP_MENU.len();
@@ -160,17 +185,43 @@ impl Ui {
                     self.apply_menu_action(a);
                 }
             }
-            UiState::Paused { menu: MenuNav::Settings } => {}
+            UiState::Paused {
+                menu: MenuNav::Settings,
+            } => {}
             UiState::Chat { input, .. } => {
                 let submitted: Option<String> = match code {
-                    KeyCode::Backspace  => { input.backspace(); None }
-                    KeyCode::Delete     => { input.delete_forward(); None }
-                    KeyCode::ArrowLeft  => { input.move_left(); None }
-                    KeyCode::ArrowRight => { input.move_right(); None }
-                    KeyCode::Home       => { input.move_home(); None }
-                    KeyCode::End        => { input.move_end(); None }
-                    KeyCode::ArrowUp    => { input.history_prev(); None }
-                    KeyCode::ArrowDown  => { input.history_next(); None }
+                    KeyCode::Backspace => {
+                        input.backspace();
+                        None
+                    }
+                    KeyCode::Delete => {
+                        input.delete_forward();
+                        None
+                    }
+                    KeyCode::ArrowLeft => {
+                        input.move_left();
+                        None
+                    }
+                    KeyCode::ArrowRight => {
+                        input.move_right();
+                        None
+                    }
+                    KeyCode::Home => {
+                        input.move_home();
+                        None
+                    }
+                    KeyCode::End => {
+                        input.move_end();
+                        None
+                    }
+                    KeyCode::ArrowUp => {
+                        input.history_prev();
+                        None
+                    }
+                    KeyCode::ArrowDown => {
+                        input.history_next();
+                        None
+                    }
                     KeyCode::Enter | KeyCode::NumpadEnter => Some(input.submit()),
                     _ => {
                         if let Some(t) = text {
@@ -203,7 +254,9 @@ impl Ui {
                 self.log.push_system("Saved.");
             }
             MenuAction::OpenSettings => {
-                self.state = UiState::Paused { menu: MenuNav::Settings };
+                self.state = UiState::Paused {
+                    menu: MenuNav::Settings,
+                };
             }
             MenuAction::Quit => {
                 self.push_effect(UiEffect::Quit);
@@ -213,7 +266,9 @@ impl Ui {
 
     fn submit_chat(&mut self, line: &str) {
         let line = line.trim();
-        if line.is_empty() { return }
+        if line.is_empty() {
+            return;
+        }
         if !line.starts_with('/') {
             self.log.push_player(line);
             return;
@@ -244,12 +299,16 @@ impl Ui {
     }
 
     pub fn on_mouse_button(&mut self, button: winit::event::MouseButton, state: ElementState) {
-        if state != ElementState::Pressed { return }
-        if button != winit::event::MouseButton::Left { return }
+        if state != ElementState::Pressed {
+            return;
+        }
+        if button != winit::event::MouseButton::Left {
+            return;
+        }
         let action = match &self.state {
-            UiState::Paused { menu: MenuNav::Top { hovered } } => {
-                Some(TOP_MENU[*hovered].activate())
-            }
+            UiState::Paused {
+                menu: MenuNav::Top { hovered },
+            } => Some(TOP_MENU[*hovered].activate()),
             _ => None,
         };
         if let Some(a) = action {
@@ -258,7 +317,12 @@ impl Ui {
     }
 
     pub fn on_mouse_move(&mut self, x: f32, y: f32, screen_px: (u32, u32)) {
-        let UiState::Paused { menu: MenuNav::Top { hovered } } = &mut self.state else { return };
+        let UiState::Paused {
+            menu: MenuNav::Top { hovered },
+        } = &mut self.state
+        else {
+            return;
+        };
         for i in 0..TOP_MENU.len() {
             let (rx, ry, rw, rh) = crate::ui::render::top_menu_item_rect(i, screen_px);
             if x >= rx && x < rx + rw && y >= ry && y < ry + rh {
@@ -296,7 +360,12 @@ mod tests {
         let mut ui = Ui::new();
         let d = ui.on_key(KeyCode::Escape, Pressed, None);
         assert_eq!(d, InputDisposition::Consumed);
-        assert!(matches!(ui.state, UiState::Paused { menu: MenuNav::Top { hovered: 0 } }));
+        assert!(matches!(
+            ui.state,
+            UiState::Paused {
+                menu: MenuNav::Top { hovered: 0 }
+            }
+        ));
         assert!(ui.cursor_state_changed);
     }
 
@@ -304,7 +373,7 @@ mod tests {
     fn esc_in_paused_top_resumes() {
         let mut ui = Ui::new();
         ui.on_key(KeyCode::Escape, Pressed, None); // enter pause
-        ui.cursor_state_changed = false;          // reset flag
+        ui.cursor_state_changed = false; // reset flag
         let d = ui.on_key(KeyCode::Escape, Pressed, None);
         assert_eq!(d, InputDisposition::Consumed);
         assert!(ui.is_playing());
@@ -359,7 +428,9 @@ mod tests {
         ui.on_key(KeyCode::Escape, Pressed, None);
         ui.on_key(KeyCode::ArrowDown, Pressed, None);
         match ui.state {
-            UiState::Paused { menu: MenuNav::Top { hovered } } => assert_eq!(hovered, 1),
+            UiState::Paused {
+                menu: MenuNav::Top { hovered },
+            } => assert_eq!(hovered, 1),
             _ => panic!("expected paused top"),
         }
     }
@@ -370,7 +441,9 @@ mod tests {
         ui.on_key(KeyCode::Escape, Pressed, None);
         ui.on_key(KeyCode::ArrowUp, Pressed, None);
         match ui.state {
-            UiState::Paused { menu: MenuNav::Top { hovered } } => {
+            UiState::Paused {
+                menu: MenuNav::Top { hovered },
+            } => {
                 assert_eq!(hovered, crate::ui::menu::TOP_MENU.len() - 1);
             }
             _ => panic!("expected paused top"),
@@ -389,7 +462,9 @@ mod tests {
     fn enter_on_quit_emits_effect() {
         let mut ui = Ui::new();
         ui.on_key(KeyCode::Escape, Pressed, None);
-        for _ in 0..3 { ui.on_key(KeyCode::ArrowDown, Pressed, None); }
+        for _ in 0..3 {
+            ui.on_key(KeyCode::ArrowDown, Pressed, None);
+        }
         ui.on_key(KeyCode::Enter, Pressed, None);
         let effs = ui.drain_effects();
         assert!(effs.contains(&UiEffect::Quit));
@@ -410,18 +485,32 @@ mod tests {
     fn enter_on_settings_opens_sub_menu() {
         let mut ui = Ui::new();
         ui.on_key(KeyCode::Escape, Pressed, None);
-        for _ in 0..2 { ui.on_key(KeyCode::ArrowDown, Pressed, None); }
+        for _ in 0..2 {
+            ui.on_key(KeyCode::ArrowDown, Pressed, None);
+        }
         ui.on_key(KeyCode::Enter, Pressed, None);
-        assert!(matches!(ui.state, UiState::Paused { menu: MenuNav::Settings }));
+        assert!(matches!(
+            ui.state,
+            UiState::Paused {
+                menu: MenuNav::Settings
+            }
+        ));
     }
 
     #[test]
     fn esc_from_settings_goes_to_top_not_play() {
         let mut ui = Ui::new();
         ui.on_key(KeyCode::Escape, Pressed, None);
-        for _ in 0..2 { ui.on_key(KeyCode::ArrowDown, Pressed, None); }
+        for _ in 0..2 {
+            ui.on_key(KeyCode::ArrowDown, Pressed, None);
+        }
         ui.on_key(KeyCode::Enter, Pressed, None);
         ui.on_key(KeyCode::Escape, Pressed, None);
-        assert!(matches!(ui.state, UiState::Paused { menu: MenuNav::Top { hovered: 0 } }));
+        assert!(matches!(
+            ui.state,
+            UiState::Paused {
+                menu: MenuNav::Top { hovered: 0 }
+            }
+        ));
     }
 }

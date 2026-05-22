@@ -16,7 +16,7 @@
 //! 3. **Format.** Most swap chains hand us BGRA8 sRGB on macOS; we flip the
 //!    channels to RGBA before passing to the `image` crate's PNG encoder.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::path::Path;
 
 /// Read the most recently-rendered swap-chain texture out of the GPU into a
@@ -109,13 +109,7 @@ pub fn capture_texture_to_png(
     drop(raw);
     buffer.unmap();
 
-    image::save_buffer(
-        path,
-        &pixels,
-        width,
-        height,
-        image::ColorType::Rgba8,
-    )?;
+    image::save_buffer(path, &pixels, width, height, image::ColorType::Rgba8)?;
     Ok(())
 }
 

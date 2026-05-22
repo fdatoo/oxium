@@ -16,10 +16,10 @@ pub mod mesher;
 
 use crate::paint::{PaintContext, PaintMode};
 use crate::world::mesher::mesh_chunk;
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use oxium::voxel::block::Block;
 use oxium::voxel::chunk::DenseChunk;
-use oxium::voxel::coords::{ChunkCoord, LocalPos, CHUNK_DIM_U};
+use oxium::voxel::coords::{CHUNK_DIM_U, ChunkCoord, LocalPos};
 use oxium::worldgen::Generator;
 use rayon::ThreadPool;
 use std::collections::{HashMap, HashSet};
@@ -49,7 +49,12 @@ pub struct Region {
 
 impl Region {
     pub const fn new(center_cx: i32, center_cz: i32, radius_xz: i32, radius_y: i32) -> Self {
-        Self { center_cx, center_cz, radius_xz, radius_y }
+        Self {
+            center_cx,
+            center_cz,
+            radius_xz,
+            radius_y,
+        }
     }
 
     /// All chunk coords in the region, in row-major order (Y outer,
@@ -210,7 +215,12 @@ impl World {
         let mut out = Vec::new();
         while let Ok(r) = self.rx.try_recv() {
             match r {
-                ChunkJobResult::Filled { coord, chunk, vertices, indices } => {
+                ChunkJobResult::Filled {
+                    coord,
+                    chunk,
+                    vertices,
+                    indices,
+                } => {
                     if !self.in_flight.remove(&coord) {
                         continue;
                     }
@@ -242,7 +252,12 @@ impl World {
     /// solid. Returns `None` if the ray traverses `max_distance`
     /// without hitting a solid voxel, or only touches chunks that
     /// aren't yet filled.
-    pub fn raycast_column(&self, origin: glam::Vec3, dir: glam::Vec3, max_distance: f32) -> Option<(i32, i32)> {
+    pub fn raycast_column(
+        &self,
+        origin: glam::Vec3,
+        dir: glam::Vec3,
+        max_distance: f32,
+    ) -> Option<(i32, i32)> {
         if dir.length_squared() < 1e-6 {
             return None;
         }

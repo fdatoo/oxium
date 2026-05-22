@@ -58,7 +58,7 @@
 
 use crate::voxel::block::Block;
 use crate::voxel::chunk::DenseChunk;
-use crate::voxel::coords::{LocalPos, CHUNK_DIM_U};
+use crate::voxel::coords::{CHUNK_DIM_U, LocalPos};
 use glam::UVec3;
 
 /// Settle aquifer-placed fluid in `chunk`. Walks every masked

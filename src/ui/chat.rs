@@ -28,7 +28,9 @@ pub struct ChatLog {
 
 impl ChatLog {
     pub fn new() -> Self {
-        Self { lines: VecDeque::with_capacity(LOG_CAP) }
+        Self {
+            lines: VecDeque::with_capacity(LOG_CAP),
+        }
     }
     pub fn push(&mut self, kind: LineKind, text: impl Into<String>) {
         if self.lines.len() == LOG_CAP {
@@ -173,12 +175,18 @@ pub struct ChatInput {
 
 impl ChatInput {
     pub fn new(prefill: &str) -> Self {
-        Self { buf: prefill.to_string(), cursor: prefill.len(), ..Self::default() }
+        Self {
+            buf: prefill.to_string(),
+            cursor: prefill.len(),
+            ..Self::default()
+        }
     }
 
     pub fn insert_text(&mut self, text: &str) {
         for ch in text.chars() {
-            if ch.is_control() { continue }
+            if ch.is_control() {
+                continue;
+            }
             let mut buf = [0u8; 4];
             let s = ch.encode_utf8(&mut buf);
             self.buf.insert_str(self.cursor, s);
@@ -188,7 +196,9 @@ impl ChatInput {
     }
 
     pub fn backspace(&mut self) {
-        if self.cursor == 0 { return }
+        if self.cursor == 0 {
+            return;
+        }
         let mut new_cursor = self.cursor - 1;
         while !self.buf.is_char_boundary(new_cursor) && new_cursor > 0 {
             new_cursor -= 1;
@@ -199,7 +209,9 @@ impl ChatInput {
     }
 
     pub fn delete_forward(&mut self) {
-        if self.cursor >= self.buf.len() { return }
+        if self.cursor >= self.buf.len() {
+            return;
+        }
         let mut end = self.cursor + 1;
         while end < self.buf.len() && !self.buf.is_char_boundary(end) {
             end += 1;
@@ -209,28 +221,42 @@ impl ChatInput {
     }
 
     pub fn move_left(&mut self) {
-        if self.cursor == 0 { return }
+        if self.cursor == 0 {
+            return;
+        }
         let mut c = self.cursor - 1;
-        while c > 0 && !self.buf.is_char_boundary(c) { c -= 1; }
+        while c > 0 && !self.buf.is_char_boundary(c) {
+            c -= 1;
+        }
         self.cursor = c;
     }
 
     pub fn move_right(&mut self) {
-        if self.cursor >= self.buf.len() { return }
+        if self.cursor >= self.buf.len() {
+            return;
+        }
         let mut c = self.cursor + 1;
-        while c < self.buf.len() && !self.buf.is_char_boundary(c) { c += 1; }
+        while c < self.buf.len() && !self.buf.is_char_boundary(c) {
+            c += 1;
+        }
         self.cursor = c;
     }
 
-    pub fn move_home(&mut self) { self.cursor = 0; }
-    pub fn move_end(&mut self)  { self.cursor = self.buf.len(); }
+    pub fn move_home(&mut self) {
+        self.cursor = 0;
+    }
+    pub fn move_end(&mut self) {
+        self.cursor = self.buf.len();
+    }
 
     pub fn history_prev(&mut self) {
-        if self.history.is_empty() { return }
+        if self.history.is_empty() {
+            return;
+        }
         let next = match self.history_pos {
-            None       => self.history.len() - 1,
-            Some(0)    => 0,
-            Some(i)    => i - 1,
+            None => self.history.len() - 1,
+            Some(0) => 0,
+            Some(i) => i - 1,
         };
         self.history_pos = Some(next);
         self.buf = self.history[next].clone();
@@ -258,7 +284,9 @@ impl ChatInput {
         self.cursor = 0;
         self.history_pos = None;
         if !line.is_empty() {
-            if self.history.len() == 32 { self.history.pop_front(); }
+            if self.history.len() == 32 {
+                self.history.pop_front();
+            }
             self.history.push_back(line.clone());
         }
         line

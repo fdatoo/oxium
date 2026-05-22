@@ -34,7 +34,7 @@
 //! evaluation; PR 3 just reads per-voxel).
 
 use crate::worldgen::config::{ClimateConfig, DensityConfig};
-use crate::worldgen::plates::{plate_at, Plate, PlateKind, PlateLookup};
+use crate::worldgen::plates::{Plate, PlateKind, PlateLookup, plate_at};
 use crate::worldgen::tuning::*;
 use glam::Vec2;
 use noise::{Fbm, MultiFractal, NoiseFn, Simplex};
@@ -115,8 +115,7 @@ impl HeightmapNoise {
     ) -> f32 {
         let (c, s, r, _) = self.climate(seed, wx, wz, cfg);
         let offset = cfg.offset_spline.evaluate(c, s, r);
-        offset_to_world_y(offset, density)
-            .clamp((CAVE_FLOOR_Y + 8) as f32, MAX_TERRAIN_Y as f32)
+        offset_to_world_y(offset, density).clamp((CAVE_FLOOR_Y + 8) as f32, MAX_TERRAIN_Y as f32)
     }
 
     /// Magnitude of the horizontal gradient of `h_pre` at `(wx, wz)`,
@@ -269,12 +268,7 @@ pub fn plate_roughness_bias(plate: &Plate, cfg: &ClimateConfig) -> f32 {
 /// elsewhere. Plates with `d_i > d_min + scale` contribute exactly
 /// zero, so in plate interiors a single plate dominates and behaviour
 /// matches the old `look.t = 1` case.
-pub fn smooth_plate_contribution(
-    seed: u64,
-    wx: i32,
-    wz: i32,
-    cfg: &ClimateConfig,
-) -> (f32, f32) {
+pub fn smooth_plate_contribution(seed: u64, wx: i32, wz: i32, cfg: &ClimateConfig) -> (f32, f32) {
     let q = Vec2::new(wx as f32, wz as f32);
     let qcx = wx.div_euclid(PLATE_CELL_SIZE);
     let qcz = wz.div_euclid(PLATE_CELL_SIZE);
@@ -465,8 +459,7 @@ pub fn slide(density: f32, wy: i32, cfg: &DensityConfig) -> f32 {
     let after_top = density + (cfg.slide_top_target - density) * top_f;
 
     let bot_end = cfg.y_min + cfg.slide_bottom_blocks;
-    let bot_f =
-        ((bot_end - wy) as f32 / cfg.slide_bottom_blocks.max(1) as f32).clamp(0.0, 1.0);
+    let bot_f = ((bot_end - wy) as f32 / cfg.slide_bottom_blocks.max(1) as f32).clamp(0.0, 1.0);
     after_top + (cfg.slide_bottom_target - after_top) * bot_f
 }
 

@@ -3,7 +3,7 @@
 
 use image::{ImageBuffer, Rgba};
 use oxium::viz_render;
-use oxium::worldgen::{probe::Stage, Generator};
+use oxium::worldgen::{Generator, probe::Stage};
 use std::path::PathBuf;
 
 pub fn run(args: &[String]) -> Result<(), String> {
@@ -27,7 +27,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
     }
 
-    img.save(&opts.output).map_err(|e| format!("write {:?}: {e}", opts.output))?;
+    img.save(&opts.output)
+        .map_err(|e| format!("write {:?}: {e}", opts.output))?;
     Ok(())
 }
 
@@ -62,44 +63,48 @@ fn parse(args: &[String]) -> Result<Opts, String> {
                 if parts.len() != 2 {
                     return Err(format!("--center expects wx,wz, got {val}"));
                 }
-                let wx: i32 = parts[0].parse().map_err(|_| format!("bad wx: {}", parts[0]))?;
-                let wz: i32 = parts[1].parse().map_err(|_| format!("bad wz: {}", parts[1]))?;
+                let wx: i32 = parts[0]
+                    .parse()
+                    .map_err(|_| format!("bad wx: {}", parts[0]))?;
+                let wz: i32 = parts[1]
+                    .parse()
+                    .map_err(|_| format!("bad wz: {}", parts[1]))?;
                 center = Some((wx, wz));
             }
-            "--zoom"   => zoom   = Some(val.parse().map_err(|_| format!("bad zoom: {val}"))?),
-            "--stage"  => stage  = Some(val.clone()),
-            "--width"  => width  = Some(val.parse().map_err(|_| format!("bad width: {val}"))?),
+            "--zoom" => zoom = Some(val.parse().map_err(|_| format!("bad zoom: {val}"))?),
+            "--stage" => stage = Some(val.clone()),
+            "--width" => width = Some(val.parse().map_err(|_| format!("bad width: {val}"))?),
             "--output" => output = Some(PathBuf::from(val)),
-            other      => return Err(format!("unknown flag: {other}")),
+            other => return Err(format!("unknown flag: {other}")),
         }
         i += 2;
     }
 
     Ok(Opts {
-        seed:   seed.ok_or("--seed required")?,
+        seed: seed.ok_or("--seed required")?,
         center: center.ok_or("--center required")?,
-        zoom:   zoom.ok_or("--zoom required")?,
-        stage:  stage.ok_or("--stage required")?,
-        width:  width.ok_or("--width required")?,
+        zoom: zoom.ok_or("--zoom required")?,
+        stage: stage.ok_or("--stage required")?,
+        width: width.ok_or("--width required")?,
         output: output.ok_or("--output required")?,
     })
 }
 
 fn parse_stage(s: &str) -> Result<Stage, String> {
     match s {
-        "continentalness"     => Ok(Stage::Continentalness),
-        "plate-id"            => Ok(Stage::PlateId),
-        "temperature"         => Ok(Stage::Temperature),
-        "humidity"            => Ok(Stage::Humidity),
-        "desertness"          => Ok(Stage::Desertness),
-        "weirdness"           => Ok(Stage::Weirdness),
-        "h-pre"               => Ok(Stage::HPre),
-        "valley-carve"        => Ok(Stage::ValleyCarve),
-        "h-target"            => Ok(Stage::HTarget),
-        "flow-accum"          => Ok(Stage::FlowAccum),
-        "biome-id"            => Ok(Stage::BiomeId),
-        "aquifer-y"           => Ok(Stage::AquiferY),
-        "aquifer-substance"   => Ok(Stage::AquiferSubstance),
-        other                 => Err(format!("unknown stage: {other}")),
+        "continentalness" => Ok(Stage::Continentalness),
+        "plate-id" => Ok(Stage::PlateId),
+        "temperature" => Ok(Stage::Temperature),
+        "humidity" => Ok(Stage::Humidity),
+        "desertness" => Ok(Stage::Desertness),
+        "weirdness" => Ok(Stage::Weirdness),
+        "h-pre" => Ok(Stage::HPre),
+        "valley-carve" => Ok(Stage::ValleyCarve),
+        "h-target" => Ok(Stage::HTarget),
+        "flow-accum" => Ok(Stage::FlowAccum),
+        "biome-id" => Ok(Stage::BiomeId),
+        "aquifer-y" => Ok(Stage::AquiferY),
+        "aquifer-substance" => Ok(Stage::AquiferSubstance),
+        other => Err(format!("unknown stage: {other}")),
     }
 }

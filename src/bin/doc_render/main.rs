@@ -37,8 +37,8 @@ fn main() -> ExitCode {
     let rest = &args[1..];
     let result: Result<(), String> = match sub {
         "snapshot" => snapshot::run(rest),
-        "parity"   => parity_dump::run(rest),
-        other      => Err(format!("unknown subcommand: {other}")),
+        "parity" => parity_dump::run(rest),
+        other => Err(format!("unknown subcommand: {other}")),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -49,5 +49,5 @@ fn main() -> ExitCode {
     }
 }
 
-mod snapshot;
 mod parity_dump;
+mod snapshot;

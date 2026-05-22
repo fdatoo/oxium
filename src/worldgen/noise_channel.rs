@@ -85,12 +85,18 @@ mod tests {
         // Different first_octave → different base frequency → noise
         // samples at the same point differ for non-trivial inputs.
         let a = build_channel(
-            &ChannelParams { first_octave: -7, amplitudes: vec![1.0] },
+            &ChannelParams {
+                first_octave: -7,
+                amplitudes: vec![1.0],
+            },
             42,
             0,
         );
         let b = build_channel(
-            &ChannelParams { first_octave: -3, amplitudes: vec![1.0] },
+            &ChannelParams {
+                first_octave: -3,
+                amplitudes: vec![1.0],
+            },
             42,
             0,
         );

@@ -31,7 +31,10 @@ impl Registry {
     }
 
     pub fn find(&self, name: &str) -> Option<&dyn Command> {
-        self.commands.iter().find(|c| c.name() == name).map(|c| c.as_ref())
+        self.commands
+            .iter()
+            .find(|c| c.name() == name)
+            .map(|c| c.as_ref())
     }
 
     pub fn all(&self) -> &[Box<dyn Command>] {
@@ -48,15 +51,21 @@ impl Registry {
         let mut parts = body.split_whitespace();
         let name = parts.next().ok_or_else(|| "empty command".to_string())?;
         let args: Vec<&str> = parts.collect();
-        let cmd = self.find(name).ok_or_else(|| format!("unknown command: /{name}"))?;
+        let cmd = self
+            .find(name)
+            .ok_or_else(|| format!("unknown command: /{name}"))?;
         cmd.run(&args)
     }
 }
 
 struct CmdTp;
 impl Command for CmdTp {
-    fn name(&self) -> &'static str { "tp" }
-    fn help(&self) -> &'static str { "/tp <x> <y> <z> — teleport the player" }
+    fn name(&self) -> &'static str {
+        "tp"
+    }
+    fn help(&self) -> &'static str {
+        "/tp <x> <y> <z> — teleport the player"
+    }
     fn run(&self, args: &[&str]) -> Result<Vec<UiEffect>, String> {
         if args.len() != 3 {
             return Err("usage: /tp <x> <y> <z>".into());
@@ -71,19 +80,29 @@ impl Command for CmdTp {
 
 struct CmdTime;
 impl Command for CmdTime {
-    fn name(&self) -> &'static str { "time" }
-    fn help(&self) -> &'static str { "/time <0..1> — set time of day" }
+    fn name(&self) -> &'static str {
+        "time"
+    }
+    fn help(&self) -> &'static str {
+        "/time <0..1> — set time of day"
+    }
     fn run(&self, args: &[&str]) -> Result<Vec<UiEffect>, String> {
         let arg = args.first().ok_or("usage: /time <0..1>")?;
-        let t = arg.parse::<f32>().map_err(|_| format!("not a number: {arg}"))?;
+        let t = arg
+            .parse::<f32>()
+            .map_err(|_| format!("not a number: {arg}"))?;
         Ok(vec![UiEffect::SetTime(t.clamp(0.0, 1.0))])
     }
 }
 
 struct CmdFly;
 impl Command for CmdFly {
-    fn name(&self) -> &'static str { "fly" }
-    fn help(&self) -> &'static str { "/fly — toggle fly mode" }
+    fn name(&self) -> &'static str {
+        "fly"
+    }
+    fn help(&self) -> &'static str {
+        "/fly — toggle fly mode"
+    }
     fn run(&self, _args: &[&str]) -> Result<Vec<UiEffect>, String> {
         Ok(vec![UiEffect::ToggleFly])
     }
@@ -91,7 +110,9 @@ impl Command for CmdFly {
 
 struct CmdNoclip;
 impl Command for CmdNoclip {
-    fn name(&self) -> &'static str { "noclip" }
+    fn name(&self) -> &'static str {
+        "noclip"
+    }
     fn help(&self) -> &'static str {
         "/noclip — toggle collision in fly mode (no effect while walking)"
     }
@@ -102,20 +123,25 @@ impl Command for CmdNoclip {
 
 struct CmdSave;
 impl Command for CmdSave {
-    fn name(&self) -> &'static str { "save" }
-    fn help(&self) -> &'static str { "/save — force an autosave now" }
+    fn name(&self) -> &'static str {
+        "save"
+    }
+    fn help(&self) -> &'static str {
+        "/save — force an autosave now"
+    }
     fn run(&self, _args: &[&str]) -> Result<Vec<UiEffect>, String> {
-        Ok(vec![
-            UiEffect::Save,
-            UiEffect::PostMessage("Saved.".into()),
-        ])
+        Ok(vec![UiEffect::Save, UiEffect::PostMessage("Saved.".into())])
     }
 }
 
 struct CmdHelp;
 impl Command for CmdHelp {
-    fn name(&self) -> &'static str { "help" }
-    fn help(&self) -> &'static str { "/help — list commands" }
+    fn name(&self) -> &'static str {
+        "help"
+    }
+    fn help(&self) -> &'static str {
+        "/help — list commands"
+    }
     fn run(&self, _args: &[&str]) -> Result<Vec<UiEffect>, String> {
         // /help is handled specially in submit_chat where the registry is
         // available; never reach this body.
@@ -125,8 +151,12 @@ impl Command for CmdHelp {
 
 struct CmdClear;
 impl Command for CmdClear {
-    fn name(&self) -> &'static str { "clear" }
-    fn help(&self) -> &'static str { "/clear — clear the chat log" }
+    fn name(&self) -> &'static str {
+        "clear"
+    }
+    fn help(&self) -> &'static str {
+        "/clear — clear the chat log"
+    }
     fn run(&self, _args: &[&str]) -> Result<Vec<UiEffect>, String> {
         Ok(vec![UiEffect::ClearChat])
     }
@@ -138,15 +168,21 @@ mod tests {
 
     struct Echo;
     impl Command for Echo {
-        fn name(&self) -> &'static str { "echo" }
-        fn help(&self) -> &'static str { "echo <text>" }
+        fn name(&self) -> &'static str {
+            "echo"
+        }
+        fn help(&self) -> &'static str {
+            "echo <text>"
+        }
         fn run(&self, args: &[&str]) -> Result<Vec<UiEffect>, String> {
             Ok(vec![UiEffect::PostMessage(args.join(" "))])
         }
     }
 
     fn registry_with_echo() -> Registry {
-        Registry { commands: vec![Box::new(Echo)] }
+        Registry {
+            commands: vec![Box::new(Echo)],
+        }
     }
 
     #[test]
@@ -174,7 +210,10 @@ mod tests {
     fn cmd_tp_parses_three_floats() {
         let r = Registry::builtin();
         let effs = r.dispatch("/tp 1.5 64 -32").unwrap();
-        assert_eq!(effs, vec![UiEffect::Teleport(glam::Vec3::new(1.5, 64.0, -32.0))]);
+        assert_eq!(
+            effs,
+            vec![UiEffect::Teleport(glam::Vec3::new(1.5, 64.0, -32.0))]
+        );
     }
 
     #[test]

@@ -139,8 +139,7 @@ fn blit_tile(atlas: &mut [u8], index: u32, tile_rgba: &[u8]) {
 
     for row in 0..TILE_PX {
         let src_offset = (row as usize) * tile_row_stride;
-        let dst_offset =
-            ((dst_y_px + row) as usize) * atlas_row_stride + (dst_x_px as usize) * 4;
+        let dst_offset = ((dst_y_px + row) as usize) * atlas_row_stride + (dst_x_px as usize) * 4;
         atlas[dst_offset..dst_offset + tile_row_stride]
             .copy_from_slice(&tile_rgba[src_offset..src_offset + tile_row_stride]);
     }

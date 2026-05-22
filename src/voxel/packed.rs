@@ -43,11 +43,7 @@ impl Packed4Bit {
     pub fn get(&self, idx: usize) -> u8 {
         debug_assert!(idx < self.len);
         let byte = self.bytes[idx >> 1];
-        if idx & 1 == 0 {
-            byte & 0x0F
-        } else {
-            byte >> 4
-        }
+        if idx & 1 == 0 { byte & 0x0F } else { byte >> 4 }
     }
 
     /// Write a 4-bit value. Only the low 4 bits of `value` are honoured; in

@@ -389,7 +389,7 @@ impl ConfigHolder {
     }
 }
 
-use notify_debouncer_mini::{new_debouncer, DebounceEventResult, Debouncer};
+use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -485,10 +485,8 @@ mod tests {
 
         // Write initial config with factor=4.0.
         let initial = WorldgenConfig::bundled_default().unwrap();
-        let initial_text = ron::ser::to_string_pretty(
-            &initial,
-            ron::ser::PrettyConfig::default(),
-        ).unwrap();
+        let initial_text =
+            ron::ser::to_string_pretty(&initial, ron::ser::PrettyConfig::default()).unwrap();
         std::fs::write(&path, &initial_text).unwrap();
 
         let cfg = WorldgenConfig::from_ron_file(&path).unwrap();

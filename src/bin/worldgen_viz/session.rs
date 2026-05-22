@@ -8,8 +8,8 @@ use crate::paint::PaintMode;
 use crate::probe::Probe;
 use crate::world::invalidate::Invalidator;
 use crate::world::{Region, World};
-use oxium::worldgen::config::{ConfigHolder, WorldgenConfig};
 use oxium::worldgen::Generator;
+use oxium::worldgen::config::{ConfigHolder, WorldgenConfig};
 use std::sync::Arc;
 
 pub enum CamKind {

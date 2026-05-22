@@ -80,9 +80,7 @@ pub enum DensityFn {
     /// Hermite cubic spline evaluation. Input is selected by
     /// `ClimateChannel`; the spline's nesting walks three channels
     /// (continentalness, terrain_shape, ridges_pv).
-    Spline {
-        spline: Arc<NestedSpline>,
-    },
+    Spline { spline: Arc<NestedSpline> },
     /// Binary addition.
     Add(Box<DensityFn>, Box<DensityFn>),
     /// Binary multiplication.
@@ -141,9 +139,11 @@ impl DensityFn {
                     v * cfg.above_surface_softening
                 }
             }
-            DensityFn::Spline { spline } => {
-                spline.evaluate(climate.continentalness, climate.terrain_shape, climate.ridges_pv)
-            }
+            DensityFn::Spline { spline } => spline.evaluate(
+                climate.continentalness,
+                climate.terrain_shape,
+                climate.ridges_pv,
+            ),
             DensityFn::Add(a, b) => {
                 a.evaluate(wx, wy, wz, climate, density, cfg)
                     + b.evaluate(wx, wy, wz, climate, density, cfg)
@@ -250,8 +250,7 @@ impl CellEvaluator {
     {
         let mut corners = vec![0.0_f32; CORNER_COUNT * CORNER_COUNT * CORNER_COUNT];
         // 2D climate cache keyed by (cx, cz) where cx,cz ∈ [0..CORNER_COUNT).
-        let mut climate_cache: Vec<Option<ColumnClimate>> =
-            vec![None; CORNER_COUNT * CORNER_COUNT];
+        let mut climate_cache: Vec<Option<ColumnClimate>> = vec![None; CORNER_COUNT * CORNER_COUNT];
         for cz in 0..CORNER_COUNT {
             for cy in 0..CORNER_COUNT {
                 for cx in 0..CORNER_COUNT {

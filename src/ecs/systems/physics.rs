@@ -11,10 +11,10 @@
 //! the same flag is still computed in Fly so a future "respect-ground"
 //! cosmetic could read it, but no current system does.
 
+use crate::ecs::GameEcs;
 use crate::ecs::components::{
     Aabb, Grounded, Movement, MovementMode, PlayerInput, Position, Velocity,
 };
-use crate::ecs::GameEcs;
 use crate::physics::sweep::sweep_player;
 use crate::voxel::world::World;
 

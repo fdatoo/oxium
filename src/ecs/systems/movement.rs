@@ -12,8 +12,8 @@
 //! the ground. The renderer reads the phase to apply a small head-sway
 //! offset. Fly mode, falling, and standing still hold the phase fixed.
 
-use crate::ecs::components::{Camera, Grounded, Movement, MovementMode, PlayerInput, Velocity};
 use crate::ecs::GameEcs;
+use crate::ecs::components::{Camera, Grounded, Movement, MovementMode, PlayerInput, Velocity};
 use glam::Vec3;
 
 /// Drive `Position` + `Velocity` from `PlayerInput` and `Camera`.
@@ -44,7 +44,11 @@ pub fn movement(ecs: &mut GameEcs, dt: f32) {
     // "strafe right" axis, regardless of where the camera is looking.
     let right = Vec3::new(-sy, 0.0, cy).normalize_or_zero();
 
-    let base_speed = if input.sprint { mov.speed * 2.0 } else { mov.speed };
+    let base_speed = if input.sprint {
+        mov.speed * 2.0
+    } else {
+        mov.speed
+    };
 
     match mov.mode {
         MovementMode::Fly => {

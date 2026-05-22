@@ -3,24 +3,24 @@
 //! consumes this module's `render_pixel` to fill its texture.
 
 use crate::viz_render::colormap;
-use crate::worldgen::probe::Stage;
 use crate::worldgen::Generator;
+use crate::worldgen::probe::Stage;
 
 /// Sensible value range per stage for normalisation into `[0, 1]`.
 /// Returning `None` means the stage is categorical and the colormap
 /// keys on the raw value rather than normalising.
 pub fn range(stage: Stage) -> Option<(f32, f32)> {
     match stage {
-        Stage::Continentalness    => Some((-1.0, 1.0)),
-        Stage::Temperature        => Some((-1.0, 1.0)),
-        Stage::Humidity           => Some((-1.0, 1.0)),
-        Stage::Desertness         => Some((-1.0, 1.0)),
-        Stage::Weirdness          => Some((-1.0, 1.0)),
-        Stage::HPre               => Some((40.0, 160.0)),
-        Stage::ValleyCarve        => Some((0.0, 16.0)),
-        Stage::HTarget            => Some((40.0, 160.0)),
-        Stage::FlowAccum          => Some((0.0, 4096.0)),
-        Stage::AquiferY           => Some((-64.0, 96.0)),
+        Stage::Continentalness => Some((-1.0, 1.0)),
+        Stage::Temperature => Some((-1.0, 1.0)),
+        Stage::Humidity => Some((-1.0, 1.0)),
+        Stage::Desertness => Some((-1.0, 1.0)),
+        Stage::Weirdness => Some((-1.0, 1.0)),
+        Stage::HPre => Some((40.0, 160.0)),
+        Stage::ValleyCarve => Some((0.0, 16.0)),
+        Stage::HTarget => Some((40.0, 160.0)),
+        Stage::FlowAccum => Some((0.0, 4096.0)),
+        Stage::AquiferY => Some((-64.0, 96.0)),
         Stage::PlateId | Stage::BiomeId | Stage::AquiferSubstance => None,
     }
 }
@@ -31,18 +31,17 @@ pub fn pixel(stage: Stage, raw: f32) -> [u8; 4] {
         let t = ((raw - lo) / (hi - lo)).clamp(0.0, 1.0);
         match stage {
             Stage::Continentalness => colormap::divergent(t),
-            Stage::Temperature
-            | Stage::Humidity
-            | Stage::Desertness
-            | Stage::Weirdness     => colormap::viridis(t),
+            Stage::Temperature | Stage::Humidity | Stage::Desertness | Stage::Weirdness => {
+                colormap::viridis(t)
+            }
             Stage::HPre | Stage::HTarget => colormap::terrain_ramp(t),
-            Stage::ValleyCarve     => colormap::hot(t),
-            Stage::FlowAccum       => {
+            Stage::ValleyCarve => colormap::hot(t),
+            Stage::FlowAccum => {
                 // log-scale flow accumulation before colormap
                 let t_log = (raw.max(1.0).ln() / 4096_f32.ln()).clamp(0.0, 1.0);
                 colormap::viridis(t_log)
             }
-            Stage::AquiferY        => colormap::divergent(t),
+            Stage::AquiferY => colormap::divergent(t),
             // Categorical stages are handled by the outer else branch;
             // these arms are unreachable here but required for exhaustiveness.
             Stage::PlateId | Stage::BiomeId | Stage::AquiferSubstance => [0, 0, 0, 255],
@@ -50,9 +49,9 @@ pub fn pixel(stage: Stage, raw: f32) -> [u8; 4] {
     } else {
         match stage {
             Stage::PlateId | Stage::BiomeId => colormap::categorical(raw),
-            Stage::AquiferSubstance => colormap::binary(
-                raw, [38, 99, 200, 255], [220, 110, 30, 255],
-            ),
+            Stage::AquiferSubstance => {
+                colormap::binary(raw, [38, 99, 200, 255], [220, 110, 30, 255])
+            }
             // Scalar stages are handled by the outer if branch;
             // these arms are unreachable here but required for exhaustiveness.
             _ => [0, 0, 0, 255],

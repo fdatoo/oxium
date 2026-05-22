@@ -24,7 +24,7 @@
 //! persistence thread at all.
 
 use crate::persistence::region::{
-    read_presence_bitmap, region_coord, region_path, slot_index, REGION_SLOTS,
+    REGION_SLOTS, read_presence_bitmap, region_coord, region_path, slot_index,
 };
 use crate::voxel::coords::ChunkCoord;
 use std::collections::HashMap;
@@ -77,11 +77,7 @@ impl SaveIndex {
                     // from seed instead of loading the saved version,
                     // which is far better than a hard crash. The log
                     // line gives us a breadcrumb if it ever fires.
-                    log::warn!(
-                        "save_index header read failed for region {:?}: {:?}",
-                        rc,
-                        e
-                    );
+                    log::warn!("save_index header read failed for region {:?}: {:?}", rc, e);
                     None
                 }
             }
@@ -142,7 +138,10 @@ mod tests {
         write_chunk(&path, written, &PalettedChunk::all_air()).unwrap();
 
         let mut idx = SaveIndex::new();
-        assert!(idx.has(td.path(), written), "the chunk we wrote should be present");
+        assert!(
+            idx.has(td.path(), written),
+            "the chunk we wrote should be present"
+        );
         // Pick a sibling in the same region file (rx=0, ry=0, rz=0
         // because all components are < 16).
         let sibling = ChunkCoord(IVec3::new(0, 0, 0));
@@ -159,6 +158,9 @@ mod tests {
         let c = ChunkCoord(IVec3::new(1, 2, 3));
         assert!(!idx.has(td.path(), c));
         idx.mark(c);
-        assert!(idx.has(td.path(), c), "mark() must flip the cache for the saved slot");
+        assert!(
+            idx.has(td.path(), c),
+            "mark() must flip the cache for the saved slot"
+        );
     }
 }

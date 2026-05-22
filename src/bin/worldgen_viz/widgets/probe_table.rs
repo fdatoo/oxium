@@ -4,7 +4,12 @@ use egui::Ui;
 use oxium::voxel::block::Block;
 use oxium::worldgen::probe::{ColumnProbe, DensityBreakdown};
 
-pub fn show(ui: &mut Ui, snapshot: &ColumnProbe, breakdown: Option<&DensityBreakdown>, probe_y: i32) {
+pub fn show(
+    ui: &mut Ui,
+    snapshot: &ColumnProbe,
+    breakdown: Option<&DensityBreakdown>,
+    probe_y: i32,
+) {
     ui.heading(format!("Column ({}, {})", snapshot.wx, snapshot.wz));
 
     ui.collapsing("Geometry", |ui| {
@@ -29,23 +34,35 @@ pub fn show(ui: &mut Ui, snapshot: &ColumnProbe, breakdown: Option<&DensityBreak
 
     ui.collapsing("Hydrology", |ui| {
         kv(ui, "flow_accum", snapshot.flow_accum.to_string());
-        kv(ui, "lake_rim", match snapshot.lake_rim {
-            Some(y) => y.to_string(),
-            None => "—".to_string(),
-        });
+        kv(
+            ui,
+            "lake_rim",
+            match snapshot.lake_rim {
+                Some(y) => y.to_string(),
+                None => "—".to_string(),
+            },
+        );
     });
 
     ui.collapsing("Aquifer", |ui| {
         kv(ui, "y_top", snapshot.aquifer_y_top.to_string());
-        kv(ui, "fluid", match snapshot.aquifer_fluid {
-            Block::Water => "Water".to_string(),
-            Block::Lava => "Lava".to_string(),
-            b => format!("{:?}", b),
-        });
+        kv(
+            ui,
+            "fluid",
+            match snapshot.aquifer_fluid {
+                Block::Water => "Water".to_string(),
+                Block::Lava => "Lava".to_string(),
+                b => format!("{:?}", b),
+            },
+        );
     });
 
     ui.collapsing("Caves", |ui| {
-        kv(ui, "intersecting systems", snapshot.cave_systems_count.to_string());
+        kv(
+            ui,
+            "intersecting systems",
+            snapshot.cave_systems_count.to_string(),
+        );
     });
 
     if let Some(b) = breakdown {

@@ -46,13 +46,7 @@ pub struct CollisionResult {
 /// for a 0.6 × 1.8 × 0.6 m humanoid). `pos` is the *feet* position; the
 /// AABB extends from `(pos.x − half.x, pos.y, pos.z − half.z)` to
 /// `(pos.x + half.x, pos.y + 2·half.y, pos.z + half.z)`.
-pub fn sweep_player(
-    world: &World,
-    pos: Vec3,
-    half: Vec3,
-    vel: Vec3,
-    dt: f32,
-) -> CollisionResult {
+pub fn sweep_player(world: &World, pos: Vec3, half: Vec3, vel: Vec3, dt: f32) -> CollisionResult {
     let mut p = pos;
     let mut v = vel;
     let mut grounded = false;
@@ -135,7 +129,7 @@ fn player_aabb_blocked(world: &World, feet: Vec3, half: Vec3) -> bool {
             for x in x0..=x1 {
                 match world.get_block(BlockPos(IVec3::new(x, y, z))) {
                     Some(b) if world.registry.info(b).solid => return true,
-                    Some(_) => {} // non-solid (air, water) — walk through
+                    Some(_) => {}        // non-solid (air, water) — walk through
                     None => return true, // unloaded chunk — solid by default
                 }
             }
@@ -200,9 +194,7 @@ mod tests {
     fn walks_into_wall_stops() {
         let mut w = world_with_floor();
         // Add a single wall block at (2, 1, 5).
-        if let Some(ChunkSlot::Stored { data, .. }) =
-            w.chunks.get_mut(&ChunkCoord(IVec3::ZERO))
-        {
+        if let Some(ChunkSlot::Stored { data, .. }) = w.chunks.get_mut(&ChunkCoord(IVec3::ZERO)) {
             let mut dense = data.decompress();
             dense.set(LocalPos(UVec3::new(2, 1, 5)), Block::Stone);
             *data = std::sync::Arc::new(PalettedChunk::compress(&dense));
@@ -229,9 +221,7 @@ mod tests {
     fn wall_slide_keeps_z_motion() {
         let mut w = world_with_floor();
         // Wall on +X side blocking lateral X, but free along Z.
-        if let Some(ChunkSlot::Stored { data, .. }) =
-            w.chunks.get_mut(&ChunkCoord(IVec3::ZERO))
-        {
+        if let Some(ChunkSlot::Stored { data, .. }) = w.chunks.get_mut(&ChunkCoord(IVec3::ZERO)) {
             let mut dense = data.decompress();
             for y in 1..3 {
                 dense.set(LocalPos(UVec3::new(2, y, 5)), Block::Stone);
@@ -246,6 +236,10 @@ mod tests {
             1.0,
         );
         assert!(res.pos.x < 2.0, "x should hit the wall: got {}", res.pos.x);
-        assert!(res.pos.z > 5.0, "z should keep sliding past start: got {}", res.pos.z);
+        assert!(
+            res.pos.z > 5.0,
+            "z should keep sliding past start: got {}",
+            res.pos.z
+        );
     }
 }

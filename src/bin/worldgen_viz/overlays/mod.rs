@@ -14,8 +14,8 @@
 pub use oxium::viz_render::{colormap, stages};
 
 use egui::{ColorImage, TextureHandle, TextureOptions, Ui};
-use oxium::worldgen::probe::Stage;
 use oxium::worldgen::Generator;
+use oxium::worldgen::probe::Stage;
 
 pub const MAP_SIZE_PX: usize = 256;
 
@@ -103,12 +103,14 @@ impl MapView {
             for px in 0..MAP_SIZE_PX {
                 let (wx, wz) = self.pixel_to_world(px as f32, py as f32);
                 let rgba = stages::render_pixel(generator, self.stage, wx, wz);
-                pixels[py * MAP_SIZE_PX + px] = egui::Color32::from_rgba_premultiplied(
-                    rgba[0], rgba[1], rgba[2], rgba[3],
-                );
+                pixels[py * MAP_SIZE_PX + px] =
+                    egui::Color32::from_rgba_premultiplied(rgba[0], rgba[1], rgba[2], rgba[3]);
             }
         }
-        let img = ColorImage { size: [MAP_SIZE_PX, MAP_SIZE_PX], pixels };
+        let img = ColorImage {
+            size: [MAP_SIZE_PX, MAP_SIZE_PX],
+            pixels,
+        };
         let tex = ctx.load_texture("viz_overlay_map", img, TextureOptions::NEAREST);
         self.texture = Some(tex);
         self.last_render_key = Some(key);
@@ -140,20 +142,15 @@ impl MapView {
 
         // Per-stage description (helps if the user has no idea what
         // "h_pre" or "FlowAccum" means).
-        ui.label(
-            egui::RichText::new(self.stage.description())
-                .small()
-                .weak(),
-        );
+        ui.label(egui::RichText::new(self.stage.description()).small().weak());
 
         let tex = self.texture.clone();
         let mut clicked = None;
         let mut hover_world: Option<(i32, i32)> = None;
         if let Some(tex) = tex {
             let size = egui::vec2(MAP_SIZE_PX as f32, MAP_SIZE_PX as f32);
-            let resp = ui.add(
-                egui::Image::new((tex.id(), size)).sense(egui::Sense::click_and_drag()),
-            );
+            let resp =
+                ui.add(egui::Image::new((tex.id(), size)).sense(egui::Sense::click_and_drag()));
             if resp.clicked() {
                 if let Some(pos) = resp.interact_pointer_pos() {
                     let local = pos - resp.rect.left_top();
@@ -237,7 +234,10 @@ impl MapView {
             ui.label(
                 egui::RichText::new(format!(
                     "hover ({}, {}) → {} = {:.3}",
-                    hwx, hwz, self.stage.label(), raw,
+                    hwx,
+                    hwz,
+                    self.stage.label(),
+                    raw,
                 ))
                 .monospace()
                 .small(),
@@ -271,7 +271,10 @@ fn legend(ui: &mut Ui, stage: Stage) {
             let color = egui::Color32::from_rgba_premultiplied(rgba[0], rgba[1], rgba[2], rgba[3]);
             let x0 = rect.left() + i as f32 * dx;
             painter.rect_filled(
-                egui::Rect::from_min_size(egui::pos2(x0, rect.top()), egui::vec2(dx + 0.5, strip_h)),
+                egui::Rect::from_min_size(
+                    egui::pos2(x0, rect.top()),
+                    egui::vec2(dx + 0.5, strip_h),
+                ),
                 0.0,
                 color,
             );
@@ -350,9 +353,13 @@ mod tests {
     #[test]
     fn zoom_clamps_in_range() {
         let mut m = MapView::new();
-        for _ in 0..100 { m.zoom(0.5); }
+        for _ in 0..100 {
+            m.zoom(0.5);
+        }
         assert!(m.blocks_per_pixel >= 0.5);
-        for _ in 0..100 { m.zoom(2.0); }
+        for _ in 0..100 {
+            m.zoom(2.0);
+        }
         assert!(m.blocks_per_pixel <= 64.0);
     }
 }

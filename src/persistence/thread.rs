@@ -10,10 +10,10 @@
 //! thread is generally much faster than human-scale edits, so backlog
 //! is rare.
 
-use crate::persistence::region::{read_chunk, region_path, write_chunk, RegionError};
+use crate::persistence::region::{RegionError, read_chunk, region_path, write_chunk};
 use crate::voxel::chunk::PalettedChunk;
 use crate::voxel::coords::ChunkCoord;
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use std::path::PathBuf;
 use std::thread;
 
@@ -27,9 +27,7 @@ pub enum PersistRequest {
         data: std::sync::Arc<PalettedChunk>,
     },
     /// Read the chunk at `coord` if it exists on disk.
-    Load {
-        coord: ChunkCoord,
-    },
+    Load { coord: ChunkCoord },
     /// Politely tell the thread to exit. Used by `shutdown` to wait for
     /// in-flight writes to finish before the process exits.
     Shutdown,
@@ -45,9 +43,7 @@ pub enum PersistResult {
     },
     /// A `Save` finished. The caller resets `meta.modified` so the same
     /// chunk doesn't get re-saved at the next autosave tick.
-    Saved {
-        coord: ChunkCoord,
-    },
+    Saved { coord: ChunkCoord },
 }
 
 /// Owner of the I/O thread.

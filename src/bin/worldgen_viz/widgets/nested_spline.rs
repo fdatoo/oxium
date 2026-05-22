@@ -65,18 +65,30 @@ pub fn show(ui: &mut Ui, spline: &mut NestedSpline, depth: usize) -> bool {
             );
             dirty |= ui
                 .add(egui::Slider::new(v, VALUE_RANGE.0..=VALUE_RANGE.1).text("value"))
-                .on_hover_text("Sets this branch of the spline to a single value across all inputs.")
+                .on_hover_text(
+                    "Sets this branch of the spline to a single value across all inputs.",
+                )
                 .changed();
             if depth < MAX_DEPTH
                 && ui
                     .button("→ convert to Multipoint")
-                    .on_hover_text("Replace with a 2-knot spline you can shape against the next axis.")
+                    .on_hover_text(
+                        "Replace with a 2-knot spline you can shape against the next axis.",
+                    )
                     .clicked()
             {
                 let current = *v;
                 *spline = NestedSpline::Multipoint(vec![
-                    NestedKnot { loc: -1.0, val: NestedSpline::Constant(current), slope: 0.0 },
-                    NestedKnot { loc: 1.0, val: NestedSpline::Constant(current), slope: 0.0 },
+                    NestedKnot {
+                        loc: -1.0,
+                        val: NestedSpline::Constant(current),
+                        slope: 0.0,
+                    },
+                    NestedKnot {
+                        loc: 1.0,
+                        val: NestedSpline::Constant(current),
+                        slope: 0.0,
+                    },
                 ]);
                 dirty = true;
             }
@@ -84,7 +96,11 @@ pub fn show(ui: &mut Ui, spline: &mut NestedSpline, depth: usize) -> bool {
         NestedSpline::Multipoint(_) => {
             // Read knot count for the header before we hand the spline
             // off to the curve editor (which needs &mut).
-            let knot_count = if let NestedSpline::Multipoint(k) = &*spline { k.len() } else { 0 };
+            let knot_count = if let NestedSpline::Multipoint(k) = &*spline {
+                k.len()
+            } else {
+                0
+            };
             ui.label(
                 egui::RichText::new(format!("Multipoint over {} — {} knots", axis, knot_count))
                     .small()
@@ -174,7 +190,9 @@ pub fn show(ui: &mut Ui, spline: &mut NestedSpline, depth: usize) -> bool {
                             slope: 0.0,
                         });
                         knots.sort_by(|a, b| {
-                            a.loc.partial_cmp(&b.loc).unwrap_or(std::cmp::Ordering::Equal)
+                            a.loc
+                                .partial_cmp(&b.loc)
+                                .unwrap_or(std::cmp::Ordering::Equal)
                         });
                     }
                     dirty = true;
@@ -200,10 +218,8 @@ pub fn show(ui: &mut Ui, spline: &mut NestedSpline, depth: usize) -> bool {
 /// level tracks its own selection.
 fn draw_and_edit_curve(ui: &mut Ui, spline: &mut NestedSpline) -> (bool, Option<usize>) {
     let width = ui.available_width().min(PLOT_SIZE.0);
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(width, PLOT_SIZE.1),
-        Sense::click_and_drag(),
-    );
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, PLOT_SIZE.1), Sense::click_and_drag());
     let painter = ui.painter_at(rect);
 
     // Background + 5 horizontal grid lines — same styling as the
@@ -222,18 +238,10 @@ fn draw_and_edit_curve(ui: &mut Ui, spline: &mut NestedSpline) -> (bool, Option<
     let pixel_per_input = rect.width() / (INPUT_RANGE.1 - INPUT_RANGE.0);
     let pixel_per_value = rect.height() / (VALUE_RANGE.1 - VALUE_RANGE.0);
 
-    let input_to_x = |x: f32| -> f32 {
-        rect.min.x + (x - INPUT_RANGE.0) * pixel_per_input
-    };
-    let value_to_y = |v: f32| -> f32 {
-        rect.max.y - (v - VALUE_RANGE.0) * pixel_per_value
-    };
-    let x_to_input = |px: f32| -> f32 {
-        INPUT_RANGE.0 + (px - rect.min.x) / pixel_per_input
-    };
-    let y_to_value = |py: f32| -> f32 {
-        VALUE_RANGE.0 + (rect.max.y - py) / pixel_per_value
-    };
+    let input_to_x = |x: f32| -> f32 { rect.min.x + (x - INPUT_RANGE.0) * pixel_per_input };
+    let value_to_y = |v: f32| -> f32 { rect.max.y - (v - VALUE_RANGE.0) * pixel_per_value };
+    let x_to_input = |px: f32| -> f32 { INPUT_RANGE.0 + (px - rect.min.x) / pixel_per_input };
+    let y_to_value = |py: f32| -> f32 { VALUE_RANGE.0 + (rect.max.y - py) / pixel_per_value };
 
     // Curve trace — 120 samples, same blue stroke as the original
     // CubicSpline editor.
@@ -291,7 +299,11 @@ fn draw_and_edit_curve(ui: &mut Ui, spline: &mut NestedSpline) -> (bool, Option<
                 }
             }
             if best.is_none() {
-                for (i, &p) in left_handle_px.iter().enumerate().chain(right_handle_px.iter().enumerate()) {
+                for (i, &p) in left_handle_px
+                    .iter()
+                    .enumerate()
+                    .chain(right_handle_px.iter().enumerate())
+                {
                     let d = (hp - p).length();
                     if d <= HANDLE_HIT_RADIUS_PX && best.map_or(true, |(_, bd)| d < bd) {
                         best = Some((DragTarget::Tangent(i), d));
@@ -435,7 +447,11 @@ fn draw_and_edit_curve(ui: &mut Ui, spline: &mut NestedSpline) -> (bool, Option<
         // Drag end → resort by loc if we moved a knot, clear drag stash.
         if response.drag_stopped() {
             if matches!(drag_target, Some(DragTarget::Knot(_))) {
-                knots.sort_by(|a, b| a.loc.partial_cmp(&b.loc).unwrap_or(std::cmp::Ordering::Equal));
+                knots.sort_by(|a, b| {
+                    a.loc
+                        .partial_cmp(&b.loc)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
             }
             drag_target = None;
         }
@@ -466,7 +482,11 @@ fn draw_and_edit_curve(ui: &mut Ui, spline: &mut NestedSpline) -> (bool, Option<
             let is_selected = selected == Some(i);
             let is_hot = matches!(hovered_target, Some(DragTarget::Knot(j)) if j == i)
                 || matches!(drag_target, Some(DragTarget::Knot(j)) if j == i);
-            let fill = if is_hot { Color32::YELLOW } else { Color32::from_rgb(220, 180, 80) };
+            let fill = if is_hot {
+                Color32::YELLOW
+            } else {
+                Color32::from_rgb(220, 180, 80)
+            };
             painter.circle_filled(p, KNOT_RADIUS_PX, fill);
             if is_selected {
                 painter.circle_stroke(p, KNOT_RADIUS_PX + 1.0, Stroke::new(1.5, Color32::WHITE));

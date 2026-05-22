@@ -95,7 +95,13 @@ pub fn build(
 
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("water-layout"),
-        bind_group_layouts: &[camera_bgl, chunk_bgl, atlas_bgl, &depth_bgl, &reflection_bgl],
+        bind_group_layouts: &[
+            camera_bgl,
+            chunk_bgl,
+            atlas_bgl,
+            &depth_bgl,
+            &reflection_bgl,
+        ],
         push_constant_ranges: &[],
     });
 

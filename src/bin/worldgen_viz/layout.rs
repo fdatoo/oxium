@@ -270,10 +270,7 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
                 match app.right_tab {
                     crate::app::RightTab::Map => {
                         let pinned = app.session.probe.pinned;
-                        let clicked = app
-                            .session
-                            .map
-                            .show(ui, &generator, revision, pinned);
+                        let clicked = app.session.map.show(ui, &generator, revision, pinned);
                         if let Some((wx, wz)) = clicked {
                             app.session.probe.pin(&generator, wx, wz);
                         }
@@ -394,11 +391,7 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
 /// an immutable factory baseline. Returns `true` if the user just
 /// loaded a preset (caller marks the config dirty so the regen
 /// path picks it up).
-fn preset_library_section(
-    ui: &mut egui::Ui,
-    app: &mut AppState,
-    cfg: &mut WorldgenConfig,
-) -> bool {
+fn preset_library_section(ui: &mut egui::Ui, app: &mut AppState, cfg: &mut WorldgenConfig) -> bool {
     use crate::preset;
     let mut loaded = false;
 
@@ -406,7 +399,9 @@ fn preset_library_section(
     ui.horizontal(|ui| {
         if ui
             .button("⟲ Reload default")
-            .on_hover_text("Replace the current config with the bundled assets/worldgen/default.ron.")
+            .on_hover_text(
+                "Replace the current config with the bundled assets/worldgen/default.ron.",
+            )
             .clicked()
         {
             if let Ok(new) = WorldgenConfig::bundled_default() {
@@ -470,7 +465,9 @@ fn preset_library_section(
                 };
                 if ui
                     .selectable_label(is_active, label)
-                    .on_hover_text("Click to activate (select for notes); use Load to apply its config.")
+                    .on_hover_text(
+                        "Click to activate (select for notes); use Load to apply its config.",
+                    )
                     .clicked()
                 {
                     app.presets.activate(Some(entry.name.clone()));
@@ -550,5 +547,3 @@ fn preset_library_section(
 
     loaded
 }
-
-

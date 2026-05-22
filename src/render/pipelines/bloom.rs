@@ -16,9 +16,9 @@ const SHADER_SRC: &str = include_str!(concat!(
 
 pub struct BloomPipelines {
     pub bgl: wgpu::BindGroupLayout,
-    pub threshold:  wgpu::RenderPipeline,
+    pub threshold: wgpu::RenderPipeline,
     pub downsample: wgpu::RenderPipeline,
-    pub upsample:   wgpu::RenderPipeline,
+    pub upsample: wgpu::RenderPipeline,
 }
 
 pub fn build(device: &wgpu::Device, bloom_format: wgpu::TextureFormat) -> BloomPipelines {
@@ -88,7 +88,7 @@ pub fn build(device: &wgpu::Device, bloom_format: wgpu::TextureFormat) -> BloomP
         })
     };
 
-    let threshold  = make_pipeline("bloom-threshold",  "fs_threshold",  None);
+    let threshold = make_pipeline("bloom-threshold", "fs_threshold", None);
     let downsample = make_pipeline("bloom-downsample", "fs_downsample", None);
     // Upsample: additive blend so we accumulate onto the destination
     // mip's existing content. `SrcAlpha` lets future work tweak per-
@@ -98,15 +98,20 @@ pub fn build(device: &wgpu::Device, bloom_format: wgpu::TextureFormat) -> BloomP
         color: wgpu::BlendComponent {
             src_factor: wgpu::BlendFactor::One,
             dst_factor: wgpu::BlendFactor::One,
-            operation:  wgpu::BlendOperation::Add,
+            operation: wgpu::BlendOperation::Add,
         },
         alpha: wgpu::BlendComponent {
             src_factor: wgpu::BlendFactor::One,
             dst_factor: wgpu::BlendFactor::One,
-            operation:  wgpu::BlendOperation::Add,
+            operation: wgpu::BlendOperation::Add,
         },
     };
     let upsample = make_pipeline("bloom-upsample", "fs_upsample", Some(upsample_blend));
 
-    BloomPipelines { bgl, threshold, downsample, upsample }
+    BloomPipelines {
+        bgl,
+        threshold,
+        downsample,
+        upsample,
+    }
 }

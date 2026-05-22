@@ -48,8 +48,8 @@
 
 use crate::worldgen::heightmap::HeightmapNoise;
 use crate::worldgen::region::{
-    bitset_get, bitset_set, FineRegion, MacroCache, MacroRegion, MacroRegionCoord,
-    RegionCoord, RiverSegment,
+    FineRegion, MacroCache, MacroRegion, MacroRegionCoord, RegionCoord, RiverSegment, bitset_get,
+    bitset_set,
 };
 use crate::worldgen::tuning::*;
 use std::collections::BinaryHeap;
@@ -63,14 +63,14 @@ pub const DIR_NONE: u8 = 8;
 
 /// (dx, dz) offsets for each direction code.
 pub const DIR_OFFSETS: [(i32, i32); 8] = [
-    (0, -1),   // N
-    (1, -1),   // NE
-    (1, 0),    // E
-    (1, 1),    // SE
-    (0, 1),    // S
-    (-1, 1),   // SW
-    (-1, 0),   // W
-    (-1, -1),  // NW
+    (0, -1),  // N
+    (1, -1),  // NE
+    (1, 0),   // E
+    (1, 1),   // SE
+    (0, 1),   // S
+    (-1, 1),  // SW
+    (-1, 0),  // W
+    (-1, -1), // NW
 ];
 
 /// Diagonal moves cost √2 longer than cardinal moves; the D8 slope
@@ -78,13 +78,13 @@ pub const DIR_OFFSETS: [(i32, i32); 8] = [
 /// loses to a 1-block drop cardinally (correctly — the diagonal slope
 /// is shallower).
 const DIR_DIST: [f32; 8] = [
-    1.0,                    // N
+    1.0,                      // N
     std::f32::consts::SQRT_2, // NE
-    1.0,                    // E
+    1.0,                      // E
     std::f32::consts::SQRT_2, // SE
-    1.0,                    // S
+    1.0,                      // S
     std::f32::consts::SQRT_2, // SW
-    1.0,                    // W
+    1.0,                      // W
     std::f32::consts::SQRT_2, // NW
 ];
 
@@ -402,19 +402,31 @@ pub fn gather_neighbour_edges(
     NeighbourEdges {
         west: crate::worldgen::region::peek_fine(
             fine_cache,
-            RegionCoord { x: coord.x - 1, z: coord.z },
+            RegionCoord {
+                x: coord.x - 1,
+                z: coord.z,
+            },
         ),
         east: crate::worldgen::region::peek_fine(
             fine_cache,
-            RegionCoord { x: coord.x + 1, z: coord.z },
+            RegionCoord {
+                x: coord.x + 1,
+                z: coord.z,
+            },
         ),
         north: crate::worldgen::region::peek_fine(
             fine_cache,
-            RegionCoord { x: coord.x, z: coord.z - 1 },
+            RegionCoord {
+                x: coord.x,
+                z: coord.z - 1,
+            },
         ),
         south: crate::worldgen::region::peek_fine(
             fine_cache,
-            RegionCoord { x: coord.x, z: coord.z + 1 },
+            RegionCoord {
+                x: coord.x,
+                z: coord.z + 1,
+            },
         ),
     }
 }
@@ -498,8 +510,7 @@ pub fn build_fine_hydro(
                     if bitset_get(&mr.is_trunk, mi) {
                         let macro_acc = mr.flow_acc[mi];
                         let area_factor = (fine_per_macro_axis * fine_per_macro_axis) as u32;
-                        grid.trunk_injection[fi] = grid
-                            .trunk_injection[fi]
+                        grid.trunk_injection[fi] = grid.trunk_injection[fi]
                             .saturating_add(macro_acc.saturating_mul(area_factor));
                     }
                     // Also propagate macro lake rims into the fine
@@ -548,9 +559,8 @@ pub fn build_fine_hydro(
                 }
                 let grid_idx = (halo_cells + iz) * n + halo_cells;
                 grid.inbound_dir[grid_idx] = 2;
-                grid.inbound_acc[grid_idx] = grid
-                    .inbound_acc[grid_idx]
-                    .saturating_add(west.flow_acc[neigh_idx]);
+                grid.inbound_acc[grid_idx] =
+                    grid.inbound_acc[grid_idx].saturating_add(west.flow_acc[neigh_idx]);
             }
         }
         // East neighbour: its west-most interior column flows into our
@@ -563,9 +573,8 @@ pub fn build_fine_hydro(
                 }
                 let grid_idx = (halo_cells + iz) * n + (halo_cells + inner_u - 1);
                 grid.inbound_dir[grid_idx] = 6;
-                grid.inbound_acc[grid_idx] = grid
-                    .inbound_acc[grid_idx]
-                    .saturating_add(east.flow_acc[neigh_idx]);
+                grid.inbound_acc[grid_idx] =
+                    grid.inbound_acc[grid_idx].saturating_add(east.flow_acc[neigh_idx]);
             }
         }
         // North neighbour: its south-most interior row flows into our
@@ -578,9 +587,8 @@ pub fn build_fine_hydro(
                 }
                 let grid_idx = halo_cells * n + (halo_cells + ix);
                 grid.inbound_dir[grid_idx] = 4;
-                grid.inbound_acc[grid_idx] = grid
-                    .inbound_acc[grid_idx]
-                    .saturating_add(north.flow_acc[neigh_idx]);
+                grid.inbound_acc[grid_idx] =
+                    grid.inbound_acc[grid_idx].saturating_add(north.flow_acc[neigh_idx]);
             }
         }
         // South neighbour: its north-most interior row flows into our
@@ -593,9 +601,8 @@ pub fn build_fine_hydro(
                 }
                 let grid_idx = (halo_cells + inner_u - 1) * n + (halo_cells + ix);
                 grid.inbound_dir[grid_idx] = 0;
-                grid.inbound_acc[grid_idx] = grid
-                    .inbound_acc[grid_idx]
-                    .saturating_add(south.flow_acc[neigh_idx]);
+                grid.inbound_acc[grid_idx] =
+                    grid.inbound_acc[grid_idx].saturating_add(south.flow_acc[neigh_idx]);
             }
         }
     }
@@ -764,8 +771,7 @@ fn perpendicular_distance(wx: i32, wz: i32, seg: &RiverSegment, seed: u64) -> f3
     let along_world = (proj.0 - seg.from.0 as f32).hypot(proj.1 - seg.from.1 as f32);
     let bucket = (along_world / 8.0).floor() as i32;
     let frac = along_world / 8.0 - bucket as f32;
-    let h0 =
-        crate::worldgen::hash::mix_range(seed, &[seg.from.0, seg.from.1, bucket], -1.0, 1.0);
+    let h0 = crate::worldgen::hash::mix_range(seed, &[seg.from.0, seg.from.1, bucket], -1.0, 1.0);
     let h1 =
         crate::worldgen::hash::mix_range(seed, &[seg.from.0, seg.from.1, bucket + 1], -1.0, 1.0);
     let offset = (h0 * (1.0 - frac) + h1 * frac) * amp;
@@ -908,8 +914,7 @@ mod tests {
         for z in -2..=2 {
             for x in -2..=2 {
                 let coord = RegionCoord { x, z };
-                let mut region =
-                    crate::worldgen::region::build_fine_region_placeholder(coord);
+                let mut region = crate::worldgen::region::build_fine_region_placeholder(coord);
                 region.coord = coord;
                 build_fine_hydro(
                     42,
@@ -922,8 +927,7 @@ mod tests {
                     &mut region,
                 );
                 let n = (FINE_CELLS_PER_REGION * FINE_CELLS_PER_REGION) as usize;
-                total_river_cells +=
-                    (0..n).filter(|&i| bitset_get(&region.is_river, i)).count();
+                total_river_cells += (0..n).filter(|&i| bitset_get(&region.is_river, i)).count();
             }
         }
         assert!(

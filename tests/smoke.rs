@@ -13,7 +13,7 @@ use glam::IVec3;
 use oxium::lighting;
 use oxium::mesher::greedy::mesh_greedy;
 use oxium::voxel::block::BlockRegistry;
-use oxium::voxel::chunk::{rgb_brightness, DenseChunk, Neighbors, PalettedChunk};
+use oxium::voxel::chunk::{DenseChunk, Neighbors, PalettedChunk, rgb_brightness};
 use oxium::voxel::coords::ChunkCoord;
 use oxium::voxel::world::{ChunkSlot, World};
 use oxium::worldgen::Generator;
@@ -33,9 +33,7 @@ fn generate_light_mesh_round_trip() {
                 let coord = ChunkCoord(IVec3::new(x, y, z));
                 let mut dense = DenseChunk::empty();
                 generator.fill_chunk(coord, &mut dense);
-                let neighbors = Neighbors {
-                    chunks: [None; 6],
-                };
+                let neighbors = Neighbors { chunks: [None; 6] };
                 lighting::recompute_chunk(&mut dense, &neighbors, &reg);
                 let pchunk = PalettedChunk::compress(&dense);
                 world.insert(coord, pchunk);

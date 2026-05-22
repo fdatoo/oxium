@@ -7,7 +7,7 @@
 //! The playhead (only drawn while looping) shows where the sweep
 //! currently sits within the clamp range.
 
-use egui::{vec2, Color32, Pos2, Rect, Response, Sense, Stroke, Ui};
+use egui::{Color32, Pos2, Rect, Response, Sense, Stroke, Ui, vec2};
 
 pub struct CutawayRangeResponse {
     pub response: Response,
@@ -112,10 +112,7 @@ pub fn cutaway_range(
         if tick_v >= r_lo && tick_v <= r_hi {
             let x = to_x(tick_v);
             painter.line_segment(
-                [
-                    Pos2::new(x, track_y - 8.0),
-                    Pos2::new(x, track_y + 8.0),
-                ],
+                [Pos2::new(x, track_y - 8.0), Pos2::new(x, track_y + 8.0)],
                 Stroke::new(1.0, Color32::from_gray(100)),
             );
         }
@@ -124,10 +121,7 @@ pub fn cutaway_range(
     if let Some(ph) = playhead {
         let x = to_x(ph.clamp(r_lo, r_hi));
         painter.line_segment(
-            [
-                Pos2::new(x, track_y - 10.0),
-                Pos2::new(x, track_y + 10.0),
-            ],
+            [Pos2::new(x, track_y - 10.0), Pos2::new(x, track_y + 10.0)],
             Stroke::new(2.0, Color32::from_rgb(255, 180, 60)),
         );
     }

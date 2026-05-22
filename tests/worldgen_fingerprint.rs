@@ -103,5 +103,8 @@ fn generator_runs_for_fingerprint_seed() {
         .blocks
         .iter()
         .any(|b| !matches!(*b, oxium::voxel::block::Block::Air));
-    assert!(has_non_air, "generator produced an empty chunk at (0, 2, 0)");
+    assert!(
+        has_non_air,
+        "generator produced an empty chunk at (0, 2, 0)"
+    );
 }

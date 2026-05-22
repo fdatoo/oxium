@@ -10,8 +10,8 @@
 //! (sunset → midnight) and from `0.0` to `0.25` (midnight → sunrise) the
 //! sun is below the horizon and `intensity` clamps to 0.
 
-use crate::ecs::components::{Sun, TimeOfDay};
 use crate::ecs::GameEcs;
+use crate::ecs::components::{Sun, TimeOfDay};
 
 /// Step `TimeOfDay::t` forward by `dt` seconds, wrapping at 1.0.
 pub fn advance(ecs: &mut GameEcs, dt: f32) {

@@ -207,10 +207,7 @@ pub fn write_chunk(
 
 /// Read the chunk at `coord` out of the region file. Returns
 /// `RegionError::NotPresent` if the slot is zero (chunk was never saved).
-pub fn read_chunk(
-    path: &std::path::Path,
-    coord: ChunkCoord,
-) -> Result<PalettedChunk, RegionError> {
+pub fn read_chunk(path: &std::path::Path, coord: ChunkCoord) -> Result<PalettedChunk, RegionError> {
     let mut f = File::open(path)?;
     let mut header = vec![0u8; (HEADER_SECTORS * SECTOR) as usize];
     f.read_exact(&mut header)?;
@@ -232,8 +229,8 @@ pub fn read_chunk(
     let mut blob = vec![0u8; blob_len];
     f.read_exact(&mut blob)?;
 
-    let blob_bin = zstd::stream::decode_all(blob.as_slice())
-        .map_err(|e| RegionError::Zstd(e.to_string()))?;
+    let blob_bin =
+        zstd::stream::decode_all(blob.as_slice()).map_err(|e| RegionError::Zstd(e.to_string()))?;
     let chunk: PalettedChunk = if blob_bin.starts_with(CHUNK_V2_MAGIC) {
         bincode::deserialize(&blob_bin[CHUNK_V2_MAGIC.len()..])
             .map_err(|e| RegionError::Decode(e.to_string()))?
@@ -318,13 +315,19 @@ mod tests {
 
         let read_low = read_chunk(&path_low, coord_low).unwrap().decompress();
         let read_high = read_chunk(&path_high, coord_high).unwrap().decompress();
-        assert_eq!(read_low.blocks[LocalPos(UVec3::new(1, 1, 1)).to_index()], Block::Stone);
-        assert_eq!(read_high.blocks[LocalPos(UVec3::new(1, 1, 1)).to_index()], Block::Wood);
+        assert_eq!(
+            read_low.blocks[LocalPos(UVec3::new(1, 1, 1)).to_index()],
+            Block::Stone
+        );
+        assert_eq!(
+            read_high.blocks[LocalPos(UVec3::new(1, 1, 1)).to_index()],
+            Block::Wood
+        );
     }
 
     #[test]
     fn legacy_v1_blob_upgrades_on_read() {
-        use crate::voxel::chunk::{PalettedChunkV1, CHUNK_VOL};
+        use crate::voxel::chunk::{CHUNK_VOL, PalettedChunkV1};
         use crate::voxel::packed::Packed4Bit;
         let mut block_light = Packed4Bit::zeros(CHUNK_VOL);
         block_light.set(123, 0x9);
@@ -346,11 +349,8 @@ mod tests {
             // Sector layout: header is HEADER_SECTORS sectors; payload starts at sector HEADER_SECTORS.
             let end_sector = HEADER_SECTORS;
             let blob_len = zstd_data.len() as u32;
-            let needed_sectors =
-                ((4 + zstd_data.len()) as u64).div_ceil(SECTOR).max(1);
-            let slot = slot_index(crate::voxel::coords::ChunkCoord(
-                glam::IVec3::new(0, 0, 0),
-            ));
+            let needed_sectors = ((4 + zstd_data.len()) as u64).div_ceil(SECTOR).max(1);
+            let slot = slot_index(crate::voxel::coords::ChunkCoord(glam::IVec3::new(0, 0, 0)));
             let entry = ((end_sector as u32) << 8) | (needed_sectors as u32).min(0xFF);
             header[slot * 4..slot * 4 + 4].copy_from_slice(&entry.to_le_bytes());
             let mut f = std::fs::File::create(&region_path).unwrap();

@@ -21,10 +21,10 @@
 //! just send less data to the GPU per frame.
 
 use crate::mesher::ao::corner_ao_at;
-use crate::mesher::{ChunkMesh, Face, Vertex, UNTEXTURED_TILE};
+use crate::mesher::{ChunkMesh, Face, UNTEXTURED_TILE, Vertex};
 use crate::voxel::block::{Block, BlockRegistry};
 use crate::voxel::chunk::DenseChunk;
-use crate::voxel::coords::{LocalPos, CHUNK_DIM_U};
+use crate::voxel::coords::{CHUNK_DIM_U, LocalPos};
 use glam::UVec3;
 
 /// Chunk side length as a `usize` — used in array sizes below.
@@ -137,7 +137,11 @@ pub fn mesh_greedy(
         //   - All other faces → 0 (dark). Cave faces a player digs
         //     out and chunk-boundary side faces no longer bloom
         //     bright at night.
-        if face_idx == Face::PosY as usize { 0xF0 } else { 0x00 }
+        if face_idx == Face::PosY as usize {
+            0xF0
+        } else {
+            0x00
+        }
     };
 
     let block_at = |x: i32, y: i32, z: i32| -> Option<Block> {
@@ -212,9 +216,7 @@ fn emit_water_tops_per_block<F, L>(
                 if reg.info(above).opaque || above == Block::Water {
                     continue;
                 }
-                let ao = corner_ao_at(Face::PosY, |dx, dy, dz| {
-                    block_at(x + dx, y + dy, z + dz)
-                });
+                let ao = corner_ao_at(Face::PosY, |dx, dy, dz| block_at(x + dx, y + dy, z + dz));
                 let light = light_at(x, y + 1, z);
                 let cell = Cell {
                     block: Block::Water as u16,
@@ -278,8 +280,8 @@ fn greedy_one_face<F, L>(
                 let (x, y, z) = unmap(slice, u, v, n_axis, u_axis, v_axis);
                 let here = chunk.get(LocalPos(UVec3::new(x as u32, y as u32, z as u32)));
                 let neighbor_pos = step_along(x, y, z, n_axis, normal_sign);
-                let neighbor = block_at(neighbor_pos.0, neighbor_pos.1, neighbor_pos.2)
-                    .unwrap_or(Block::Air);
+                let neighbor =
+                    block_at(neighbor_pos.0, neighbor_pos.1, neighbor_pos.2).unwrap_or(Block::Air);
 
                 // A face is visible when the block is not air, its neighbour
                 // is not opaque, and either we're an opaque block (so the
@@ -301,9 +303,7 @@ fn greedy_one_face<F, L>(
                 }
 
                 let cell = if visible {
-                    let ao = corner_ao_at(face, |dx, dy, dz| {
-                        block_at(x + dx, y + dy, z + dz)
-                    });
+                    let ao = corner_ao_at(face, |dx, dy, dz| block_at(x + dx, y + dy, z + dz));
                     // Sample the air-side neighbour's light (sky in
                     // the high nibble, block in the low nibble).
                     // `light_at` handles in-chunk reads, cross-chunk
@@ -443,12 +443,7 @@ fn emit_greedy_quad(
     // `order` below relies on — DO NOT reshuffle it without also
     // re-verifying the cross-product test in
     // `tests::every_face_winds_outward`.
-    let corner_pos_uv: [(u8, u8); 4] = [
-        (0, 0),
-        (w, 0),
-        (w, h),
-        (0, h),
-    ];
+    let corner_pos_uv: [(u8, u8); 4] = [(0, 0), (w, 0), (w, h), (0, h)];
     // Map each cell-relative (u, v) back to a 3D voxel-local position
     // by adding the quad's `(ui, vi)` origin.
     let mut positions = [[0u8; 3]; 4];

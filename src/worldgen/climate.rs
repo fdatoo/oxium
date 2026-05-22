@@ -209,12 +209,7 @@ impl RTreeNode {
 
     /// Find the leaf with minimum fitness against `target`, pruning
     /// subtrees whose hyperbox distance ≥ best-so-far.
-    fn search(
-        &self,
-        entries: &[ParameterPoint],
-        target: &TargetPoint,
-        best: &mut SearchState,
-    ) {
+    fn search(&self, entries: &[ParameterPoint], target: &TargetPoint, best: &mut SearchState) {
         match self {
             RTreeNode::Leaf { entry_idx } => {
                 let d = entries[*entry_idx as usize].fitness(target);
@@ -359,15 +354,16 @@ fn total_span_cost(entries: &[ParameterPoint], sorted: &[u32], bucket_size: usiz
     let mut cost = 0i64;
     for chunk in sorted.chunks(bucket_size) {
         for axis in 0..PARAMETER_COUNT {
-            let bbox = chunk
-                .iter()
-                .map(|&i| entries[i as usize].param(axis))
-                .fold(Parameter { min: i64::MAX, max: i64::MIN }, |acc, p| {
-                    Parameter {
-                        min: acc.min.min(p.min),
-                        max: acc.max.max(p.max),
-                    }
-                });
+            let bbox = chunk.iter().map(|&i| entries[i as usize].param(axis)).fold(
+                Parameter {
+                    min: i64::MAX,
+                    max: i64::MIN,
+                },
+                |acc, p| Parameter {
+                    min: acc.min.min(p.min),
+                    max: acc.max.max(p.max),
+                },
+            );
             cost = cost.saturating_add(bbox.max - bbox.min);
         }
     }
@@ -442,14 +438,8 @@ pub fn voronoi_jitter_offset(seed: u64, wx: i32, wy: i32, wz: i32) -> (i32, i32)
                 let cqz = qz + dz;
                 // Two-axis jitter on the corner so adjacent quart
                 // cells produce squiggly biome borders.
-                let jx = crate::worldgen::hash::mix_unit(
-                    seed,
-                    &[cqx, cqy, cqz, 0],
-                ) as f64;
-                let jz = crate::worldgen::hash::mix_unit(
-                    seed,
-                    &[cqx, cqy, cqz, 1],
-                ) as f64;
+                let jx = crate::worldgen::hash::mix_unit(seed, &[cqx, cqy, cqz, 0]) as f64;
+                let jz = crate::worldgen::hash::mix_unit(seed, &[cqx, cqy, cqz, 1]) as f64;
                 let jitter_x = jx * 0.9 - 0.45;
                 let jitter_z = jz * 0.9 - 0.45;
                 let cx_world = (cqx as f64 + jitter_x) * 4.0;
@@ -598,7 +588,10 @@ mod tests {
         for wx in (-100..100).step_by(7) {
             for wz in (-100..100).step_by(7) {
                 let (dx, dz) = voronoi_jitter_offset(42, wx, 64, wz);
-                assert!(dx.abs() <= 8 && dz.abs() <= 8, "jitter too large: {dx},{dz}");
+                assert!(
+                    dx.abs() <= 8 && dz.abs() <= 8,
+                    "jitter too large: {dx},{dz}"
+                );
             }
         }
     }

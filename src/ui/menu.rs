@@ -12,10 +12,10 @@ pub enum MenuItem {
 impl MenuItem {
     pub fn label(self) -> &'static str {
         match self {
-            MenuItem::Resume   => "Resume",
-            MenuItem::SaveNow  => "Save now",
+            MenuItem::Resume => "Resume",
+            MenuItem::SaveNow => "Save now",
             MenuItem::Settings => "Settings",
-            MenuItem::Quit     => "Quit to desktop",
+            MenuItem::Quit => "Quit to desktop",
         }
     }
 }
@@ -40,10 +40,10 @@ pub enum MenuAction {
 impl MenuItem {
     pub fn activate(self) -> MenuAction {
         match self {
-            MenuItem::Resume   => MenuAction::Resume,
-            MenuItem::SaveNow  => MenuAction::Save,
+            MenuItem::Resume => MenuAction::Resume,
+            MenuItem::SaveNow => MenuAction::Save,
             MenuItem::Settings => MenuAction::OpenSettings,
-            MenuItem::Quit     => MenuAction::Quit,
+            MenuItem::Quit => MenuAction::Quit,
         }
     }
 }

@@ -11,7 +11,7 @@ use glam::Vec3;
 use oxium::mesher::Face;
 use oxium::voxel::block::Block;
 use oxium::voxel::chunk::DenseChunk;
-use oxium::voxel::coords::{ChunkCoord, LocalPos, CHUNK_DIM_U};
+use oxium::voxel::coords::{CHUNK_DIM_U, ChunkCoord, LocalPos};
 
 #[derive(Default)]
 pub struct VizMesh {
@@ -41,7 +41,13 @@ pub fn mesh_chunk(coord: ChunkCoord, chunk: &DenseChunk, paint: &PaintContext) -
                 for face in Face::all() {
                     let [nx, ny, nz] = face.normal();
                     let (nlx, nly, nlz) = (lx + nx, ly + ny, lz + nz);
-                    let neighbor_solid = if nlx < 0 || nlx >= dim || nly < 0 || nly >= dim || nlz < 0 || nlz >= dim {
+                    let neighbor_solid = if nlx < 0
+                        || nlx >= dim
+                        || nly < 0
+                        || nly >= dim
+                        || nlz < 0
+                        || nlz >= dim
+                    {
                         false
                     } else {
                         let nl = LocalPos(glam::UVec3::new(nlx as u32, nly as u32, nlz as u32));
@@ -151,7 +157,8 @@ fn emit_face(p: Vec3, color: [f32; 3], face: Face, mesh: &mut VizMesh) {
             color,
         });
     }
-    mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    mesh.indices
+        .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
 fn is_solid(b: Block) -> bool {
@@ -168,11 +175,7 @@ mod tests {
     fn block_paint(coord: ChunkCoord) -> PaintContext {
         // Build directly without a Generator since Block mode needs no columns.
         let dim = CHUNK_DIM_U as i32;
-        PaintContext::without_columns(
-            PaintMode::Block,
-            coord.0.x * dim,
-            coord.0.z * dim,
-        )
+        PaintContext::without_columns(PaintMode::Block, coord.0.x * dim, coord.0.z * dim)
     }
 
     #[test]

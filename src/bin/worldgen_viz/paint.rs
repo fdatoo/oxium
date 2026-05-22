@@ -9,9 +9,9 @@
 use oxium::mesher::Face;
 use oxium::voxel::block::Block;
 use oxium::voxel::coords::CHUNK_DIM_U;
-use oxium::worldgen::probe::PaintColumn;
 use oxium::worldgen::Biome;
 use oxium::worldgen::Generator;
+use oxium::worldgen::probe::PaintColumn;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,21 +46,27 @@ impl PaintMode {
 
     pub fn label(self) -> &'static str {
         match self {
-            PaintMode::Block       => "Block",
-            PaintMode::Biome       => "Biome",
-            PaintMode::PlateId     => "Plate ID",
+            PaintMode::Block => "Block",
+            PaintMode::Biome => "Biome",
+            PaintMode::PlateId => "Plate ID",
             PaintMode::HeightDelta => "Height Δ",
-            PaintMode::Slope       => "Slope",
+            PaintMode::Slope => "Slope",
         }
     }
 
     pub fn description(self) -> &'static str {
         match self {
-            PaintMode::Block       => "Block-type colour (Stone grey, Grass green, Snow white, Lava orange).",
-            PaintMode::Biome       => "Column biome — categorical hue per biome variant.",
-            PaintMode::PlateId     => "Tectonic plate ID — categorical hue. Reveals plate boundaries.",
-            PaintMode::HeightDelta => "Heightmap delta (h_target - h_pre). Red = valley carved by hydrology, blue = lifted by ridge noise.",
-            PaintMode::Slope       => "Heightmap slope magnitude. Brighter = steeper. Useful for finding cliff-thresholds.",
+            PaintMode::Block => {
+                "Block-type colour (Stone grey, Grass green, Snow white, Lava orange)."
+            }
+            PaintMode::Biome => "Column biome — categorical hue per biome variant.",
+            PaintMode::PlateId => "Tectonic plate ID — categorical hue. Reveals plate boundaries.",
+            PaintMode::HeightDelta => {
+                "Heightmap delta (h_target - h_pre). Red = valley carved by hydrology, blue = lifted by ridge noise."
+            }
+            PaintMode::Slope => {
+                "Heightmap slope magnitude. Brighter = steeper. Useful for finding cliff-thresholds."
+            }
         }
     }
 
@@ -105,7 +111,12 @@ impl PaintContext {
         } else {
             None
         };
-        Self { mode, origin_x, origin_z, columns }
+        Self {
+            mode,
+            origin_x,
+            origin_z,
+            columns,
+        }
     }
 
     /// Build a paint context that skips the per-column pre-pass. Only
@@ -114,7 +125,12 @@ impl PaintContext {
     /// Generator just to mesh a synthetic chunk.
     pub fn without_columns(mode: PaintMode, origin_x: i32, origin_z: i32) -> Self {
         debug_assert!(!mode.needs_column_data(), "{:?} requires column data", mode);
-        Self { mode, origin_x, origin_z, columns: None }
+        Self {
+            mode,
+            origin_x,
+            origin_z,
+            columns: None,
+        }
     }
 
     fn column(&self, wx: i32, wz: i32) -> Option<&PaintColumn> {
@@ -133,11 +149,23 @@ impl PaintContext {
     /// face_tint).
     pub fn color_for(&self, wx: i32, wy: i32, wz: i32, face: Face, block: Block) -> [f32; 3] {
         let base = match self.mode {
-            PaintMode::Block       => block_color(block),
-            PaintMode::Biome       => self.column(wx, wz).map(|c| biome_color(c.biome)).unwrap_or([0.4, 0.4, 0.4]),
-            PaintMode::PlateId     => self.column(wx, wz).map(|c| plate_color(c.plate_id)).unwrap_or([0.4, 0.4, 0.4]),
-            PaintMode::HeightDelta => self.column(wx, wz).map(height_delta_color).unwrap_or([0.4, 0.4, 0.4]),
-            PaintMode::Slope       => self.column(wx, wz).map(slope_color).unwrap_or([0.4, 0.4, 0.4]),
+            PaintMode::Block => block_color(block),
+            PaintMode::Biome => self
+                .column(wx, wz)
+                .map(|c| biome_color(c.biome))
+                .unwrap_or([0.4, 0.4, 0.4]),
+            PaintMode::PlateId => self
+                .column(wx, wz)
+                .map(|c| plate_color(c.plate_id))
+                .unwrap_or([0.4, 0.4, 0.4]),
+            PaintMode::HeightDelta => self
+                .column(wx, wz)
+                .map(height_delta_color)
+                .unwrap_or([0.4, 0.4, 0.4]),
+            PaintMode::Slope => self
+                .column(wx, wz)
+                .map(slope_color)
+                .unwrap_or([0.4, 0.4, 0.4]),
         };
         let _ = wy;
         let tint = face_tint(face);
@@ -160,23 +188,23 @@ pub fn face_tint(face: Face) -> f32 {
 fn block_color(b: Block) -> [f32; 3] {
     match b {
         Block::Stone => [0.55, 0.55, 0.55],
-        Block::Dirt  => [0.50, 0.32, 0.18],
+        Block::Dirt => [0.50, 0.32, 0.18],
         Block::Grass => [0.30, 0.65, 0.25],
-        Block::Sand  => [0.92, 0.85, 0.62],
-        Block::Snow  => [0.95, 0.95, 0.97],
-        Block::Lava  => [1.0, 0.45, 0.08],
-        _            => [0.4, 0.4, 0.4],
+        Block::Sand => [0.92, 0.85, 0.62],
+        Block::Snow => [0.95, 0.95, 0.97],
+        Block::Lava => [1.0, 0.45, 0.08],
+        _ => [0.4, 0.4, 0.4],
     }
 }
 
 fn biome_color(b: Biome) -> [f32; 3] {
     match b {
-        Biome::Tundra      => [0.85, 0.92, 0.96],
+        Biome::Tundra => [0.85, 0.92, 0.96],
         Biome::SnowyForest => [0.55, 0.78, 0.78],
-        Biome::Plains      => [0.66, 0.86, 0.52],
-        Biome::Forest      => [0.20, 0.55, 0.20],
-        Biome::Desert      => [0.95, 0.86, 0.50],
-        Biome::Tropical    => [0.20, 0.78, 0.40],
+        Biome::Plains => [0.66, 0.86, 0.52],
+        Biome::Forest => [0.20, 0.55, 0.20],
+        Biome::Desert => [0.95, 0.86, 0.50],
+        Biome::Tropical => [0.20, 0.78, 0.40],
     }
 }
 
@@ -200,9 +228,17 @@ fn height_delta_color(c: &PaintColumn) -> [f32; 3] {
     let t = (delta / 16.0).clamp(-1.0, 1.0);
     if t < 0.0 {
         let s = -t;
-        [0.85 * s + 0.4 * (1.0 - s), 0.25 * (1.0 - s) + 0.4 * (1.0 - s), 0.25 * (1.0 - s) + 0.4 * (1.0 - s)]
+        [
+            0.85 * s + 0.4 * (1.0 - s),
+            0.25 * (1.0 - s) + 0.4 * (1.0 - s),
+            0.25 * (1.0 - s) + 0.4 * (1.0 - s),
+        ]
     } else {
-        [0.4 * (1.0 - t), 0.4 * (1.0 - t) + 0.2 * t, 0.4 * (1.0 - t) + 0.85 * t]
+        [
+            0.4 * (1.0 - t),
+            0.4 * (1.0 - t) + 0.2 * t,
+            0.4 * (1.0 - t) + 0.85 * t,
+        ]
     }
 }
 

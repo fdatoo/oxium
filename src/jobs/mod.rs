@@ -24,7 +24,7 @@ use crate::voxel::block::BlockRegistry;
 use crate::voxel::chunk::{DenseChunk, PalettedChunk};
 use crate::voxel::coords::ChunkCoord;
 use crate::worldgen::Generator;
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use std::sync::Arc;
 
 /// The output of a single completed job. The main thread matches on this
@@ -149,7 +149,7 @@ impl Jobs {
         let tx = self.tx.clone();
         self.gen_pool.spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                use crate::persistence::region::{read_chunk, RegionError};
+                use crate::persistence::region::{RegionError, read_chunk};
                 match read_chunk(&path, coord) {
                     Ok(c) => Some(c),
                     Err(RegionError::NotPresent) => None,
@@ -226,7 +226,10 @@ impl Jobs {
                     crate::lighting::recompute_chunk(&mut dense, &ns, &registry);
                 }
                 #[cfg(not(feature = "legacy-lighting"))]
-                { let _ = neighbors; let _ = registry; }
+                {
+                    let _ = neighbors;
+                    let _ = registry;
+                }
                 PalettedChunk::compress(&dense)
             }));
             match result {
@@ -393,7 +396,10 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     } else if let Some(s) = payload.downcast_ref::<String>() {
         s.clone()
     } else {
-        format!("non-string panic payload (type id: {:?})", payload.type_id())
+        format!(
+            "non-string panic payload (type id: {:?})",
+            payload.type_id()
+        )
     }
 }
 

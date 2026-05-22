@@ -181,7 +181,14 @@ mod tests {
         // any given query). So we check the *winning seed_xz* coords,
         // not the cell id.
         let mut differ = 0;
-        for (wx, wz) in [(0, 0), (400, 400), (1000, 1000), (-500, 700), (2000, -800), (-1500, -1200)] {
+        for (wx, wz) in [
+            (0, 0),
+            (400, 400),
+            (1000, 1000),
+            (-500, 700),
+            (2000, -800),
+            (-1500, -1200),
+        ] {
             let a = plate_at(0xAA00_AA00_AA00_AA00, wx, wz);
             let b = plate_at(0x55FF_55FF_55FF_55FF, wx, wz);
             if a.a.seed_xz != b.a.seed_xz {
@@ -236,13 +243,22 @@ mod tests {
         let wx = p.seed_xz.x as i32;
         let wz = p.seed_xz.y as i32;
         let look = plate_at(42, wx, wz);
-        assert!(look.t > 0.5, "expected t > 0.5 at plate center, got {}", look.t);
+        assert!(
+            look.t > 0.5,
+            "expected t > 0.5 at plate center, got {}",
+            look.t
+        );
     }
 
     #[test]
     fn plate_id_round_trips_through_of() {
         let p = Plate::of(42, 7, -3);
-        assert_eq!(p.id, PlateId { cell_x: 7, cell_z: -3 });
+        assert_eq!(
+            p.id,
+            PlateId {
+                cell_x: 7,
+                cell_z: -3
+            }
+        );
     }
-
 }

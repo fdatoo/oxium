@@ -14,9 +14,9 @@
 #[cfg(feature = "legacy-lighting")]
 use crate::voxel::block::{Block, BlockRegistry};
 #[cfg(feature = "legacy-lighting")]
-use crate::voxel::chunk::{pack_rgb, unpack_rgb, DenseChunk, Neighbors};
+use crate::voxel::chunk::{DenseChunk, Neighbors, pack_rgb, unpack_rgb};
 #[cfg(feature = "legacy-lighting")]
-use crate::voxel::coords::{LocalPos, CHUNK_DIM_U};
+use crate::voxel::coords::{CHUNK_DIM_U, LocalPos};
 #[cfg(feature = "legacy-lighting")]
 use glam::UVec3;
 #[cfg(feature = "legacy-lighting")]
@@ -286,8 +286,8 @@ fn block_rgb(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegis
         for y in 0..D {
             for x in 0..D {
                 let idx = LocalPos(UVec3::new(x as u32, y as u32, z as u32)).to_index();
-                let on_boundary = x == 0 || y == 0 || z == 0
-                    || x == D - 1 || y == D - 1 || z == D - 1;
+                let on_boundary =
+                    x == 0 || y == 0 || z == 0 || x == D - 1 || y == D - 1 || z == D - 1;
                 let cell = chunk.block_rgb[idx];
                 if on_boundary && cell != 0 {
                     let (r, g, b) = unpack_rgb(cell);
@@ -330,7 +330,11 @@ fn bfs_spread_sky(
             // Water attenuates light an extra 2 per step (so an additional
             // `cost - 1 = 2` is consumed). Air and other transparent blocks
             // cost 1 like the BFS default.
-            let cost: u8 = if chunk.blocks[idx] == Block::Water { 3 } else { 1 };
+            let cost: u8 = if chunk.blocks[idx] == Block::Water {
+                3
+            } else {
+                1
+            };
             let prop = next.saturating_sub(cost.saturating_sub(1));
             if prop > chunk.sky_light[idx] {
                 chunk.sky_light[idx] = prop;
@@ -366,7 +370,11 @@ fn bfs_spread_rgb(
             if info.opaque {
                 continue;
             }
-            let cost: u8 = if chunk.blocks[idx] == Block::Water { 3 } else { 1 };
+            let cost: u8 = if chunk.blocks[idx] == Block::Water {
+                3
+            } else {
+                1
+            };
             let attenuation = cost.saturating_sub(1);
             // Per-channel propagation: each channel attenuates independently.
             let prop_r = lr.saturating_sub(1).saturating_sub(attenuation);
@@ -416,8 +424,8 @@ mod tests {
         let r = BlockRegistry::new();
         recompute_chunk(&mut c, &empty_neighbors(), &r);
         let center = LocalPos(UVec3::new(16, 16, 16)).to_index();
-        let adj    = LocalPos(UVec3::new(17, 16, 16)).to_index();
-        let far    = LocalPos(UVec3::new(20, 16, 16)).to_index();
+        let adj = LocalPos(UVec3::new(17, 16, 16)).to_index();
+        let far = LocalPos(UVec3::new(20, 16, 16)).to_index();
         let (cr, cg, cb) = unpack_rgb(c.block_rgb[center]);
         let (ar, ag, ab) = unpack_rgb(c.block_rgb[adj]);
         let (fr, fg, fb) = unpack_rgb(c.block_rgb[far]);

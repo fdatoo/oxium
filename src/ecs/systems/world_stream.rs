@@ -11,12 +11,12 @@
 //!   the drain prevents a window where a chunk's mesh job completes for a
 //!   chunk we just evicted.
 
-use crate::ecs::components::Position;
 use crate::ecs::GameEcs;
+use crate::ecs::components::Position;
 use crate::ecs::systems::mesh_upload::gather_neighbors;
 use crate::jobs::Jobs;
-use crate::persistence::thread::{PersistRequest, Persistence};
 use crate::persistence::SaveIndex;
+use crate::persistence::thread::{PersistRequest, Persistence};
 use crate::voxel::block::BlockRegistry;
 use crate::voxel::coords::ChunkCoord;
 use crate::voxel::world::{ChunkSlot, World};
@@ -112,7 +112,9 @@ pub fn world_stream(
         for dy in -VERTICAL_RADIUS..=VERTICAL_RADIUS {
             for dz in -RENDER_RADIUS..=RENDER_RADIUS {
                 for dx in -RENDER_RADIUS..=RENDER_RADIUS {
-                    cache.targets.push(ChunkCoord(pc.0 + IVec3::new(dx, dy, dz)));
+                    cache
+                        .targets
+                        .push(ChunkCoord(pc.0 + IVec3::new(dx, dy, dz)));
                 }
             }
         }
@@ -137,12 +139,11 @@ pub fn world_stream(
             // and h_dist_sq's 100 000 multiplier both keep the hash
             // strictly sub-ordinal — two chunks at different
             // distances can never swap, only ties do.
-            let hash = c
-                .0
-                .x
-                .wrapping_mul(73856093)
-                .wrapping_add(c.0.y.wrapping_mul(19349663))
-                .wrapping_add(c.0.z.wrapping_mul(83492791));
+            let hash =
+                c.0.x
+                    .wrapping_mul(73856093)
+                    .wrapping_add(c.0.y.wrapping_mul(19349663))
+                    .wrapping_add(c.0.z.wrapping_mul(83492791));
             h_dist_sq * 100_000 + v_dist_sq * 1024 + ((hash & 1023) as i64)
         });
         cache.last_player_chunk = Some(pc);

@@ -12,10 +12,18 @@ pub fn terrain_ramp(t: f32) -> [u8; 4] {
     let t = t.clamp(0.0, 1.0);
     let (r, g, b) = if t < 0.5 {
         let s = t / 0.5;
-        (lerp(40.0, 80.0, s), lerp(80.0, 180.0, s), lerp(140.0, 100.0, s))
+        (
+            lerp(40.0, 80.0, s),
+            lerp(80.0, 180.0, s),
+            lerp(140.0, 100.0, s),
+        )
     } else {
         let s = (t - 0.5) / 0.5;
-        (lerp(80.0, 220.0, s), lerp(180.0, 200.0, s), lerp(100.0, 140.0, s))
+        (
+            lerp(80.0, 220.0, s),
+            lerp(180.0, 200.0, s),
+            lerp(100.0, 140.0, s),
+        )
     };
     [r as u8, g as u8, b as u8, 255]
 }
@@ -25,11 +33,11 @@ pub fn viridis(t: f32) -> [u8; 4] {
     let t = t.clamp(0.0, 1.0);
     // 5-stop linear gradient: dark purple → blue → teal → green → yellow.
     let stops: [(f32, [f32; 3]); 5] = [
-        (0.00, [ 68.0,   1.0,  84.0]),
-        (0.25, [ 59.0,  82.0, 139.0]),
-        (0.50, [ 33.0, 144.0, 140.0]),
-        (0.75, [ 94.0, 201.0,  98.0]),
-        (1.00, [253.0, 231.0,  37.0]),
+        (0.00, [68.0, 1.0, 84.0]),
+        (0.25, [59.0, 82.0, 139.0]),
+        (0.50, [33.0, 144.0, 140.0]),
+        (0.75, [94.0, 201.0, 98.0]),
+        (1.00, [253.0, 231.0, 37.0]),
     ];
     // find the segment containing t
     let mut lo = &stops[0];
@@ -41,7 +49,11 @@ pub fn viridis(t: f32) -> [u8; 4] {
             break;
         }
     }
-    let s = if (hi.0 - lo.0).abs() < 1e-6 { 0.0 } else { (t - lo.0) / (hi.0 - lo.0) };
+    let s = if (hi.0 - lo.0).abs() < 1e-6 {
+        0.0
+    } else {
+        (t - lo.0) / (hi.0 - lo.0)
+    };
     let r = [
         lerp(lo.1[0], hi.1[0], s),
         lerp(lo.1[1], hi.1[1], s),
@@ -86,7 +98,9 @@ pub fn binary(t: f32, a: [u8; 4], b: [u8; 4]) -> [u8; 4] {
     if t < 0.5 { a } else { b }
 }
 
-fn lerp(a: f32, b: f32, t: f32) -> f32 { a + (b - a) * t }
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
 
 fn hsv_to_rgba(h: f32, s: f32, v: f32) -> [u8; 4] {
     let c = v * s;

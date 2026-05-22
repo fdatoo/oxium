@@ -52,7 +52,7 @@
 
 use crate::voxel::block::Block;
 use crate::voxel::chunk::DenseChunk;
-use crate::voxel::coords::{ChunkCoord, LocalPos, CHUNK_DIM_U};
+use crate::voxel::coords::{CHUNK_DIM_U, ChunkCoord, LocalPos};
 use crate::worldgen::tuning::{FINE_REGION_SIZE, MAX_TERRAIN_Y, TREE_RATE_TROPICAL};
 use glam::UVec3;
 use noise::{Fbm, MultiFractal, NoiseFn, Simplex};
@@ -94,11 +94,9 @@ pub use crate::worldgen::tuning::SEA_LEVEL;
 // All other tuning constants live in `worldgen::tuning`. The names
 // below are imported into this module's scope for ergonomics.
 use crate::worldgen::tuning::{
-    CAVE_BAND_MIDDLE, CAVE_BAND_SHALLOW, CAVE_FLOOR_Y, CAVE_SDF_INTENSITY,
-    CAVE_SURFACE_BUFFER, COLD_SNOW_MIN_ABOVE_SEA,
-    MAX_VERTICAL_AIR_RUN,
-    SNOW_LINE, SURFACE_BAND, SURFACE_SPREAD, TREE_CELL_SIZE, TREE_MARGIN,
-    TREE_RATE_FOREST, TREE_RATE_PLAINS,
+    CAVE_BAND_MIDDLE, CAVE_BAND_SHALLOW, CAVE_FLOOR_Y, CAVE_SDF_INTENSITY, CAVE_SURFACE_BUFFER,
+    COLD_SNOW_MIN_ABOVE_SEA, MAX_VERTICAL_AIR_RUN, SNOW_LINE, SURFACE_BAND, SURFACE_SPREAD,
+    TREE_CELL_SIZE, TREE_MARGIN, TREE_RATE_FOREST, TREE_RATE_PLAINS,
 };
 
 /// Pre-built noise fields for one world seed.
@@ -172,8 +170,8 @@ impl Generator {
     /// freshly-constructed `ConfigHolder` from
     /// [`config::WorldgenConfig::bundled_default`].
     pub fn new(seed: u64) -> Self {
-        let cfg = config::WorldgenConfig::bundled_default()
-            .expect("bundled default.ron must parse");
+        let cfg =
+            config::WorldgenConfig::bundled_default().expect("bundled default.ron must parse");
         let holder = config::ConfigHolder::new(cfg);
         Self::with_config(seed, holder)
     }
@@ -212,8 +210,8 @@ impl Generator {
         // Load the bundled default once so all noise fields share a
         // consistent initial config (the file watcher can later swap
         // values, but the noise *frequencies* baked here stay).
-        let bundled = config::WorldgenConfig::bundled_default()
-            .expect("bundled default.ron must parse");
+        let bundled =
+            config::WorldgenConfig::bundled_default().expect("bundled default.ron must parse");
         let heightmap = heightmap::HeightmapNoise::new(seed, &bundled.climate);
         let density = heightmap::DensityNoise::new(seed, &bundled.density);
         // Climate maps. Large period so a
@@ -238,9 +236,8 @@ impl Generator {
             .set_frequency(1.0 / bundled.biomes.weirdness_period as f64)
             .set_persistence(0.5);
         // Build the biome R-tree once from the bundled entries.
-        let biome_list = std::sync::Arc::new(climate::ParameterList::new(
-            bundled.biomes.entries.clone(),
-        ));
+        let biome_list =
+            std::sync::Arc::new(climate::ParameterList::new(bundled.biomes.entries.clone()));
         // PR 7: aquifer system built from the bundled aquifer
         // config. Hot-reloading the aquifer config (cell sizes,
         // probabilities) requires a Generator restart; only the
@@ -356,19 +353,17 @@ impl Generator {
     fn gather_chunk_regions(&self, coord: ChunkCoord) -> ChunkRegions {
         let origin = coord.origin().0;
         let center = region::RegionCoord::containing(origin.x, origin.z);
-        let mut grid: [[Option<std::sync::Arc<region::FineRegion>>; 3]; 3] =
-            Default::default();
+        let mut grid: [[Option<std::sync::Arc<region::FineRegion>>; 3]; 3] = Default::default();
         for dz in -1..=1i32 {
             for dx in -1..=1i32 {
                 let c = region::RegionCoord {
                     x: center.x + dx,
                     z: center.z + dz,
                 };
-                grid[(dz + 1) as usize][(dx + 1) as usize] = Some(region::get_fine(
-                    &self.fine_cache,
-                    c,
-                    || self.build_fine_region(c),
-                ));
+                grid[(dz + 1) as usize][(dx + 1) as usize] =
+                    Some(region::get_fine(&self.fine_cache, c, || {
+                        self.build_fine_region(c)
+                    }));
             }
         }
         ChunkRegions { center, grid }
@@ -380,8 +375,11 @@ impl Generator {
     /// hot loop).
     pub fn column_data(&self, wx: i32, wz: i32) -> ColumnData {
         let coord = region::RegionCoord::containing(wx, wz);
-        let chunk_origin =
-            ChunkCoord(glam::IVec3::new(coord.x * (FINE_REGION_SIZE / 32), 0, coord.z * (FINE_REGION_SIZE / 32)));
+        let chunk_origin = ChunkCoord(glam::IVec3::new(
+            coord.x * (FINE_REGION_SIZE / 32),
+            0,
+            coord.z * (FINE_REGION_SIZE / 32),
+        ));
         let regions = self.gather_chunk_regions(chunk_origin);
         self.column_data_with(wx, wz, &regions)
     }
@@ -394,23 +392,22 @@ impl Generator {
         // PR 3: spline-driven heightmap. h_pre is now the surface Y
         // derived from the climate-spline `offset_spline`, NOT the
         // old plate-mosaic shelf+ridge+warpedFBM formula.
-        let h_pre = self
-            .heightmap
-            .h_pre(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
+        let h_pre =
+            self.heightmap
+                .h_pre(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
         // Cliff = high slope + no stencil sample dipping below sea.
         // The pre-PR-3 CLIFF_MIN_HEIGHT gate is gone (the spline
         // already places mountains far from the coast by design).
-        let is_cliff = self
-            .heightmap
-            .is_cliff(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
+        let is_cliff =
+            self.heightmap
+                .is_cliff(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
 
         // Valley carve over the chunk's pre-fetched 3 × 3 region
         // neighbourhood. Operates on the spline-derived h_pre (PR 3
         // interface change — same shape as before, just a different
         // h_pre source).
         let carve = regions.valley_carve(wx, wz, self.seed);
-        let height = (h_pre - carve)
-            .clamp((CAVE_FLOOR_Y + 8) as f32, MAX_TERRAIN_Y as f32) as i32;
+        let height = (h_pre - carve).clamp((CAVE_FLOOR_Y + 8) as f32, MAX_TERRAIN_Y as f32) as i32;
 
         // PR 4: 6D climate sample + R-tree biome lookup with
         // per-block hash-Voronoi jitter for organic borders.
@@ -423,30 +420,18 @@ impl Generator {
         let humidity = self.humidity_map.get(xz_jitter) as f32;
         // Continentalness, terrain_shape, ridges_pv from the same
         // climate sampler that drives the heightmap splines.
-        let (c, s, _pv, _look) = self.heightmap.climate(
-            self.seed,
-            qwx as f32,
-            qwz as f32,
-            &cfg.climate,
-        );
+        let (c, s, _pv, _look) =
+            self.heightmap
+                .climate(self.seed, qwx as f32, qwz as f32, &cfg.climate);
         // Weirdness — independent mid-frequency Fbm.
-        let weirdness = (self
-            .weirdness_noise
-            .get(xz_jitter) as f32)
-            * cfg.biomes.weirdness_amplitude;
+        let weirdness =
+            (self.weirdness_noise.get(xz_jitter) as f32) * cfg.biomes.weirdness_amplitude;
         // Depth axis: normalized world-Y of the column's surface.
         let depth_t = (height as f32 - cfg.density.y_min as f32)
             / (cfg.density.y_max - cfg.density.y_min) as f32;
         let depth = 1.0 - 2.0 * depth_t; // +1 at world floor, -1 at world top
 
-        let target = climate::TargetPoint::new(
-            temperature,
-            humidity,
-            c,
-            s,
-            depth,
-            weirdness,
-        );
+        let target = climate::TargetPoint::new(temperature, humidity, c, s, depth, weirdness);
         let biome = self.biome_list.lookup(&target);
         // `desertness` is kept on ColumnData for the legacy sand
         // transition heuristic in fill_chunk. Derived from the
@@ -477,19 +462,18 @@ impl Generator {
         // signed_continentalness has a step discontinuity at
         // second-rank-flip lines and is no longer authoritative.
         let plate = crate::worldgen::plates::plate_at(self.seed, wx, wz);
-        let (continentalness, _) = crate::worldgen::heightmap::smooth_plate_contribution(
-            self.seed, wx, wz, &cfg.climate,
-        );
+        let (continentalness, _) =
+            crate::worldgen::heightmap::smooth_plate_contribution(self.seed, wx, wz, &cfg.climate);
 
         // Pre-carve height.
-        let h_pre = self
-            .heightmap
-            .h_pre(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
+        let h_pre =
+            self.heightmap
+                .h_pre(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
 
         // Slope.
-        let slope = self
-            .heightmap
-            .slope_at(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
+        let slope =
+            self.heightmap
+                .slope_at(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
 
         // Valley carve: gather regions the same way column_data does, then
         // call the ChunkRegions valley_carve.
@@ -512,9 +496,8 @@ impl Generator {
         // Flow accumulation: look up the fine region and read the cell.
         // Granularity is FINE_CELL blocks (not per-column); adjacent columns
         // inside the same cell share a flow_accum value.
-        let fine_region = region::get_fine(&self.fine_cache, coord, || {
-            self.build_fine_region(coord)
-        });
+        let fine_region =
+            region::get_fine(&self.fine_cache, coord, || self.build_fine_region(coord));
         let flow_accum = {
             use crate::worldgen::tuning::FINE_CELL;
             let (ox, oz) = coord.origin();
@@ -540,8 +523,10 @@ impl Generator {
                 for slot in row {
                     if let Some(r) = slot {
                         for sys in &r.cave_systems {
-                            if sys.bb_min.x <= wx && wx <= sys.bb_max.x
-                                && sys.bb_min.z <= wz && wz <= sys.bb_max.z
+                            if sys.bb_min.x <= wx
+                                && wx <= sys.bb_max.x
+                                && sys.bb_min.z <= wz
+                                && wz <= sys.bb_max.z
                             {
                                 n += 1;
                             }
@@ -583,12 +568,12 @@ impl Generator {
         let cfg = self.config.load();
         let col = self.column_data(wx, wz);
         let plate = crate::worldgen::plates::plate_at(self.seed, wx, wz);
-        let h_pre = self
-            .heightmap
-            .h_pre(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
-        let slope = self
-            .heightmap
-            .slope_at(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
+        let h_pre =
+            self.heightmap
+                .h_pre(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
+        let slope =
+            self.heightmap
+                .slope_at(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
         probe::PaintColumn {
             biome: col.biome,
             plate_id: plate.a.id,
@@ -609,7 +594,10 @@ impl Generator {
             Stage::Continentalness => {
                 let cfg = self.config.load();
                 let (c, _) = crate::worldgen::heightmap::smooth_plate_contribution(
-                    self.seed, wx, wz, &cfg.climate,
+                    self.seed,
+                    wx,
+                    wz,
+                    &cfg.climate,
                 );
                 c
             }
@@ -619,10 +607,7 @@ impl Generator {
                 // stable per-plate hue that is independent of spatial
                 // position within the plate.
                 // `plate.a` is the closest (primary) plate at this column.
-                crate::worldgen::hash::mix_unit(
-                    self.seed,
-                    &[plate.a.id.cell_x, plate.a.id.cell_z],
-                )
+                crate::worldgen::hash::mix_unit(self.seed, &[plate.a.id.cell_x, plate.a.id.cell_z])
             }
             Stage::Temperature => {
                 let xz = [wx as f64, wz as f64];
@@ -632,9 +617,7 @@ impl Generator {
                 let xz = [wx as f64, wz as f64];
                 self.humidity_map.get(xz) as f32
             }
-            Stage::Desertness => {
-                self.column_data(wx, wz).desertness
-            }
+            Stage::Desertness => self.column_data(wx, wz).desertness,
             Stage::Weirdness => {
                 let cfg = self.config.load();
                 let xz = [wx as f64, wz as f64];
@@ -655,14 +638,11 @@ impl Generator {
                 let regions = self.gather_chunk_regions(chunk_origin);
                 regions.valley_carve(wx, wz, self.seed)
             }
-            Stage::HTarget => {
-                self.column_data(wx, wz).height as f32
-            }
+            Stage::HTarget => self.column_data(wx, wz).height as f32,
             Stage::FlowAccum => {
                 let coord = region::RegionCoord::containing(wx, wz);
-                let fine_region = region::get_fine(&self.fine_cache, coord, || {
-                    self.build_fine_region(coord)
-                });
+                let fine_region =
+                    region::get_fine(&self.fine_cache, coord, || self.build_fine_region(coord));
                 let (ox, oz) = coord.origin();
                 let lx = wx - ox;
                 let lz = wz - oz;
@@ -680,12 +660,12 @@ impl Generator {
                 // integer, so the categorical colormap's fract() normalization
                 // produces a distinct hue per biome (same trick as PlateId).
                 let idx: i32 = match biome {
-                    Biome::Tundra      => 0,
+                    Biome::Tundra => 0,
                     Biome::SnowyForest => 1,
-                    Biome::Plains      => 2,
-                    Biome::Forest      => 3,
-                    Biome::Desert      => 4,
-                    Biome::Tropical    => 5,
+                    Biome::Plains => 2,
+                    Biome::Forest => 3,
+                    Biome::Desert => 4,
+                    Biome::Tropical => 5,
                 };
                 crate::worldgen::hash::mix_unit(self.seed, &[idx, 0xB10E5_u32 as i32])
             }
@@ -722,12 +702,7 @@ impl Generator {
     /// evaluator (same caveat applies).
     ///
     /// Used by the viz probe panel's "sliding y" section.
-    pub fn evaluate_density_breakdown(
-        &self,
-        wx: i32,
-        wy: i32,
-        wz: i32,
-    ) -> probe::DensityBreakdown {
+    pub fn evaluate_density_breakdown(&self, wx: i32, wy: i32, wz: i32) -> probe::DensityBreakdown {
         let cfg_arc = self.config_snapshot();
         let cfg = &*cfg_arc;
 
@@ -753,9 +728,9 @@ impl Generator {
 
         // --- Density graph: exact evaluation (no trilerp) ---
         let graph = density_graph::build_default_tree(&cfg.climate, &cfg.density);
-        let (cc, sc, rc, _) = self.heightmap.climate(
-            self.seed, wx as f32, wz as f32, &cfg.climate,
-        );
+        let (cc, sc, rc, _) = self
+            .heightmap
+            .climate(self.seed, wx as f32, wz as f32, &cfg.climate);
         let climate = density_graph::ColumnClimate {
             continentalness: cc,
             terrain_shape: sc,
@@ -770,8 +745,7 @@ impl Generator {
         // for the breakdown. These match the leaves of `build_default_tree`:
         //   y_gradient = amp * (1 - 2*(wy - y_min)/(y_max - y_min))
         //   base_3d    = density.evaluate_base_3d(wx, wy, wz, cfg)
-        let t = (wy - cfg.density.y_min) as f32
-            / (cfg.density.y_max - cfg.density.y_min) as f32;
+        let t = (wy - cfg.density.y_min) as f32 / (cfg.density.y_max - cfg.density.y_min) as f32;
         let bias = cfg.density.y_gradient_amplitude * (1.0 - 2.0 * t);
         let base_3d = self.density.evaluate_base_3d(wx, wy, wz, &cfg.density);
 
@@ -781,24 +755,22 @@ impl Generator {
         // Graph-cave SDF + entrance SDF. Chambers/trunks gated at wy <= height;
         // entrance SDF extended by SURFACE_BAND to match fill_chunk logic.
         let mut cave_sdf_val = 0.0_f32;
-        if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y
-            && wy <= height
-        {
+        if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y && wy <= height {
             if approx_depth > CAVE_SURFACE_BUFFER {
-                cave_sdf_val = cave_sdf_val.max(
-                    caves::cave_sdf(wx, wy, wz, &cave_systems),
-                );
-                cave_sdf_val = cave_sdf_val.max(
-                    caves::trunks_sdf(wx, wy, wz, &cave_systems, self.seed, cfg.cave.trunk_r, cfg.cave.trunk_prob),
-                );
+                cave_sdf_val = cave_sdf_val.max(caves::cave_sdf(wx, wy, wz, &cave_systems));
+                cave_sdf_val = cave_sdf_val.max(caves::trunks_sdf(
+                    wx,
+                    wy,
+                    wz,
+                    &cave_systems,
+                    self.seed,
+                    cfg.cave.trunk_r,
+                    cfg.cave.trunk_prob,
+                ));
             }
         }
-        if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y
-            && wy <= height + SURFACE_BAND
-        {
-            cave_sdf_val = cave_sdf_val.max(
-                caves::entrance_sdf(wx, wy, wz, &cave_systems),
-            );
+        if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y && wy <= height + SURFACE_BAND {
+            cave_sdf_val = cave_sdf_val.max(caves::entrance_sdf(wx, wy, wz, &cave_systems));
         }
         // Identify which cave system (if any) the probe voxel sits inside,
         // for the probe panel's style / band display rows.
@@ -808,10 +780,10 @@ impl Generator {
             .map(|sys| {
                 let style_name: &'static str = match sys.style {
                     caves::CaveStyle::Cathedral => "Cathedral",
-                    caves::CaveStyle::Warren    => "Warren",
-                    caves::CaveStyle::Slot      => "Slot",
-                    caves::CaveStyle::Sump      => "Sump",
-                    caves::CaveStyle::Karst     => "Karst",
+                    caves::CaveStyle::Warren => "Warren",
+                    caves::CaveStyle::Slot => "Slot",
+                    caves::CaveStyle::Sump => "Sump",
+                    caves::CaveStyle::Karst => "Karst",
                 };
                 let cy = (sys.bb_min.y + sys.bb_max.y) / 2;
                 let band: &'static str = if cy >= CAVE_BAND_SHALLOW.0 {
@@ -838,9 +810,9 @@ impl Generator {
             0.0
         };
         // Terasology ambient carver — same surface buffer + floor gate.
-        let probe_surface_y = self
-            .heightmap
-            .h_pre(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
+        let probe_surface_y =
+            self.heightmap
+                .h_pre(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
         let tera = if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
             caves::terasology_ambient(wx, wy, wz, &self.noise_carvers, &cfg.cave, probe_surface_y)
         } else {
@@ -899,50 +871,61 @@ impl Generator {
             // Seed from one block above scan_top (mirrors fill_chunk's
             // "above_chunk_top" seeding, but applied per-voxel here).
             {
-                let above_pre = graph.evaluate(
-                    wx, scan_top, wz, climate, &self.density, &cfg.density,
-                );
+                let above_pre =
+                    graph.evaluate(wx, scan_top, wz, climate, &self.density, &cfg.density);
                 let above_density = heightmap::slide(above_pre, scan_top, &cfg.density);
                 if above_density > 0.0 {
                     depth_below_surface = Some(4);
                 }
             }
             for scan_y in (wy..=scan_top - 1).rev() {
-                let scan_pre = graph.evaluate(
-                    wx, scan_y, wz, climate, &self.density, &cfg.density,
-                );
+                let scan_pre = graph.evaluate(wx, scan_y, wz, climate, &self.density, &cfg.density);
                 let scan_density = heightmap::slide(scan_pre, scan_y, &cfg.density);
                 // Cave carving at scan_y changes whether a voxel appears solid.
                 let scan_approx_depth = height - scan_y;
                 let mut scan_cave = 0.0_f32;
-                if !cave_systems.is_empty() && scan_y > CAVE_FLOOR_Y
-                    && scan_y <= height
-                {
+                if !cave_systems.is_empty() && scan_y > CAVE_FLOOR_Y && scan_y <= height {
                     if scan_approx_depth > CAVE_SURFACE_BUFFER {
                         scan_cave = scan_cave.max(caves::cave_sdf(wx, scan_y, wz, &cave_systems));
-                        scan_cave = scan_cave.max(caves::trunks_sdf(wx, scan_y, wz, &cave_systems, self.seed, cfg.cave.trunk_r, cfg.cave.trunk_prob));
+                        scan_cave = scan_cave.max(caves::trunks_sdf(
+                            wx,
+                            scan_y,
+                            wz,
+                            &cave_systems,
+                            self.seed,
+                            cfg.cave.trunk_r,
+                            cfg.cave.trunk_prob,
+                        ));
                     }
                     scan_cave = scan_cave.max(caves::entrance_sdf(wx, scan_y, wz, &cave_systems));
                 }
                 if scan_approx_depth > CAVE_SURFACE_BUFFER && scan_y > CAVE_FLOOR_Y {
-                    scan_cave = scan_cave.max(
-                        caves::cheese_contribution(
-                            wx, scan_y, wz, scan_density,
-                            &self.noise_carvers, &cfg.cave,
-                        ),
-                    );
+                    scan_cave = scan_cave.max(caves::cheese_contribution(
+                        wx,
+                        scan_y,
+                        wz,
+                        scan_density,
+                        &self.noise_carvers,
+                        &cfg.cave,
+                    ));
                 }
                 if scan_approx_depth > CAVE_SURFACE_BUFFER && scan_y > CAVE_FLOOR_Y {
                     let scan_tera = caves::terasology_ambient(
-                        wx, scan_y, wz, &self.noise_carvers, &cfg.cave, probe_surface_y,
+                        wx,
+                        scan_y,
+                        wz,
+                        &self.noise_carvers,
+                        &cfg.cave,
+                        probe_surface_y,
                     );
                     scan_cave = scan_cave.max(scan_tera);
                 }
-                let scan_pillar = if scan_approx_depth > CAVE_SURFACE_BUFFER && scan_y > CAVE_FLOOR_Y {
-                    caves::pillar_contribution(wx, scan_y, wz, &self.noise_carvers, &cfg.cave)
-                } else {
-                    0.0
-                };
+                let scan_pillar =
+                    if scan_approx_depth > CAVE_SURFACE_BUFFER && scan_y > CAVE_FLOOR_Y {
+                        caves::pillar_contribution(wx, scan_y, wz, &self.noise_carvers, &cfg.cave)
+                    } else {
+                        0.0
+                    };
                 let scan_dfc = if scan_cave > 0.0 {
                     scan_density.min(1.0)
                 } else {
@@ -957,8 +940,7 @@ impl Generator {
                     scan_solid
                 };
                 if scan_is_solid {
-                    depth_below_surface =
-                        Some(depth_below_surface.map(|d| d + 1).unwrap_or(0));
+                    depth_below_surface = Some(depth_below_surface.map(|d| d + 1).unwrap_or(0));
                 } else {
                     depth_below_surface = None;
                 }
@@ -1053,7 +1035,8 @@ impl Generator {
             (origin.x, origin.y, origin.z),
             |wx, wz| {
                 let (c, s, pv, _) =
-                    self.heightmap.climate(self.seed, wx as f32, wz as f32, &cfg.climate);
+                    self.heightmap
+                        .climate(self.seed, wx as f32, wz as f32, &cfg.climate);
                 density_graph::ColumnClimate {
                     continentalness: c,
                     terrain_shape: s,
@@ -1065,11 +1048,7 @@ impl Generator {
         // lattice once and trilerp per voxel. Roughly 13 FBM samples
         // per voxel become 13 per corner — a ~45× reduction in
         // Simplex calls inside the inner loop.
-        let carver_eval = caves::CarverEvaluator::new(
-            &self.noise_carvers,
-            &cfg.cave,
-            origin,
-        );
+        let carver_eval = caves::CarverEvaluator::new(&self.noise_carvers, &cfg.cave, origin);
         for z in 0..CHUNK_DIM_U {
             for x in 0..CHUNK_DIM_U {
                 let wx = origin.x + x as i32;
@@ -1080,9 +1059,13 @@ impl Generator {
                 // h_pre is the pre-carve surface Y, used by the tera
                 // surface-suppression depth term. Computed once per
                 // XZ column so the inner y-loop pays no noise cost.
-                let surface_y = self
-                    .heightmap
-                    .h_pre(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
+                let surface_y = self.heightmap.h_pre(
+                    self.seed,
+                    wx as f32,
+                    wz as f32,
+                    &cfg.climate,
+                    &cfg.density,
+                );
 
                 // PR A: density-based top-down scan. The "surface" is
                 // wherever density transitions from negative (air) to
@@ -1167,15 +1150,21 @@ impl Generator {
                     // Negate and smin so a positive SDF pulls density
                     // toward (or below) zero. smin(k>0) additionally
                     // blends nearly-touching cave volumes together.
-                    if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y
-                        && wy <= height
-                    {
+                    if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y && wy <= height {
                         if approx_depth > CAVE_SURFACE_BUFFER {
                             let sdf = caves::cave_sdf(wx, wy, wz, &cave_systems);
                             if sdf > 0.0 {
                                 composed = caves::smin(composed, -sdf, cfg.cave.smin_k);
                             }
-                            let trunk_sdf = caves::trunks_sdf(wx, wy, wz, &cave_systems, self.seed, cfg.cave.trunk_r, cfg.cave.trunk_prob);
+                            let trunk_sdf = caves::trunks_sdf(
+                                wx,
+                                wy,
+                                wz,
+                                &cave_systems,
+                                self.seed,
+                                cfg.cave.trunk_r,
+                                cfg.cave.trunk_prob,
+                            );
                             if trunk_sdf > 0.0 {
                                 composed = caves::smin(composed, -trunk_sdf, cfg.cave.smin_k);
                             }
@@ -1185,8 +1174,7 @@ impl Generator {
                     // own gate extended by SURFACE_BAND so the shaft carves through
                     // any 3D-density bump above h_pre and doesn't leave floating
                     // terrain islands over the entrance opening.
-                    if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y
-                        && wy <= height + SURFACE_BAND
+                    if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y && wy <= height + SURFACE_BAND
                     {
                         let ent = caves::entrance_sdf(wx, wy, wz, &cave_systems);
                         if ent > 0.0 {
@@ -1209,9 +1197,8 @@ impl Generator {
                     // Tera intentionally skips the underground_density_threshold gate;
                     // its own freq_reduction provides surface suppression.
                     if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
-                        let tera = carver_eval.terasology_ambient_at(
-                            wx, wy, wz, &cfg.cave, surface_y,
-                        );
+                        let tera =
+                            carver_eval.terasology_ambient_at(wx, wy, wz, &cfg.cave, surface_y);
                         composed = caves::smin(composed, tera, cfg.cave.smin_k);
                     }
 
@@ -1254,10 +1241,9 @@ impl Generator {
                     // body the surface flood would have kept pristine.
                     let above_terrain_now = wy > height;
                     let in_ocean_column = height <= SEA_LEVEL;
-                    let in_lake_column = lake_rim
-                        .map_or(false, |rim| wy <= rim);
-                    let yield_to_surface_flood = above_terrain_now
-                        && (in_ocean_column || in_lake_column);
+                    let in_lake_column = lake_rim.map_or(false, |rim| wy <= rim);
+                    let yield_to_surface_flood =
+                        above_terrain_now && (in_ocean_column || in_lake_column);
                     let aq_substance = if yield_to_surface_flood {
                         aquifer::Substance::Density
                     } else {
@@ -1285,11 +1271,10 @@ impl Generator {
                         // through the seabed mouth"; proper runtime
                         // fluid mechanics will replace it.
                         let at_or_above_terrain = wy >= height;
-                        let in_lake = at_or_above_terrain
-                            && lake_rim.map_or(false, |rim| wy <= rim);
-                        let in_ocean = at_or_above_terrain
-                            && height <= SEA_LEVEL
-                            && wy <= SEA_LEVEL;
+                        let in_lake =
+                            at_or_above_terrain && lake_rim.map_or(false, |rim| wy <= rim);
+                        let in_ocean =
+                            at_or_above_terrain && height <= SEA_LEVEL && wy <= SEA_LEVEL;
                         if in_lake || in_ocean {
                             Block::Water
                         } else {
@@ -1531,7 +1516,11 @@ impl Generator {
                             // Apply only if the top face is air (floor, not buried)
                             // AND the block below is also solid (not a floating block).
                             let n_below_is_solid = nly == 0
-                                || out.get(LocalPos(UVec3::new(nx as u32, (nly - 1) as u32, nz as u32))) != Block::Air;
+                                || out.get(LocalPos(UVec3::new(
+                                    nx as u32,
+                                    (nly - 1) as u32,
+                                    nz as u32,
+                                ))) != Block::Air;
                             if out.get(n_above_pos) == Block::Air
                                 && out.get(n_floor_pos) == Block::Stone
                                 && n_below_is_solid
@@ -1550,7 +1539,6 @@ impl Generator {
         // cell in a `TREE_MARGIN`-block ring around the chunk.
         self.add_trees(coord, out);
     }
-
 
     /// Place all trees whose blocks could overlap `coord`'s chunk
     /// volume. Each tree is deterministic in `(seed, cell_x, cell_z)`,
@@ -1583,12 +1571,8 @@ impl Generator {
     /// cell. Determined entirely by `(seed, cell coords)` so adjacent
     /// chunks agree on which trees exist.
     fn tree_in_cell(&self, cell_x: i32, cell_z: i32) -> Option<Tree> {
-        let wx = cell_x * TREE_CELL_SIZE
-            + (tree_hash(self.seed, cell_x, cell_z, 1) % 6) as i32
-            + 1;
-        let wz = cell_z * TREE_CELL_SIZE
-            + (tree_hash(self.seed, cell_x, cell_z, 2) % 6) as i32
-            + 1;
+        let wx = cell_x * TREE_CELL_SIZE + (tree_hash(self.seed, cell_x, cell_z, 1) % 6) as i32 + 1;
+        let wz = cell_z * TREE_CELL_SIZE + (tree_hash(self.seed, cell_x, cell_z, 2) % 6) as i32 + 1;
         let col = self.column_data(wx, wz);
 
         // Trees don't grow on cliffs (bare stone), above the alpine
@@ -1611,8 +1595,7 @@ impl Generator {
         // SEA_LEVEL + 2]` and surface material in that band is Sand;
         // oaks don't grow on sand. Palms *do*, but rarely — they're
         // the iconic tropical-beach silhouette.
-        let on_beach =
-            col.height >= SEA_LEVEL - 1 && col.height <= SEA_LEVEL + 2;
+        let on_beach = col.height >= SEA_LEVEL - 1 && col.height <= SEA_LEVEL + 2;
         let kind = col.biome.tree_kind();
         if on_beach && kind != TreeKind::Palm {
             return None;
@@ -1635,12 +1618,9 @@ impl Generator {
         let cfg = self.config_snapshot();
         // Sample the climate triple at this column so the topmost-solid
         // search uses the same spline outputs the chunk fill does.
-        let (cc, sc, rc, _) = self.heightmap.climate(
-            self.seed,
-            wx as f32,
-            wz as f32,
-            &cfg.climate,
-        );
+        let (cc, sc, rc, _) = self
+            .heightmap
+            .climate(self.seed, wx as f32, wz as f32, &cfg.climate);
         let offset = cfg.climate.offset_spline.evaluate(cc, sc, rc);
         let factor = cfg.climate.factor_spline.evaluate(cc, sc, rc);
         let jagged = cfg.climate.jaggedness_spline.evaluate(cc, sc, rc);
@@ -1658,12 +1638,8 @@ impl Generator {
             )
             .unwrap_or(col.height);
         let trunk_h = match kind {
-            TreeKind::Oak => {
-                4 + (tree_hash(self.seed, cell_x, cell_z, 3) % 3) as i32
-            }
-            TreeKind::Palm => {
-                7 + (tree_hash(self.seed, cell_x, cell_z, 3) % 3) as i32
-            }
+            TreeKind::Oak => 4 + (tree_hash(self.seed, cell_x, cell_z, 3) % 3) as i32,
+            TreeKind::Palm => 7 + (tree_hash(self.seed, cell_x, cell_z, 3) % 3) as i32,
         };
         Some(Tree {
             wx,
@@ -1716,8 +1692,7 @@ impl Generator {
                 try_set_air(coord, out, tree.wx, top_y + 1, tree.wz, Block::Leaves);
                 let arm_count = 5; // five fronds, evenly spaced
                 for a in 0..arm_count {
-                    let theta =
-                        a as f32 * std::f32::consts::TAU / arm_count as f32;
+                    let theta = a as f32 * std::f32::consts::TAU / arm_count as f32;
                     for step in 1..=3i32 {
                         let dx = (theta.cos() * step as f32).round() as i32;
                         let dz = (theta.sin() * step as f32).round() as i32;
@@ -1768,16 +1743,7 @@ pub struct ColumnData {
 /// purpose — every variant has a distinct visual signature (different
 /// surface block or noticeably different tree density), so the
 /// difference between biomes reads from a screenshot.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Biome {
     /// Cold column. Snow on the surface; no trees grow here.
     Tundra,
@@ -1934,8 +1900,14 @@ impl ChunkRegions {
             .expect("3x3 grid is always populated");
         let mut neighbour_regions: [Option<&region::FineRegion>; 8] = [None; 8];
         let nbr_offsets: [(i32, i32); 8] = [
-            (0, -1), (1, -1), (1, 0), (1, 1),
-            (0, 1), (-1, 1), (-1, 0), (-1, -1),
+            (0, -1),
+            (1, -1),
+            (1, 0),
+            (1, 1),
+            (0, 1),
+            (-1, 1),
+            (-1, 0),
+            (-1, -1),
         ];
         for i in 0..8 {
             let (ox, oz) = nbr_offsets[i];
@@ -1971,14 +1943,7 @@ struct Tree {
 /// `coord`'s 32³ volume *and* the existing block is Air. Both
 /// conditions are required so a tree's trunk doesn't cut through
 /// hills and adjacent chunks' calls don't overwrite each other.
-fn try_set_air(
-    coord: ChunkCoord,
-    out: &mut DenseChunk,
-    wx: i32,
-    wy: i32,
-    wz: i32,
-    b: Block,
-) {
+fn try_set_air(coord: ChunkCoord, out: &mut DenseChunk, wx: i32, wy: i32, wz: i32, b: Block) {
     use crate::voxel::coords::CHUNK_DIM;
     let chunk_origin = coord.origin().0;
     let lx = wx - chunk_origin.x;
@@ -2182,10 +2147,8 @@ mod tests {
             42,
             crate::worldgen::config::ConfigHolder::new(cfg_permissive),
         );
-        let g_default = Generator::with_config(
-            42,
-            crate::worldgen::config::ConfigHolder::new(base),
-        );
+        let g_default =
+            Generator::with_config(42, crate::worldgen::config::ConfigHolder::new(base));
         // Chunk Y=4 → world Y in [128, 159]. MAX_TERRAIN_Y is 140
         // and the test seed has no plate seam pushing peaks above
         // that, so raw_density across this chunk stays comfortably
@@ -2220,17 +2183,22 @@ mod tests {
         let base = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
         let mut cfg_no_pillars = base.clone();
         cfg_no_pillars.cave.pillar_intensity = 0.0;
-        let g_no_pillars =
-            Generator::with_config(42, crate::worldgen::config::ConfigHolder::new(cfg_no_pillars));
-        let g_with =
-            Generator::with_config(42, crate::worldgen::config::ConfigHolder::new(base));
+        let g_no_pillars = Generator::with_config(
+            42,
+            crate::worldgen::config::ConfigHolder::new(cfg_no_pillars),
+        );
+        let g_with = Generator::with_config(42, crate::worldgen::config::ConfigHolder::new(base));
         let coord = ChunkCoord(IVec3::new(0, -2, 0));
         let mut a = DenseChunk::empty();
         let mut b = DenseChunk::empty();
         g_no_pillars.fill_chunk(coord, &mut a);
         g_with.fill_chunk(coord, &mut b);
-        let stone =
-            |c: &DenseChunk| c.blocks.iter().filter(|b| matches!(b, Block::Stone)).count();
+        let stone = |c: &DenseChunk| {
+            c.blocks
+                .iter()
+                .filter(|b| matches!(b, Block::Stone))
+                .count()
+        };
         let s_no = stone(&a);
         let s_yes = stone(&b);
         assert!(
@@ -2418,21 +2386,24 @@ mod tests {
         let lx = wx.rem_euclid(CHUNK_DIM_U as i32) as u32;
         let lz = wz.rem_euclid(CHUNK_DIM_U as i32) as u32;
         let mut found_surface = None;
-        for cy in [col.height.div_euclid(CHUNK_DIM_U as i32),
-                   col.height.div_euclid(CHUNK_DIM_U as i32) + 1] {
+        for cy in [
+            col.height.div_euclid(CHUNK_DIM_U as i32),
+            col.height.div_euclid(CHUNK_DIM_U as i32) + 1,
+        ] {
             let mut chunk = DenseChunk::empty();
             g.fill_chunk(ChunkCoord(IVec3::new(cx, cy, cz)), &mut chunk);
             // Top-down scan in this chunk to find the topmost solid.
             for ly in (0..CHUNK_DIM_U).rev() {
-                let block = chunk.blocks[crate::voxel::coords::LocalPos(
-                    glam::UVec3::new(lx, ly, lz),
-                ).to_index()];
+                let block = chunk.blocks
+                    [crate::voxel::coords::LocalPos(glam::UVec3::new(lx, ly, lz)).to_index()];
                 if !matches!(block, Block::Air | Block::Water) {
                     found_surface = Some(block);
                     break;
                 }
             }
-            if found_surface.is_some() { break; }
+            if found_surface.is_some() {
+                break;
+            }
         }
         let surface = found_surface.expect("topmost solid not found in tundra column");
         assert!(

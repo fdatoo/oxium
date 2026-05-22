@@ -32,7 +32,11 @@ pub struct Invalidator {
 
 impl Invalidator {
     pub fn new() -> Self {
-        Self { last_config_revision: 0, current: 0, pending_since: None }
+        Self {
+            last_config_revision: 0,
+            current: 0,
+            pending_since: None,
+        }
     }
 
     /// Immediately bump the revision counter. Use for changes that

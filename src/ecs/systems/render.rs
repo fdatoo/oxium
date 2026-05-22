@@ -7,10 +7,10 @@
 //! turning into render-state ceremonies.
 
 use crate::app::PerfSnapshot;
-use crate::ecs::components::{Camera, CursorTarget, Position, Selected, Sun, TimeOfDay};
 use crate::ecs::GameEcs;
-use crate::render::hud::{build_hud, SkyProbe, WorldDebug, HOTBAR_BLOCKS};
+use crate::ecs::components::{Camera, CursorTarget, Position, Selected, Sun, TimeOfDay};
 use crate::render::Renderer;
+use crate::render::hud::{HOTBAR_BLOCKS, SkyProbe, WorldDebug, build_hud};
 use crate::voxel::block::BlockRegistry;
 use crate::voxel::coords::{BlockPos, ChunkCoord, LocalPos};
 use crate::voxel::world::{ChunkSlot, World};
@@ -91,7 +91,15 @@ pub fn render(
     };
 
     let (sw, sh) = renderer.framebuffer_size();
-    let mut hud = build_hud((sw, sh), fps, eye, selected_slot, registry, perf, Some(&world_debug));
+    let mut hud = build_hud(
+        (sw, sh),
+        fps,
+        eye,
+        selected_slot,
+        registry,
+        perf,
+        Some(&world_debug),
+    );
     ui.draw_overlay((sw, sh), &mut hud);
 
     renderer.render(

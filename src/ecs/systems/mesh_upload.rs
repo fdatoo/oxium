@@ -99,7 +99,13 @@ pub fn drain_jobs(
                     }
                 }
             }
-            JobResult::Meshed { coord, lod, mesh, version, light_volume } => {
+            JobResult::Meshed {
+                coord,
+                lod,
+                mesh,
+                version,
+                light_volume,
+            } => {
                 // Drop the upload if the chunk has been re-edited since
                 // this mesh job was spawned. Without this check, a
                 // slow streaming mesh job can complete after a fast
@@ -118,7 +124,12 @@ pub fn drain_jobs(
                 }
             }
             #[cfg(feature = "legacy-lighting")]
-            JobResult::Relit { coord, data, changed_faces, light_volume } => {
+            JobResult::Relit {
+                coord,
+                data,
+                changed_faces,
+                light_volume,
+            } => {
                 // Push the light volume to the GPU FIRST so the chunk's bind
                 // group picks up the new lighting on the next draw — even if
                 // the mesh re-spawn lags.
@@ -132,11 +143,7 @@ pub fn drain_jobs(
                 // converged.
                 use crate::voxel::chunk::{ChunkDirty, ChunkState};
                 let data_arc = Arc::new(data);
-                if let Some(ChunkSlot::Stored {
-                    data: cur,
-                    meta,
-                }) = world.chunks.get_mut(&coord)
-                {
+                if let Some(ChunkSlot::Stored { data: cur, meta }) = world.chunks.get_mut(&coord) {
                     // Preserve any `dirty.light` mark added *during the
                     // in-flight window* — between the pump clearing the
                     // flag (`relight_pump`) and this result landing.
@@ -182,9 +189,7 @@ pub fn drain_jobs(
                     if !changed {
                         continue;
                     }
-                    if let Some(ChunkSlot::Stored { meta, .. }) =
-                        world.chunks.get_mut(&nbrs[i])
-                    {
+                    if let Some(ChunkSlot::Stored { meta, .. }) = world.chunks.get_mut(&nbrs[i]) {
                         meta.dirty.light = true;
                     }
                 }
@@ -214,19 +219,11 @@ pub fn drain_jobs(
                     // the out-of-order arrival bug, and Loaded is
                     // where most of those arrivals come from.
                     for c in std::iter::once(coord).chain(neighbor_coords(coord)) {
-                        if let Some(ChunkSlot::Stored { data, meta }) =
-                            world.chunks.get(&c)
-                        {
+                        if let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get(&c) {
                             let data_arc = data.clone();
                             let version = meta.mesh_version;
                             let neighbors = gather_neighbors(world, c);
-                            jobs.spawn_mesh_lod0(
-                                c,
-                                data_arc,
-                                neighbors,
-                                registry.clone(),
-                                version,
-                            );
+                            jobs.spawn_mesh_lod0(c, data_arc, neighbors, registry.clone(), version);
                         }
                     }
                 }
@@ -258,11 +255,7 @@ pub fn drain_jobs(
 /// At 4 chunks per frame a couple thousand pending chunks converge in
 /// ~5 seconds at 120 fps without dropping frames.
 #[cfg(feature = "legacy-lighting")]
-pub fn relight_pump(
-    world: &mut World,
-    jobs: &Jobs,
-    registry: &Arc<BlockRegistry>,
-) -> usize {
+pub fn relight_pump(world: &mut World, jobs: &Jobs, registry: &Arc<BlockRegistry>) -> usize {
     const RELIGHT_BUDGET: usize = 16;
     // Snapshot the candidate coords up-front so we don't hold an
     // immutable borrow over the loop body's `get_mut` + `spawn`.
@@ -342,28 +335,18 @@ pub fn drain_persistence(
                     // bug. The relight pump picks this up and
                     // converges over a few frames.
                     #[cfg(feature = "legacy-lighting")]
-                    if let Some(ChunkSlot::Stored { meta, .. }) =
-                        world.chunks.get_mut(&coord)
-                    {
+                    if let Some(ChunkSlot::Stored { meta, .. }) = world.chunks.get_mut(&coord) {
                         meta.dirty.light = true;
                     }
                     // Re-mesh self + already-Stored neighbours, so
                     // out-of-order arrivals don't leave boundary
                     // faces conservatively-emitted.
                     for c in std::iter::once(coord).chain(neighbor_coords(coord)) {
-                        if let Some(ChunkSlot::Stored { data, meta }) =
-                            world.chunks.get(&c)
-                        {
+                        if let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get(&c) {
                             let data_arc = data.clone();
                             let version = meta.mesh_version;
                             let neighbors = gather_neighbors(world, c);
-                            jobs.spawn_mesh_lod0(
-                                c,
-                                data_arc,
-                                neighbors,
-                                registry.clone(),
-                                version,
-                            );
+                            jobs.spawn_mesh_lod0(c, data_arc, neighbors, registry.clone(), version);
                         }
                     }
                 }
@@ -409,13 +392,15 @@ pub fn upload_dirty_light_volumes(
     world: &mut crate::voxel::world::World,
     renderer: &mut crate::render::Renderer,
 ) {
-    use crate::voxel::world::ChunkSlot;
     use crate::voxel::chunk::Neighbors;
+    use crate::voxel::world::ChunkSlot;
     const UPLOAD_BUDGET: usize = 32;
     let mut uploaded = 0;
     // Collect the dirty coords first; rebuilding the volume needs to
     // gather_neighbors which borrows the world immutably.
-    let dirty: Vec<_> = world.chunks.iter()
+    let dirty: Vec<_> = world
+        .chunks
+        .iter()
         .filter_map(|(c, slot)| match slot {
             ChunkSlot::Stored { meta, .. } if meta.light_gpu_dirty => Some(*c),
             _ => None,
@@ -439,8 +424,12 @@ pub fn upload_dirty_light_volumes(
             neighbor_dense[4].as_ref(),
             neighbor_dense[5].as_ref(),
         ];
-        let ns = Neighbors { chunks: neighbor_refs };
-        let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get_mut(&coord) else { continue };
+        let ns = Neighbors {
+            chunks: neighbor_refs,
+        };
+        let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get_mut(&coord) else {
+            continue;
+        };
         let dense = data.decompress();
         let blob = crate::voxel::chunk::build_light_volume_blob(&dense, &ns);
         renderer.upload_chunk_light_volume(coord, blob.as_ref());

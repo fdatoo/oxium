@@ -4,7 +4,7 @@
 use glam::UVec3;
 use oxium::voxel::block::Block;
 use oxium::voxel::chunk::DenseChunk;
-use oxium::voxel::coords::{ChunkCoord, LocalPos, CHUNK_DIM_U};
+use oxium::voxel::coords::{CHUNK_DIM_U, ChunkCoord, LocalPos};
 use oxium::worldgen::Generator;
 
 #[test]

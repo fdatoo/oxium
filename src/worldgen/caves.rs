@@ -90,17 +90,22 @@ pub fn pick_style(
     let u = mix_unit(seed, &[coord.x, coord.z, system_idx, 7000]);
     let weights = match band {
         DepthBand::Shallow => &cfg.style_table.style_weights_shallow,
-        DepthBand::Middle  => &cfg.style_table.style_weights_middle,
-        DepthBand::Deep    => &cfg.style_table.style_weights_deep,
+        DepthBand::Middle => &cfg.style_table.style_weights_middle,
+        DepthBand::Deep => &cfg.style_table.style_weights_deep,
     };
     let mut acc = 0.0;
     let styles = [
-        CaveStyle::Cathedral, CaveStyle::Warren, CaveStyle::Slot,
-        CaveStyle::Sump,      CaveStyle::Karst,
+        CaveStyle::Cathedral,
+        CaveStyle::Warren,
+        CaveStyle::Slot,
+        CaveStyle::Sump,
+        CaveStyle::Karst,
     ];
     for (i, &w) in weights.iter().enumerate() {
         acc += w;
-        if u <= acc { return styles[i]; }
+        if u <= acc {
+            return styles[i];
+        }
     }
     CaveStyle::Karst
 }
@@ -120,13 +125,15 @@ pub fn build_systems_for_region(
     // CAVE_SYSTEMS_PER_REGION acts as a compile-time safety cap;
     // cave_cfg.systems_per_region_max is the hot-reloadable config value.
     let n_min = CAVE_SYSTEMS_PER_REGION.0;
-    let n_max = cave_cfg.systems_per_region_max.min(CAVE_SYSTEMS_PER_REGION.1);
-    let n = n_min
-        + (mix_u32(seed, &[coord.x, coord.z, 1])
-            % (n_max - n_min + 1));
+    let n_max = cave_cfg
+        .systems_per_region_max
+        .min(CAVE_SYSTEMS_PER_REGION.1);
+    let n = n_min + (mix_u32(seed, &[coord.x, coord.z, 1]) % (n_max - n_min + 1));
     region.cave_systems.clear();
     for system_idx in 0..n as i32 {
-        let sys = build_system(seed, coord, system_idx, heightmap, climate, density, cave_cfg);
+        let sys = build_system(
+            seed, coord, system_idx, heightmap, climate, density, cave_cfg,
+        );
         region.cave_systems.push(sys);
     }
     build_vertical_connectors(seed, coord, cave_cfg, region);
@@ -145,21 +152,25 @@ pub fn build_vertical_connectors(
         return;
     }
     // Snapshot which band each system belongs to (avoids borrow conflict).
-    let bands: Vec<DepthBand> = region.cave_systems.iter().map(|s| {
-        let cy = (s.bb_min.y + s.bb_max.y) / 2;
-        if cy >= CAVE_BAND_SHALLOW.0 {
-            DepthBand::Shallow
-        } else if cy >= CAVE_BAND_MIDDLE.0 {
-            DepthBand::Middle
-        } else {
-            DepthBand::Deep
-        }
-    }).collect();
+    let bands: Vec<DepthBand> = region
+        .cave_systems
+        .iter()
+        .map(|s| {
+            let cy = (s.bb_min.y + s.bb_max.y) / 2;
+            if cy >= CAVE_BAND_SHALLOW.0 {
+                DepthBand::Shallow
+            } else if cy >= CAVE_BAND_MIDDLE.0 {
+                DepthBand::Middle
+            } else {
+                DepthBand::Deep
+            }
+        })
+        .collect();
     let band_idx = |b: DepthBand| -> u8 {
         match b {
             DepthBand::Shallow => 0,
-            DepthBand::Middle  => 1,
-            DepthBand::Deep    => 2,
+            DepthBand::Middle => 1,
+            DepthBand::Deep => 2,
         }
     };
     for i in 0..region.cave_systems.len() {
@@ -238,9 +249,7 @@ pub fn build_trunks(
                 .cave_systems
                 .iter()
                 .enumerate()
-                .filter_map(|(si, sys)| {
-                    sys.chambers.first().map(|c| (ri, si, *coord, c.center))
-                })
+                .filter_map(|(si, sys)| sys.chambers.first().map(|c| (ri, si, *coord, c.center)))
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -282,7 +291,8 @@ pub fn build_trunks(
         let axis = other_center - my_center;
         let len = (axis.x * axis.x + axis.z * axis.z).sqrt().max(1.0);
         let perp = glam::Vec3::new(-axis.z / len, 0.0, axis.x / len);
-        let o = (mix_unit(seed, &[coord.x, coord.z, salt_x, salt_y, salt_z, 9001]) * 2.0 - 1.0) * 40.0;
+        let o =
+            (mix_unit(seed, &[coord.x, coord.z, salt_x, salt_y, salt_z, 9001]) * 2.0 - 1.0) * 40.0;
         let mid = glam::Vec3::new(
             (my_center.x + other_center.x) * 0.5 + perp.x * o,
             (my_center.y + other_center.y) * 0.5,
@@ -303,10 +313,7 @@ struct StyleParams {
     tunnel_r: (f32, f32),
 }
 
-fn style_params(
-    style: CaveStyle,
-    table: &crate::worldgen::config::CaveStyleTable,
-) -> StyleParams {
+fn style_params(style: CaveStyle, table: &crate::worldgen::config::CaveStyleTable) -> StyleParams {
     match style {
         CaveStyle::Cathedral => StyleParams {
             chamber_count: table.cathedral_chamber_count,
@@ -377,9 +384,8 @@ fn build_system(
 
     // Chamber count — from style table.
     let (cn_min, cn_max) = sp.chamber_count;
-    let chamber_count = cn_min
-        + (mix_u32(seed, &[coord.x, coord.z, system_idx, 20])
-            % (cn_max - cn_min + 1));
+    let chamber_count =
+        cn_min + (mix_u32(seed, &[coord.x, coord.z, system_idx, 20]) % (cn_max - cn_min + 1));
 
     // Pre-compute Sump bb_center_y / bb_half_y for the bias formula.
     let bb_center_y = (bb_min.y + bb_max.y) as f32 * 0.5;
@@ -448,11 +454,7 @@ fn build_system(
             cy_raw
         };
 
-        let center = Vec3::new(
-            bb_min.x as f32 + sx,
-            cy_final,
-            bb_min.z as f32 + sz,
-        );
+        let center = Vec3::new(bb_min.x as f32 + sx, cy_final, bb_min.z as f32 + sz);
         let radii = Vec3::new(rx_final, ry, rz_final);
         let mean_r = (rx_final + ry + rz_final) / 3.0;
         let min_spacing = mean_r * POISSON_MIN_SPACING_MULT;
@@ -506,7 +508,9 @@ fn build_system(
             if added_extras >= extra_loop_count {
                 break;
             }
-            if mst_edges.iter().any(|&(x, y)| (x == a && y == b) || (x == b && y == a))
+            if mst_edges
+                .iter()
+                .any(|&(x, y)| (x == a && y == b) || (x == b && y == a))
             {
                 continue;
             }
@@ -575,23 +579,15 @@ fn build_system(
     // Entrance rolls.
     let mut entrances: Vec<Entrance> = Vec::new();
     for (ci, chamber) in chambers.iter().enumerate() {
-        let try_roll = mix_unit(
-            seed,
-            &[coord.x, coord.z, system_idx, 70, ci as i32],
-        );
+        let try_roll = mix_unit(seed, &[coord.x, coord.z, system_idx, 70, ci as i32]);
         if try_roll >= band.entrance_prob() {
             continue;
         }
         let cwx = chamber.center.x as i32;
         let cwy_top = (chamber.center.y + chamber.radii.y) as i32;
         let cwz = chamber.center.z as i32;
-        let surface_h = heightmap.h_pre(
-            seed,
-            chamber.center.x,
-            chamber.center.z,
-            climate,
-            density,
-        ) as i32;
+        let surface_h =
+            heightmap.h_pre(seed, chamber.center.x, chamber.center.z, climate, density) as i32;
         // 1. Sinkhole.
         if surface_h - cwy_top <= SINKHOLE_DEPTH_MAX && surface_h - cwy_top >= -2 {
             // Extend the shaft top by SURFACE_BAND so it carves through any
@@ -706,9 +702,8 @@ pub fn cave_sdf(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> f32 {
         // > 1 outside. Soft falloff over the [0, 1] range.
         for c in &sys.chambers {
             let d = p - c.center;
-            let ratio = (d.x / c.radii.x).powi(2)
-                + (d.y / c.radii.y).powi(2)
-                + (d.z / c.radii.z).powi(2);
+            let ratio =
+                (d.x / c.radii.x).powi(2) + (d.y / c.radii.y).powi(2) + (d.z / c.radii.z).powi(2);
             if ratio <= 1.0 {
                 // 1.0 at center → 0.0 at boundary.
                 let sdf = (1.0 - ratio) * CAVE_SDF_INTENSITY;
@@ -830,7 +825,9 @@ pub fn trunks_sdf(
         .collect();
 
     for (si, sys) in systems.iter().enumerate() {
-        let Some(c0) = sys.chambers.first() else { continue; };
+        let Some(c0) = sys.chambers.first() else {
+            continue;
+        };
         let my_coord = RegionCoord::containing(c0.center.x as i32, c0.center.z as i32);
         let my_center = c0.center;
 
@@ -842,7 +839,10 @@ pub fn trunks_sdf(
         let salt_y = c0.center.y as i32;
         let salt_z = c0.center.z as i32;
 
-        let u = mix_unit(seed, &[my_coord.x, my_coord.z, salt_x, salt_y, salt_z, 9000]);
+        let u = mix_unit(
+            seed,
+            &[my_coord.x, my_coord.z, salt_x, salt_y, salt_z, 9000],
+        );
         if u > trunk_prob {
             continue;
         }
@@ -852,25 +852,38 @@ pub fn trunks_sdf(
         let mut best_center: Option<Vec3> = None;
         let mut best_dist = f32::MAX;
         for (j, (other_coord, other_center)) in snap.iter().enumerate() {
-            if j == si { continue; }
+            if j == si {
+                continue;
+            }
             let dx = (other_coord.x - my_coord.x).abs();
             let dz = (other_coord.z - my_coord.z).abs();
-            if dx > 1 || dz > 1 { continue; }
+            if dx > 1 || dz > 1 {
+                continue;
+            }
             // Require different region (not same region coord).
-            if *other_coord == my_coord { continue; }
+            if *other_coord == my_coord {
+                continue;
+            }
             let d = (*other_center - my_center).length();
             if d < best_dist {
                 best_dist = d;
                 best_center = Some(*other_center);
             }
         }
-        let Some(other_center) = best_center else { continue; };
+        let Some(other_center) = best_center else {
+            continue;
+        };
 
         // Build trunk geometry (mirrors build_trunks).
         let axis = other_center - my_center;
         let len = (axis.x * axis.x + axis.z * axis.z).sqrt().max(1.0);
         let perp = Vec3::new(-axis.z / len, 0.0, axis.x / len);
-        let o = (mix_unit(seed, &[my_coord.x, my_coord.z, salt_x, salt_y, salt_z, 9001]) * 2.0 - 1.0) * 40.0;
+        let o = (mix_unit(
+            seed,
+            &[my_coord.x, my_coord.z, salt_x, salt_y, salt_z, 9001],
+        ) * 2.0
+            - 1.0)
+            * 40.0;
         let mid = Vec3::new(
             (my_center.x + other_center.x) * 0.5 + perp.x * o,
             (my_center.y + other_center.y) * 0.5,
@@ -884,7 +897,9 @@ pub fn trunks_sdf(
             let b = control[i + 1];
             let ab = b - a;
             let len_sq = ab.length_squared();
-            if len_sq < 1e-6 { continue; }
+            if len_sq < 1e-6 {
+                continue;
+            }
             let t_param = ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0);
             let closest = a + ab * t_param;
             let dist = (p - closest).length();
@@ -919,9 +934,7 @@ pub fn entrance_sdf(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> f32 {
             match e.kind {
                 EntranceKind::Sinkhole => {
                     let chamber_top_y = ch.center.y + ch.radii.y;
-                    if wy as f32 >= chamber_top_y - 1.0
-                        && wy as f32 <= e.surface.y as f32
-                    {
+                    if wy as f32 >= chamber_top_y - 1.0 && wy as f32 <= e.surface.y as f32 {
                         let dx = p.x - e.surface.x as f32;
                         let dz = p.z - e.surface.z as f32;
                         let depth = (e.surface.y as f32 - wy as f32).max(0.0);
@@ -938,9 +951,7 @@ pub fn entrance_sdf(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> f32 {
                 }
                 EntranceKind::Skylight => {
                     let chamber_top_y = ch.center.y + ch.radii.y;
-                    if wy as f32 >= chamber_top_y - 1.0
-                        && wy as f32 <= e.surface.y as f32
-                    {
+                    if wy as f32 >= chamber_top_y - 1.0 && wy as f32 <= e.surface.y as f32 {
                         let dx = p.x - e.surface.x as f32;
                         let dz = p.z - e.surface.z as f32;
                         let d = (dx * dx + dz * dz).sqrt();
@@ -954,15 +965,13 @@ pub fn entrance_sdf(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> f32 {
                 }
                 EntranceKind::CliffMouth => {
                     let chamber_p = ch.center;
-                    let cliff_p =
-                        Vec3::new(e.surface.x as f32, chamber_p.y, e.surface.z as f32);
+                    let cliff_p = Vec3::new(e.surface.x as f32, chamber_p.y, e.surface.z as f32);
                     let ab = cliff_p - chamber_p;
                     let len_sq = ab.length_squared();
                     if len_sq < 1e-6 {
                         continue;
                     }
-                    let t_param =
-                        ((p - chamber_p).dot(ab) / len_sq).clamp(0.0, 1.0);
+                    let t_param = ((p - chamber_p).dot(ab) / len_sq).clamp(0.0, 1.0);
                     let closest = chamber_p + ab * t_param;
                     let d = (p - closest).length();
                     if d <= 2.5 {
@@ -992,9 +1001,7 @@ pub fn cave_air(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> bool {
         for c in &sys.chambers {
             let d = p - c.center;
             let ratio =
-                (d.x / c.radii.x).powi(2)
-                    + (d.y / c.radii.y).powi(2)
-                    + (d.z / c.radii.z).powi(2);
+                (d.x / c.radii.x).powi(2) + (d.y / c.radii.y).powi(2) + (d.z / c.radii.z).powi(2);
             if ratio <= 1.0 {
                 return true;
             }
@@ -1100,11 +1107,7 @@ pub fn entrance_air(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> bool 
                     // Horizontal tunnel from chamber to the cliff
                     // anchor. Capsule with radius 2.5.
                     let chamber_p = ch.center;
-                    let cliff_p = Vec3::new(
-                        e.surface.x as f32,
-                        chamber_p.y,
-                        e.surface.z as f32,
-                    );
+                    let cliff_p = Vec3::new(e.surface.x as f32, chamber_p.y, e.surface.z as f32);
                     let ab = cliff_p - chamber_p;
                     let len_sq = ab.length_squared();
                     if len_sq < 1e-6 {
@@ -1216,8 +1219,7 @@ pub fn cheese_contribution(
         wz as f64 * xz_scale,
     ]) as f32;
     let term1 = (cfg.cheese_offset + cheese).clamp(-1.0, 1.0);
-    let supp = (cfg.cheese_suppression_offset
-        + cfg.cheese_suppression_slope * raw_density)
+    let supp = (cfg.cheese_suppression_offset + cfg.cheese_suppression_slope * raw_density)
         .clamp(cfg.cheese_suppression_min, cfg.cheese_suppression_max);
 
     // MC-parity `layerizedCaverns`: add `intensity * layer²` so
@@ -1262,16 +1264,12 @@ pub fn pillar_contribution(
     let p_z = wz as f64 * cfg.pillar_xz_scale as f64;
     let pillar_raw = 2.0 * carvers.pillar.get([p_x, p_y, p_z]) as f32;
     let pillar_rare = -1.0
-        - carvers.pillar_rareness.get([
-            wx as f64,
-            wy as f64,
-            wz as f64,
-        ]) as f32;
-    let thickness_noise = carvers.pillar_thickness.get([
-        wx as f64,
-        wy as f64,
-        wz as f64,
-    ]) as f32;
+        - carvers
+            .pillar_rareness
+            .get([wx as f64, wy as f64, wz as f64]) as f32;
+    let thickness_noise = carvers
+        .pillar_thickness
+        .get([wx as f64, wy as f64, wz as f64]) as f32;
     let thickness = (0.55 + 0.55 * thickness_noise).powi(3);
     let raw = (pillar_raw + pillar_rare) * thickness;
     if raw < cfg.pillar_cutoff {
@@ -1286,7 +1284,9 @@ pub fn pillar_contribution(
 /// so close-but-not-touching pockets connect into one volume.
 #[inline]
 pub fn smin(a: f32, b: f32, k: f32) -> f32 {
-    if k <= 0.0 { return a.min(b); }
+    if k <= 0.0 {
+        return a.min(b);
+    }
     let h = ((k - (a - b).abs()).max(0.0)) / k;
     a.min(b) - h * h * k * 0.25
 }
@@ -1307,16 +1307,18 @@ pub fn smin(a: f32, b: f32, k: f32) -> f32 {
 /// (lower bound at deep + on-axis noise, upper bound at noise extrema with
 /// no cave region).
 pub fn terasology_ambient(
-    wx: i32, wy: i32, wz: i32,
+    wx: i32,
+    wy: i32,
+    wz: i32,
     carvers: &NoiseCarvers,
     cfg: &CaveConfig,
     surface_y: f32,
 ) -> f32 {
     let depth = (surface_y - wy as f32).max(0.0);
     let freq_reduction = (cfg.tera_supp - depth / cfg.tera_supp_depth).max(0.0);
-    let freq_depth     = cfg.tera_thresh_base + depth / cfg.tera_thresh_depth;
-    let freq           = 1.0 / cfg.tera_wave;
-    let wy_scaled      = wy as f32 * cfg.tera_y_factor;
+    let freq_depth = cfg.tera_thresh_base + depth / cfg.tera_thresh_depth;
+    let freq = 1.0 / cfg.tera_wave;
+    let wy_scaled = wy as f32 * cfg.tera_y_factor;
     let n0 = carvers.tera_a.get([
         (wx as f32 * freq) as f64,
         (wy_scaled * freq) as f64,
@@ -1326,7 +1328,8 @@ pub fn terasology_ambient(
         (wx as f32 * freq) as f64,
         (wy_scaled * freq) as f64,
         (wz as f32 * freq) as f64,
-    ]) as f32 + freq_reduction;
+    ]) as f32
+        + freq_reduction;
     ((n0 * n0 + n1 * n1).sqrt() - freq_depth) * 5.0
     // scale: align magnitude with cheese carver for downstream smin composition
 }
@@ -1349,8 +1352,7 @@ const CARVER_CELL_SIZE: i32 = 4;
 const CARVER_CELL_COUNT: usize =
     (crate::voxel::coords::CHUNK_DIM_U as usize) / CARVER_CELL_SIZE as usize; // 8
 const CARVER_CORNER_COUNT: usize = CARVER_CELL_COUNT + 1; // 9
-const CARVER_CORNER_CUBE: usize =
-    CARVER_CORNER_COUNT * CARVER_CORNER_COUNT * CARVER_CORNER_COUNT; // 729
+const CARVER_CORNER_CUBE: usize = CARVER_CORNER_COUNT * CARVER_CORNER_COUNT * CARVER_CORNER_COUNT; // 729
 
 /// One corner's worth of pre-sampled noise. Keeping the channels
 /// AoS means each voxel touches 8 contiguous corner structs instead
@@ -1376,11 +1378,7 @@ pub struct CarverEvaluator {
 }
 
 impl CarverEvaluator {
-    pub fn new(
-        carvers: &NoiseCarvers,
-        cfg: &CaveConfig,
-        chunk_origin: IVec3,
-    ) -> Self {
+    pub fn new(carvers: &NoiseCarvers, cfg: &CaveConfig, chunk_origin: IVec3) -> Self {
         let mut corners = vec![CarverCorner::default(); CARVER_CORNER_CUBE].into_boxed_slice();
         for cz in 0..CARVER_CORNER_COUNT {
             for cy in 0..CARVER_CORNER_COUNT {
@@ -1457,7 +1455,14 @@ impl CarverEvaluator {
         let tx = (lx - cx as i32 * CARVER_CELL_SIZE) as f32 / CARVER_CELL_SIZE as f32;
         let ty = (ly - cy as i32 * CARVER_CELL_SIZE) as f32 / CARVER_CELL_SIZE as f32;
         let tz = (lz - cz as i32 * CARVER_CELL_SIZE) as f32 / CARVER_CELL_SIZE as f32;
-        LerpCoords { cx, cy, cz, tx, ty, tz }
+        LerpCoords {
+            cx,
+            cy,
+            cz,
+            tx,
+            ty,
+            tz,
+        }
     }
 
     /// Trilinear interp of one channel — `get` picks the channel from a
@@ -1465,9 +1470,7 @@ impl CarverEvaluator {
     /// `density_graph::CellEvaluator::evaluate`.
     #[inline]
     fn trilerp<F: Fn(&CarverCorner) -> f32>(&self, c: &LerpCoords, get: F) -> f32 {
-        let i = |x: usize, y: usize, z: usize| {
-            &self.corners[corner_index(x, y, z)]
-        };
+        let i = |x: usize, y: usize, z: usize| &self.corners[corner_index(x, y, z)];
         let c000 = get(i(c.cx, c.cy, c.cz));
         let c100 = get(i(c.cx + 1, c.cy, c.cz));
         let c010 = get(i(c.cx, c.cy + 1, c.cz));
@@ -1520,18 +1523,22 @@ impl CarverEvaluator {
     /// same `terasology_ambient` arithmetic on the lerped result. Exact at
     /// corners by construction.
     pub fn terasology_ambient_at(
-        &self, wx: i32, wy: i32, wz: i32, cfg: &CaveConfig, surface_y: f32,
+        &self,
+        wx: i32,
+        wy: i32,
+        wz: i32,
+        cfg: &CaveConfig,
+        surface_y: f32,
     ) -> f32 {
         let lc = self.lerp_coords(wx, wy, wz);
         let n0_raw = self.trilerp(&lc, |c| c.tera_a);
         let n1_raw = self.trilerp(&lc, |c| c.tera_b);
         let depth = (surface_y - wy as f32).max(0.0);
         let freq_reduction = (cfg.tera_supp - depth / cfg.tera_supp_depth).max(0.0);
-        let freq_depth     = cfg.tera_thresh_base + depth / cfg.tera_thresh_depth;
+        let freq_depth = cfg.tera_thresh_base + depth / cfg.tera_thresh_depth;
         let n1 = n1_raw + freq_reduction;
         ((n0_raw * n0_raw + n1 * n1).sqrt() - freq_depth) * 5.0
     }
-
 }
 
 #[derive(Clone, Copy)]
@@ -1560,14 +1567,16 @@ mod tests {
         assert_eq!(smin(0.8, 0.5, 0.0), 0.5);
         // smin(0, 0, k) pulls below min by k/4 (polynomial peak)
         let v = smin(0.0, 0.0, 1.0);
-        assert!((v + 0.25).abs() < 1e-5, "smin(0,0,1) should be -0.25, got {v}");
+        assert!(
+            (v + 0.25).abs() < 1e-5,
+            "smin(0,0,1) should be -0.25, got {v}"
+        );
         // smin(a, b, k) <= min(a, b) for all k >= 0
         for k in [0.0, 0.5, 1.5, 3.0] {
             for a in [-0.5, 0.0, 0.5, 2.0] {
                 for b in [-0.5, 0.0, 0.5, 2.0] {
                     let s = smin(a, b, k);
-                    assert!(s <= a.min(b) + 1e-5,
-                        "smin({a},{b},{k}) = {s} > min");
+                    assert!(s <= a.min(b) + 1e-5, "smin({a},{b},{k}) = {s} > min");
                 }
             }
         }
@@ -1584,11 +1593,23 @@ mod tests {
             for rz in 0..8_i32 {
                 let coord = RegionCoord { x: rx, z: rz };
                 let mut region = FineRegion::empty(coord);
-                build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut region, &cfg.cave);
-                let bands: Vec<DepthBand> = region.cave_systems.iter().map(|s| {
-                    infer_band_for_test(s)
-                }).collect();
-                if !pair_is_adjacent_for_test(&bands) { continue; }
+                build_systems_for_region(
+                    42,
+                    coord,
+                    &hm,
+                    &cfg.climate,
+                    &cfg.density,
+                    &mut region,
+                    &cfg.cave,
+                );
+                let bands: Vec<DepthBand> = region
+                    .cave_systems
+                    .iter()
+                    .map(|s| infer_band_for_test(s))
+                    .collect();
+                if !pair_is_adjacent_for_test(&bands) {
+                    continue;
+                }
                 for sys in &region.cave_systems {
                     if !sys.vertical_connectors.is_empty() {
                         found_connector = true;
@@ -1597,21 +1618,28 @@ mod tests {
                 }
             }
         }
-        assert!(found_connector, "no vertical connector emitted in any 2-band region with prob=1.0");
+        assert!(
+            found_connector,
+            "no vertical connector emitted in any 2-band region with prob=1.0"
+        );
     }
 
     fn infer_band_for_test(sys: &CaveSystem) -> DepthBand {
         let cy = (sys.bb_min.y + sys.bb_max.y) / 2;
-        if cy >= CAVE_BAND_SHALLOW.0 { DepthBand::Shallow }
-        else if cy >= CAVE_BAND_MIDDLE.0 { DepthBand::Middle }
-        else { DepthBand::Deep }
+        if cy >= CAVE_BAND_SHALLOW.0 {
+            DepthBand::Shallow
+        } else if cy >= CAVE_BAND_MIDDLE.0 {
+            DepthBand::Middle
+        } else {
+            DepthBand::Deep
+        }
     }
 
     fn pair_is_adjacent_for_test(bands: &[DepthBand]) -> bool {
         (bands.iter().any(|b| matches!(b, DepthBand::Shallow))
             && bands.iter().any(|b| matches!(b, DepthBand::Middle)))
-        || (bands.iter().any(|b| matches!(b, DepthBand::Middle))
-            && bands.iter().any(|b| matches!(b, DepthBand::Deep)))
+            || (bands.iter().any(|b| matches!(b, DepthBand::Middle))
+                && bands.iter().any(|b| matches!(b, DepthBand::Deep)))
     }
 
     #[test]
@@ -1624,7 +1652,15 @@ mod tests {
             for x in -3..=3 {
                 let coord = RegionCoord { x, z };
                 let mut region = FineRegion::empty(coord);
-                build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut region, &cfg.cave);
+                build_systems_for_region(
+                    42,
+                    coord,
+                    &hm,
+                    &cfg.climate,
+                    &cfg.density,
+                    &mut region,
+                    &cfg.cave,
+                );
                 let n = region.cave_systems.len();
                 assert!(
                     (CAVE_SYSTEMS_PER_REGION.0 as usize..=CAVE_SYSTEMS_PER_REGION.1 as usize)
@@ -1642,8 +1678,24 @@ mod tests {
         let coord = RegionCoord { x: 2, z: -3 };
         let mut r1 = FineRegion::empty(coord);
         let mut r2 = FineRegion::empty(coord);
-        build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut r1, &cfg.cave);
-        build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut r2, &cfg.cave);
+        build_systems_for_region(
+            42,
+            coord,
+            &hm,
+            &cfg.climate,
+            &cfg.density,
+            &mut r1,
+            &cfg.cave,
+        );
+        build_systems_for_region(
+            42,
+            coord,
+            &hm,
+            &cfg.climate,
+            &cfg.density,
+            &mut r2,
+            &cfg.cave,
+        );
         assert_eq!(r1.cave_systems.len(), r2.cave_systems.len());
         for (a, b) in r1.cave_systems.iter().zip(&r2.cave_systems) {
             assert_eq!(a.chambers.len(), b.chambers.len());
@@ -1660,7 +1712,15 @@ mod tests {
         let hm = HeightmapNoise::new(42, &cfg.climate);
         let coord = RegionCoord { x: 0, z: 0 };
         let mut region = FineRegion::empty(coord);
-        build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut region, &cfg.cave);
+        build_systems_for_region(
+            42,
+            coord,
+            &hm,
+            &cfg.climate,
+            &cfg.density,
+            &mut region,
+            &cfg.cave,
+        );
         for sys in &region.cave_systems {
             if sys.chambers.len() < 2 {
                 continue;
@@ -1717,7 +1777,15 @@ mod tests {
             for rz in 0..4 {
                 let coord = RegionCoord { x: rx, z: rz };
                 let mut region = FineRegion::empty(coord);
-                build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut region, &cfg.cave);
+                build_systems_for_region(
+                    42,
+                    coord,
+                    &hm,
+                    &cfg.climate,
+                    &cfg.density,
+                    &mut region,
+                    &cfg.cave,
+                );
                 for sys in &region.cave_systems {
                     if let Some(c) = sys.chambers.first() {
                         let wx = c.center.x as i32;
@@ -1759,7 +1827,10 @@ mod tests {
         let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
         let a = NoiseCarvers::new(42, &cfg.cave);
         let b = NoiseCarvers::new(43, &cfg.cave);
-        assert_ne!(a.cheese.get([10.0, 5.0, -3.0]), b.cheese.get([10.0, 5.0, -3.0]));
+        assert_ne!(
+            a.cheese.get([10.0, 5.0, -3.0]),
+            b.cheese.get([10.0, 5.0, -3.0])
+        );
     }
 
     #[test]
@@ -1822,7 +1893,9 @@ mod tests {
             for wx in (-512..512).step_by(2) {
                 for wz in (-512..512).step_by(2) {
                     let v = cheese_contribution(wx, wy, wz, 20.0, &nc, &cfg.cave);
-                    if v < min_result { min_result = v; }
+                    if v < min_result {
+                        min_result = v;
+                    }
                 }
             }
         }
@@ -1897,7 +1970,10 @@ mod tests {
                         let direct = cheese_contribution(wx, wy, wz, raw_density, &nc, &cfg.cave);
                         let lerped = eval.cheese_at(wx, wy, wz, raw_density, &cfg.cave);
                         let d = (direct - lerped).abs();
-                        assert!(d < 1e-5, "cheese mismatch at ({wx},{wy},{wz}) rd={raw_density}: direct={direct} lerp={lerped} d={d}");
+                        assert!(
+                            d < 1e-5,
+                            "cheese mismatch at ({wx},{wy},{wz}) rd={raw_density}: direct={direct} lerp={lerped} d={d}"
+                        );
                     }
 
                     let direct = pillar_contribution(wx, wy, wz, &nc, &cfg.cave);
@@ -1955,21 +2031,33 @@ mod tests {
                 for wz in (-128..128).step_by(4) {
                     total += 1;
                     let v = terasology_ambient(wx, wy, wz, &nc, &cave_cfg, surface_y);
-                    if v < 0.0 { hit += 1; }
+                    if v < 0.0 {
+                        hit += 1;
+                    }
                 }
             }
             frac_by_depth.push(hit as f32 / total as f32);
         }
         // Monotonic non-decreasing toward depth.
         for w in frac_by_depth.windows(2) {
-            assert!(w[1] >= w[0] - 1e-3,
-                "cave fraction decreased with depth: {:?}", frac_by_depth);
+            assert!(
+                w[1] >= w[0] - 1e-3,
+                "cave fraction decreased with depth: {:?}",
+                frac_by_depth
+            );
         }
         // Surface band should be ~0%.
-        assert!(frac_by_depth[0] < 0.05, "too many caves near surface: {:?}", frac_by_depth);
+        assert!(
+            frac_by_depth[0] < 0.05,
+            "too many caves near surface: {:?}",
+            frac_by_depth
+        );
         // Deep band should be > shallow.
-        assert!(frac_by_depth[3] > frac_by_depth[0] * 2.0,
-            "deep band not vastly more cave-rich than shallow: {:?}", frac_by_depth);
+        assert!(
+            frac_by_depth[3] > frac_by_depth[0] * 2.0,
+            "deep band not vastly more cave-rich than shallow: {:?}",
+            frac_by_depth
+        );
     }
 
     #[test]
@@ -1994,7 +2082,10 @@ mod tests {
             }
         }
         let frac = hit as f32 / total as f32;
-        assert!(frac > 0.02, "expected some caves at supp_depth, got {frac:.3}");
+        assert!(
+            frac > 0.02,
+            "expected some caves at supp_depth, got {frac:.3}"
+        );
     }
 
     #[test]
@@ -2018,19 +2109,23 @@ mod tests {
                 if terasology_ambient(wx, wy_center, wz, &nc, &cave_cfg, surface_y) < 0.0 {
                     h_run += 1;
                 } else if h_run > 0 {
-                    horizontal_runs += h_run; h_run = 0;
+                    horizontal_runs += h_run;
+                    h_run = 0;
                 }
             }
             for dy in (-30..30).step_by(2) {
                 if terasology_ambient(wx, wy_center + dy, 0, &nc, &cave_cfg, surface_y) < 0.0 {
                     v_run += 1;
                 } else if v_run > 0 {
-                    vertical_runs += v_run; v_run = 0;
+                    vertical_runs += v_run;
+                    v_run = 0;
                 }
             }
         }
-        assert!(horizontal_runs > vertical_runs,
-            "expected horizontal cave extent > vertical: h={horizontal_runs} v={vertical_runs}");
+        assert!(
+            horizontal_runs > vertical_runs,
+            "expected horizontal cave extent > vertical: h={horizontal_runs} v={vertical_runs}"
+        );
     }
 
     #[test]
@@ -2085,8 +2180,8 @@ mod tests {
         let table = &cfg.cave.style_table;
         let bands = [
             ("shallow", DepthBand::Shallow, &table.style_weights_shallow),
-            ("middle",  DepthBand::Middle,  &table.style_weights_middle),
-            ("deep",    DepthBand::Deep,    &table.style_weights_deep),
+            ("middle", DepthBand::Middle, &table.style_weights_middle),
+            ("deep", DepthBand::Deep, &table.style_weights_deep),
         ];
         for (name, band, weights) in &bands {
             let mut counts = [0u32; 5];
@@ -2094,18 +2189,20 @@ mod tests {
                 let s = pick_style(42, RegionCoord { x: i, z: 0 }, 0, *band, &cfg.cave);
                 let idx = match s {
                     CaveStyle::Cathedral => 0,
-                    CaveStyle::Warren    => 1,
-                    CaveStyle::Slot      => 2,
-                    CaveStyle::Sump      => 3,
-                    CaveStyle::Karst     => 4,
+                    CaveStyle::Warren => 1,
+                    CaveStyle::Slot => 2,
+                    CaveStyle::Sump => 3,
+                    CaveStyle::Karst => 4,
                 };
                 counts[idx] += 1;
             }
             for (i, &expected_weight) in weights.iter().enumerate() {
                 let actual = counts[i] as f32 / 500.0;
                 let diff = (actual - expected_weight).abs();
-                assert!(diff < 0.10,
-                    "band {name}, style index {i}: expected {expected_weight:.2}, got {actual:.2}");
+                assert!(
+                    diff < 0.10,
+                    "band {name}, style index {i}: expected {expected_weight:.2}, got {actual:.2}"
+                );
             }
         }
     }
@@ -2122,7 +2219,15 @@ mod tests {
             for rz in 0..3_i32 {
                 let coord = RegionCoord { x: rx, z: rz };
                 let mut region = FineRegion::empty(coord);
-                build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut region, &cfg.cave);
+                build_systems_for_region(
+                    42,
+                    coord,
+                    &hm,
+                    &cfg.climate,
+                    &cfg.density,
+                    &mut region,
+                    &cfg.cave,
+                );
                 regions.push((coord, region));
             }
         }
@@ -2135,22 +2240,34 @@ mod tests {
         // neighbour-region system.
         let mut found = false;
         // Snapshot (region_index, coord, system centers) for lookup.
-        let snap: Vec<(usize, RegionCoord, Vec<glam::Vec3>)> = regions.iter().enumerate().map(|(i, (coord, region))| {
-            let centers: Vec<glam::Vec3> = region.cave_systems.iter()
-                .filter_map(|s| s.chambers.first().map(|c| c.center))
-                .collect();
-            (i, *coord, centers)
-        }).collect();
+        let snap: Vec<(usize, RegionCoord, Vec<glam::Vec3>)> = regions
+            .iter()
+            .enumerate()
+            .map(|(i, (coord, region))| {
+                let centers: Vec<glam::Vec3> = region
+                    .cave_systems
+                    .iter()
+                    .filter_map(|s| s.chambers.first().map(|c| c.center))
+                    .collect();
+                (i, *coord, centers)
+            })
+            .collect();
 
         'outer: for (i, (coord, region)) in regions.iter().enumerate() {
             for sys in &region.cave_systems {
-                let Some(trunk) = &sys.trunk else { continue; };
+                let Some(trunk) = &sys.trunk else {
+                    continue;
+                };
                 let endpoint = *trunk.control_points.last().unwrap();
                 // Check if endpoint matches any chamber-0 center in a
                 // neighbouring region (8-connected, different region index).
                 for (j, other_coord, centers) in &snap {
-                    if *j == i { continue; }
-                    if (other_coord.x - coord.x).abs() > 1 || (other_coord.z - coord.z).abs() > 1 { continue; }
+                    if *j == i {
+                        continue;
+                    }
+                    if (other_coord.x - coord.x).abs() > 1 || (other_coord.z - coord.z).abs() > 1 {
+                        continue;
+                    }
                     for &c in centers {
                         if (c - endpoint).length() < 0.5 {
                             found = true;
@@ -2160,7 +2277,9 @@ mod tests {
                 }
             }
         }
-        assert!(found, "no trunk linked to any neighbour-region chamber center");
+        assert!(
+            found,
+            "no trunk linked to any neighbour-region chamber center"
+        );
     }
-
 }

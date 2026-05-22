@@ -79,7 +79,11 @@ pub fn save(name: &str, cfg: &WorldgenConfig) -> anyhow::Result<PresetEntry> {
     let notes_path = root.join(format!("{sanitized}.notes.md"));
     let serialized = ron::ser::to_string_pretty(cfg, ron::ser::PrettyConfig::default())?;
     std::fs::write(&config_path, serialized)?;
-    Ok(PresetEntry { name: sanitized, config_path, notes_path })
+    Ok(PresetEntry {
+        name: sanitized,
+        config_path,
+        notes_path,
+    })
 }
 
 /// Save (or overwrite) notes for a preset.

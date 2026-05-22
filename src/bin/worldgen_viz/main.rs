@@ -14,8 +14,8 @@ mod widgets;
 mod world;
 
 use crate::app::AppState;
-use crate::render::scene::SceneRenderer;
 use crate::render::RenderState;
+use crate::render::scene::SceneRenderer;
 use crate::session::CamKind;
 use clap::Parser;
 use oxium::worldgen::config::WorldgenConfig;
@@ -116,9 +116,11 @@ impl ApplicationHandler for VizApp {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        let (Some(window), Some(render), Some(scene)) =
-            (self.window.as_ref(), self.render.as_mut(), self.scene.as_mut())
-        else {
+        let (Some(window), Some(render), Some(scene)) = (
+            self.window.as_ref(),
+            self.render.as_mut(),
+            self.scene.as_mut(),
+        ) else {
             return;
         };
         let _ = render.egui_state.on_window_event(window, &event);
@@ -259,8 +261,7 @@ impl ApplicationHandler for VizApp {
                     let lo = self.state.cutaway_clamp_lo;
                     let hi = self.state.cutaway_clamp_hi;
                     let span = (hi - lo).max(1e-3);
-                    let advanced =
-                        self.state.cutaway_max_y + dt * self.state.cutaway_loop_speed;
+                    let advanced = self.state.cutaway_max_y + dt * self.state.cutaway_loop_speed;
                     let y = if advanced < lo || advanced > hi {
                         lo + (advanced - lo).rem_euclid(span)
                     } else {
@@ -290,7 +291,10 @@ impl ApplicationHandler for VizApp {
                 self.state.session.invalidator.tick();
                 if self.state.session.invalidator.take_pending() {
                     self.state.session.world.regen();
-                    self.state.session.probe.refresh(&self.state.session.generator);
+                    self.state
+                        .session
+                        .probe
+                        .refresh(&self.state.session.generator);
                 }
                 let landed = self.state.session.world.drain_results();
                 for (coord, vertices, indices) in landed {
@@ -337,24 +341,23 @@ impl ApplicationHandler for VizApp {
                 // CPU-side frustum culling; we mirror the chunk counts
                 // into AppState so the status bar can show them
                 // without holding a SceneRenderer reference.
-                let aspect = render.surface_config.width as f32
-                    / render.surface_config.height.max(1) as f32;
-                let selected_chunk =
-                    self.state.session.probe.pinned.map(|(wx, wz)| {
-                        use oxium::voxel::coords::{ChunkCoord, CHUNK_DIM_U};
-                        let dim = CHUNK_DIM_U as i32;
-                        // Y of the chunk holding the pinned column's surface.
-                        let cy = self
-                            .state
-                            .session
-                            .probe
-                            .snapshot
-                            .as_ref()
-                            .map(|s| s.h_target)
-                            .unwrap_or(70)
-                            .div_euclid(dim);
-                        ChunkCoord(glam::IVec3::new(wx.div_euclid(dim), cy, wz.div_euclid(dim)))
-                    });
+                let aspect =
+                    render.surface_config.width as f32 / render.surface_config.height.max(1) as f32;
+                let selected_chunk = self.state.session.probe.pinned.map(|(wx, wz)| {
+                    use oxium::voxel::coords::{CHUNK_DIM_U, ChunkCoord};
+                    let dim = CHUNK_DIM_U as i32;
+                    // Y of the chunk holding the pinned column's surface.
+                    let cy = self
+                        .state
+                        .session
+                        .probe
+                        .snapshot
+                        .as_ref()
+                        .map(|s| s.h_target)
+                        .unwrap_or(70)
+                        .div_euclid(dim);
+                    ChunkCoord(glam::IVec3::new(wx.div_euclid(dim), cy, wz.div_euclid(dim)))
+                });
                 let time_s = self.state.start_time.elapsed().as_secs_f32();
                 scene.update_camera(
                     &render.queue,
@@ -402,10 +405,14 @@ fn render_frame(
     full_output: egui::FullOutput,
 ) -> Result<(), wgpu::SurfaceError> {
     let frame = render.surface.get_current_texture()?;
-    let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let mut encoder = render.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("viz frame"),
-    });
+    let view = frame
+        .texture
+        .create_view(&wgpu::TextureViewDescriptor::default());
+    let mut encoder = render
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("viz frame"),
+        });
 
     {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -450,9 +457,17 @@ fn render_frame(
         pixels_per_point: full_output.pixels_per_point,
     };
     for (id, image_delta) in &full_output.textures_delta.set {
-        render.egui_renderer.update_texture(&render.device, &render.queue, *id, image_delta);
+        render
+            .egui_renderer
+            .update_texture(&render.device, &render.queue, *id, image_delta);
     }
-    render.egui_renderer.update_buffers(&render.device, &render.queue, &mut encoder, &paint_jobs, &screen);
+    render.egui_renderer.update_buffers(
+        &render.device,
+        &render.queue,
+        &mut encoder,
+        &paint_jobs,
+        &screen,
+    );
     {
         let mut pass = encoder
             .begin_render_pass(&wgpu::RenderPassDescriptor {

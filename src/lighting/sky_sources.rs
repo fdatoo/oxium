@@ -12,7 +12,7 @@
 
 use crate::voxel::block::BlockRegistry;
 use crate::voxel::chunk::DenseChunk;
-use crate::voxel::coords::{ChunkCoord, CHUNK_DIM, CHUNK_DIM_U, LocalPos};
+use crate::voxel::coords::{CHUNK_DIM, CHUNK_DIM_U, ChunkCoord, LocalPos};
 use glam::UVec3;
 
 /// Sentinel meaning "no opaque block in this column inside this chunk."
@@ -36,9 +36,7 @@ impl Default for ChunkSkyLightSources {
     /// Used for chunks that haven't had `build_from_dense` called yet.
     fn default() -> Self {
         Self {
-            lowest_source_y: Box::new(
-                [NO_SOURCE_FLOOR; (CHUNK_DIM_U * CHUNK_DIM_U) as usize],
-            ),
+            lowest_source_y: Box::new([NO_SOURCE_FLOOR; (CHUNK_DIM_U * CHUNK_DIM_U) as usize]),
         }
     }
 }
@@ -111,13 +109,12 @@ mod tests {
     fn all_air_chunk_has_no_source_floor_anywhere() {
         let dense = DenseChunk::empty();
         let reg = BlockRegistry::new();
-        let s = ChunkSkyLightSources::build_from_dense(
-            &dense, ChunkCoord(IVec3::ZERO), &reg,
-        );
+        let s = ChunkSkyLightSources::build_from_dense(&dense, ChunkCoord(IVec3::ZERO), &reg);
         for lz in 0..CHUNK_DIM_U {
             for lx in 0..CHUNK_DIM_U {
                 assert_eq!(
-                    s.lowest_source_y(lx, lz), NO_SOURCE_FLOOR,
+                    s.lowest_source_y(lx, lz),
+                    NO_SOURCE_FLOOR,
                     "column ({lx},{lz}) should have no floor in all-air chunk",
                 );
             }
@@ -131,9 +128,7 @@ mod tests {
         // source floor is the cell above, world y=32.
         let dense = DenseChunk::new_filled(Block::Stone);
         let reg = BlockRegistry::new();
-        let s = ChunkSkyLightSources::build_from_dense(
-            &dense, ChunkCoord(IVec3::ZERO), &reg,
-        );
+        let s = ChunkSkyLightSources::build_from_dense(&dense, ChunkCoord(IVec3::ZERO), &reg);
         for lz in 0..CHUNK_DIM_U {
             for lx in 0..CHUNK_DIM_U {
                 assert_eq!(s.lowest_source_y(lx, lz), 32);
@@ -153,9 +148,7 @@ mod tests {
             }
         }
         let reg = BlockRegistry::new();
-        let s = ChunkSkyLightSources::build_from_dense(
-            &dense, ChunkCoord(IVec3::ZERO), &reg,
-        );
+        let s = ChunkSkyLightSources::build_from_dense(&dense, ChunkCoord(IVec3::ZERO), &reg);
         for lz in 0..CHUNK_DIM_U {
             for lx in 0..CHUNK_DIM_U {
                 assert_eq!(s.lowest_source_y(lx, lz), 21);
@@ -175,9 +168,7 @@ mod tests {
             }
         }
         let reg = BlockRegistry::new();
-        let s = ChunkSkyLightSources::build_from_dense(
-            &dense, ChunkCoord(IVec3::ZERO), &reg,
-        );
+        let s = ChunkSkyLightSources::build_from_dense(&dense, ChunkCoord(IVec3::ZERO), &reg);
         assert_eq!(s.lowest_source_y(5, 5), 21);
     }
 
@@ -187,12 +178,15 @@ mod tests {
         let mut dense = DenseChunk::empty();
         dense.set(LocalPos(UVec3::new(0, 15, 0)), Block::Stone);
         let reg = BlockRegistry::new();
-        let s = ChunkSkyLightSources::build_from_dense(
-            &dense, ChunkCoord(IVec3::ZERO), &reg,
-        );
-        assert_eq!(s.lowest_source_y(0, 0), 16, "column (0,0) has floor at world y=16");
+        let s = ChunkSkyLightSources::build_from_dense(&dense, ChunkCoord(IVec3::ZERO), &reg);
         assert_eq!(
-            s.lowest_source_y(1, 0), NO_SOURCE_FLOOR,
+            s.lowest_source_y(0, 0),
+            16,
+            "column (0,0) has floor at world y=16"
+        );
+        assert_eq!(
+            s.lowest_source_y(1, 0),
+            NO_SOURCE_FLOOR,
             "column (1,0) has no floor — should be NO_SOURCE_FLOOR",
         );
         assert_eq!(s.lowest_source_y(0, 1), NO_SOURCE_FLOOR);
@@ -210,9 +204,8 @@ mod tests {
             }
         }
         let reg = BlockRegistry::new();
-        let s = ChunkSkyLightSources::build_from_dense(
-            &dense, ChunkCoord(IVec3::new(0, 3, 0)), &reg,
-        );
+        let s =
+            ChunkSkyLightSources::build_from_dense(&dense, ChunkCoord(IVec3::new(0, 3, 0)), &reg);
         assert_eq!(s.lowest_source_y(5, 5), 107);
     }
 
@@ -227,9 +220,8 @@ mod tests {
             }
         }
         let reg = BlockRegistry::new();
-        let s = ChunkSkyLightSources::build_from_dense(
-            &dense, ChunkCoord(IVec3::new(0, -1, 0)), &reg,
-        );
+        let s =
+            ChunkSkyLightSources::build_from_dense(&dense, ChunkCoord(IVec3::new(0, -1, 0)), &reg);
         assert_eq!(s.lowest_source_y(5, 5), -26);
     }
 
@@ -244,11 +236,10 @@ mod tests {
             }
         }
         let reg = BlockRegistry::new();
-        let s = ChunkSkyLightSources::build_from_dense(
-            &dense, ChunkCoord(IVec3::ZERO), &reg,
-        );
+        let s = ChunkSkyLightSources::build_from_dense(&dense, ChunkCoord(IVec3::ZERO), &reg);
         assert_eq!(
-            s.lowest_source_y(5, 5), NO_SOURCE_FLOOR,
+            s.lowest_source_y(5, 5),
+            NO_SOURCE_FLOOR,
             "water is non-opaque; should not create a source floor",
         );
     }

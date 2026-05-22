@@ -11,9 +11,9 @@
 //! (`h_target`, `is_cliff`, `depth_below_surface`, `biome`, etc.).
 
 use crate::voxel::block::Block;
+use crate::worldgen::Biome;
 use crate::worldgen::config::WorldgenConfig;
 use crate::worldgen::hash;
-use crate::worldgen::Biome;
 use serde::{Deserialize, Serialize};
 
 /// All state available to a [`ConditionSource`] / [`RuleSource`]
@@ -49,14 +49,8 @@ pub enum ConditionSource {
     Not(Box<ConditionSource>),
     All(Vec<ConditionSource>),
     Any(Vec<ConditionSource>),
-    BeachBand {
-        below_sea: i32,
-        above_sea: i32,
-    },
-    SandTransitionRoll {
-        temp_min: f32,
-        probability: f32,
-    },
+    BeachBand { below_sea: i32, above_sea: i32 },
+    SandTransitionRoll { temp_min: f32, probability: f32 },
 }
 
 impl ConditionSource {

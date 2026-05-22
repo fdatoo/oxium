@@ -11,10 +11,10 @@
 //! 1. It is the obvious-but-correct reference; greedy tests compare against it.
 //! 2. It's useful as a fallback during debugging.
 
-use crate::mesher::{ChunkMesh, Face, Vertex, UNTEXTURED_TILE};
+use crate::mesher::{ChunkMesh, Face, UNTEXTURED_TILE, Vertex};
 use crate::voxel::block::{Block, BlockRegistry};
 use crate::voxel::chunk::DenseChunk;
-use crate::voxel::coords::{LocalPos, CHUNK_DIM_U};
+use crate::voxel::coords::{CHUNK_DIM_U, LocalPos};
 use glam::UVec3;
 
 /// Mesh a single chunk **without** neighbour information. Chunk-boundary
@@ -139,14 +139,8 @@ fn emit_quad(
     }
     // Two triangles forming the quad, in counter-clockwise winding so the
     // pipeline's `front_face = Ccw` + back-face cull keep them visible.
-    mesh.indices.extend_from_slice(&[
-        base,
-        base + 1,
-        base + 2,
-        base,
-        base + 2,
-        base + 3,
-    ]);
+    mesh.indices
+        .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
 /// Counter-clockwise corner positions for the cube face at `(x,y,z)`,
@@ -200,13 +194,7 @@ pub fn mesh_chunk_with_neighbors(
                 }
                 for face in Face::all() {
                     if face_visible_with_neighbors(
-                        chunk,
-                        neighbors,
-                        reg,
-                        x as i32,
-                        y as i32,
-                        z as i32,
-                        face,
+                        chunk, neighbors, reg, x as i32, y as i32, z as i32, face,
                     ) {
                         emit_quad(&mut mesh, x as u8, y as u8, z as u8, face, block, reg);
                     }

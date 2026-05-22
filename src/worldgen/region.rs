@@ -313,15 +313,15 @@ pub fn peek_fine(cache: &FineCache, coord: RegionCoord) -> Option<Arc<FineRegion
         .cloned()
 }
 
-pub fn get_macro<F>(
-    cache: &MacroCache,
-    coord: MacroRegionCoord,
-    build: F,
-) -> Arc<MacroRegion>
+pub fn get_macro<F>(cache: &MacroCache, coord: MacroRegionCoord, build: F) -> Arc<MacroRegion>
 where
     F: FnOnce() -> MacroRegion,
 {
-    if let Some(r) = cache.lock().expect("macro cache mutex poisoned").get(&coord) {
+    if let Some(r) = cache
+        .lock()
+        .expect("macro cache mutex poisoned")
+        .get(&coord)
+    {
         return r.clone();
     }
     let region = Arc::new(build());
@@ -349,9 +349,18 @@ mod tests {
     #[test]
     fn region_coord_containing_is_floor_divide() {
         assert_eq!(RegionCoord::containing(0, 0), RegionCoord { x: 0, z: 0 });
-        assert_eq!(RegionCoord::containing(511, 511), RegionCoord { x: 0, z: 0 });
-        assert_eq!(RegionCoord::containing(512, 512), RegionCoord { x: 1, z: 1 });
-        assert_eq!(RegionCoord::containing(-1, -1), RegionCoord { x: -1, z: -1 });
+        assert_eq!(
+            RegionCoord::containing(511, 511),
+            RegionCoord { x: 0, z: 0 }
+        );
+        assert_eq!(
+            RegionCoord::containing(512, 512),
+            RegionCoord { x: 1, z: 1 }
+        );
+        assert_eq!(
+            RegionCoord::containing(-1, -1),
+            RegionCoord { x: -1, z: -1 }
+        );
         assert_eq!(
             RegionCoord::containing(-FINE_REGION_SIZE, -FINE_REGION_SIZE),
             RegionCoord { x: -1, z: -1 }

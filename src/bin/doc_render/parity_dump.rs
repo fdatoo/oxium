@@ -16,10 +16,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut i = 0;
     while i < args.len() {
         let key = &args[i];
-        let val = args.get(i + 1).ok_or_else(|| format!("missing value for {key}"))?;
+        let val = args
+            .get(i + 1)
+            .ok_or_else(|| format!("missing value for {key}"))?;
         match key.as_str() {
             "--output" => output = Some(PathBuf::from(val)),
-            other      => return Err(format!("unknown flag: {other}")),
+            other => return Err(format!("unknown flag: {other}")),
         }
         i += 2;
     }
@@ -56,19 +58,32 @@ pub fn run(args: &[String]) -> Result<(), String> {
         use oxium::worldgen::spline::{CubicSpline, Knot};
         let spline_cases: &[(&str, &[(f32, f32, f32)], f32)] = &[
             // (name, knots [(loc, val, slope), ...], input)
-            ("ramp",    &[(0.0, 0.0, 1.0), (1.0, 1.0, 1.0)], 0.5),
+            ("ramp", &[(0.0, 0.0, 1.0), (1.0, 1.0, 1.0)], 0.5),
             ("plateau", &[(0.0, 0.0, 0.0), (1.0, 1.0, 0.0)], 0.5),
             ("plateau", &[(0.0, 0.0, 0.0), (1.0, 1.0, 0.0)], 0.25),
-            ("dip",     &[(0.0, 1.0, -2.0), (0.5, 0.0, 0.0), (1.0, 1.0, 2.0)], 0.5),
-            ("dip",     &[(0.0, 1.0, -2.0), (0.5, 0.0, 0.0), (1.0, 1.0, 2.0)], 0.25),
+            (
+                "dip",
+                &[(0.0, 1.0, -2.0), (0.5, 0.0, 0.0), (1.0, 1.0, 2.0)],
+                0.5,
+            ),
+            (
+                "dip",
+                &[(0.0, 1.0, -2.0), (0.5, 0.0, 0.0), (1.0, 1.0, 2.0)],
+                0.25,
+            ),
         ];
         for (name, knots_raw, input) in spline_cases {
             let s = CubicSpline::Multipoint(
-                knots_raw.iter().map(|&(loc, val, slope)| Knot { loc, val, slope }).collect(),
+                knots_raw
+                    .iter()
+                    .map(|&(loc, val, slope)| Knot { loc, val, slope })
+                    .collect(),
             );
             let v = s.evaluate(*input);
-            let knots_json: Vec<String> = knots_raw.iter()
-                .map(|(loc, val, slope)| format!("[{loc},{val},{slope}]")).collect();
+            let knots_json: Vec<String> = knots_raw
+                .iter()
+                .map(|(loc, val, slope)| format!("[{loc},{val},{slope}]"))
+                .collect();
             entries.push(format!(
                 "    {{\"fn\":\"spline\",\"args\":{{\"name\":\"{name}\",\"knots\":[{}],\"input\":{input}}},\"out\":{v}}}",
                 knots_json.join(",")
@@ -83,11 +98,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
     {
         let cases: &[(f32, f32, f32, f32, f32, f32)] = &[
             // (px, py, cx, cy, rx, ry)
-            (0.0, 0.0, 0.0, 0.0, 1.0, 1.0),  // dead center → 1.0
-            (1.0, 0.0, 0.0, 0.0, 1.0, 1.0),  // on boundary → 0.0
-            (0.5, 0.0, 0.0, 0.0, 1.0, 1.0),  // halfway radially → 0.75
-            (2.0, 0.0, 0.0, 0.0, 1.0, 1.0),  // outside → 0.0
-            (0.0, 0.5, 0.0, 0.0, 1.0, 2.0),  // off-y in elongated → 1 - 0.0625
+            (0.0, 0.0, 0.0, 0.0, 1.0, 1.0), // dead center → 1.0
+            (1.0, 0.0, 0.0, 0.0, 1.0, 1.0), // on boundary → 0.0
+            (0.5, 0.0, 0.0, 0.0, 1.0, 1.0), // halfway radially → 0.75
+            (2.0, 0.0, 0.0, 0.0, 1.0, 1.0), // outside → 0.0
+            (0.0, 0.5, 0.0, 0.0, 1.0, 2.0), // off-y in elongated → 1 - 0.0625
         ];
         for &(px, py, cx, cy, rx, ry) in cases {
             let dx = (px - cx) / rx;
@@ -104,11 +119,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
     // c[xi + 2*yi + 4*zi].
     {
         let cases: &[([f32; 8], f32, f32, f32)] = &[
-            ([0.0; 8], 0.5, 0.5, 0.5),                                       // all zero → 0
-            ([1.0; 8], 0.0, 0.0, 0.0),                                       // all one  → 1
-            ([0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0], 0.5, 0.0, 0.0),       // gradient in x → 0.5
-            ([0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0], 0.0, 0.0, 0.5),       // gradient in z → 0.5
-            ([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0.5, 0.5, 0.5),       // single corner → 0.125
+            ([0.0; 8], 0.5, 0.5, 0.5),                                 // all zero → 0
+            ([1.0; 8], 0.0, 0.0, 0.0),                                 // all one  → 1
+            ([0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0], 0.5, 0.0, 0.0), // gradient in x → 0.5
+            ([0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0], 0.0, 0.0, 0.5), // gradient in z → 0.5
+            ([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0.5, 0.5, 0.5), // single corner → 0.125
         ];
         for &(corners, tx, ty, tz) in cases {
             let c = corners;
@@ -116,9 +131,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
             let c10 = c[2] * (1.0 - tx) + c[3] * tx;
             let c01 = c[4] * (1.0 - tx) + c[5] * tx;
             let c11 = c[6] * (1.0 - tx) + c[7] * tx;
-            let c0  = c00 * (1.0 - ty) + c10 * ty;
-            let c1  = c01 * (1.0 - ty) + c11 * ty;
-            let v   = c0 * (1.0 - tz) + c1 * tz;
+            let c0 = c00 * (1.0 - ty) + c10 * ty;
+            let c1 = c01 * (1.0 - ty) + c11 * ty;
+            let v = c0 * (1.0 - tz) + c1 * tz;
             let corners_json: Vec<String> = c.iter().map(|x| format!("{x}")).collect();
             entries.push(format!(
                 "    {{\"fn\":\"trilerp\",\"args\":{{\"corners\":[{}],\"tx\":{tx},\"ty\":{ty},\"tz\":{tz}}},\"out\":{v}}}",
@@ -131,6 +146,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     // in serde_json just for this (the schema is simple and stable).
     let json = format!("[\n{}\n]\n", entries.join(",\n"));
     let mut f = File::create(&output).map_err(|e| format!("create {:?}: {e}", output))?;
-    f.write_all(json.as_bytes()).map_err(|e| format!("write {:?}: {e}", output))?;
+    f.write_all(json.as_bytes())
+        .map_err(|e| format!("write {:?}: {e}", output))?;
     Ok(())
 }

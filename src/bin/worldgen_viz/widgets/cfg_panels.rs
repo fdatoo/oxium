@@ -147,11 +147,17 @@ pub fn climate_panel(ui: &mut Ui, cfg: &mut oxium::worldgen::config::ClimateConf
     });
     ui.collapsing("Ridge noise", |ui| {
         dirty |= slider(
-            ui, &mut cfg.ridges_period, 50.0..=1000.0, "ridges_period",
+            ui,
+            &mut cfg.ridges_period,
+            50.0..=1000.0,
+            "ridges_period",
             "Wavelength of the high-frequency ridge noise that drives jaggedness/peaks.",
         );
         dirty |= slider(
-            ui, &mut cfg.ridges_amplitude, 0.1..=4.0, "ridges_amplitude",
+            ui,
+            &mut cfg.ridges_amplitude,
+            0.1..=4.0,
+            "ridges_amplitude",
             "Strength of the ridge noise. Higher → more peaks and valleys.",
         );
     });
@@ -172,19 +178,28 @@ pub fn climate_panel(ui: &mut Ui, cfg: &mut oxium::worldgen::config::ClimateConf
         cfg.plate_roughness_bias_range = (lo, hi);
     });
     ui.collapsing("Offset spline (nested)", |ui| {
-        dirty |= nested_spline_panel(ui, &mut cfg.offset_spline,
+        dirty |= nested_spline_panel(
+            ui,
+            &mut cfg.offset_spline,
             "Offset spline. Nested over (continentalness, terrain_shape, ridges_pv); \
-             output adds to the depth term so positive values push surface up, negative down.");
+             output adds to the depth term so positive values push surface up, negative down.",
+        );
     });
     ui.collapsing("Factor spline (nested)", |ui| {
-        dirty |= nested_spline_panel(ui, &mut cfg.factor_spline,
+        dirty |= nested_spline_panel(
+            ui,
+            &mut cfg.factor_spline,
             "Factor spline. Nested over (continentalness, terrain_shape, ridges_pv); \
-             output multiplies the depth term. Higher → sharper surface transition.");
+             output multiplies the depth term. Higher → sharper surface transition.",
+        );
     });
     ui.collapsing("Jaggedness spline (nested)", |ui| {
-        dirty |= nested_spline_panel(ui, &mut cfg.jaggedness_spline,
+        dirty |= nested_spline_panel(
+            ui,
+            &mut cfg.jaggedness_spline,
             "Jaggedness spline. Nested over (continentalness, terrain_shape, ridges_pv); \
-             output is added to depth via the ridges term — controls peak amplitude.");
+             output is added to depth via the ridges term — controls peak amplitude.",
+        );
     });
     dirty
 }
@@ -249,19 +264,31 @@ pub fn caves_panel(ui: &mut Ui, cfg: &mut WorldgenConfig) -> bool {
 
     ui.collapsing("Pillars (refill stone inside caves)", |ui| {
         dirty |= slider(
-            ui, &mut cave.pillar_xz_scale, 0.1..=4.0, "pillar_xz_scale",
+            ui,
+            &mut cave.pillar_xz_scale,
+            0.1..=4.0,
+            "pillar_xz_scale",
             "XZ stretch of the pillar noise. Larger → thicker, sparser pillars.",
         );
         dirty |= slider(
-            ui, &mut cave.pillar_y_scale, 0.1..=4.0, "pillar_y_scale",
+            ui,
+            &mut cave.pillar_y_scale,
+            0.1..=4.0,
+            "pillar_y_scale",
             "Y stretch of the pillar noise. Smaller → straighter columns; larger → wobbly.",
         );
         dirty |= slider(
-            ui, &mut cave.pillar_cutoff, 0.0..=1.0, "pillar_cutoff",
+            ui,
+            &mut cave.pillar_cutoff,
+            0.0..=1.0,
+            "pillar_cutoff",
             "Threshold the pillar noise must exceed to add material. Lower = more pillars.",
         );
         dirty |= slider(
-            ui, &mut cave.pillar_intensity, 0.0..=8.0, "pillar_intensity",
+            ui,
+            &mut cave.pillar_intensity,
+            0.0..=8.0,
+            "pillar_intensity",
             "Strength of the pillar add-back. Higher = more solid refill inside caves.",
         );
     });
@@ -310,12 +337,7 @@ pub fn surface_panel(ui: &mut Ui, cfg: &mut WorldgenConfig) -> bool {
 
     /// Render one node of the rule tree. Returns true if any
     /// editable leaf changed this frame.
-    fn render_rule(
-        ui: &mut Ui,
-        rule: &mut RuleSource,
-        depth: usize,
-        id_counter: &mut u32,
-    ) -> bool {
+    fn render_rule(ui: &mut Ui, rule: &mut RuleSource, depth: usize, id_counter: &mut u32) -> bool {
         let mut changed = false;
         match rule {
             RuleSource::Block(b) => {
@@ -365,11 +387,7 @@ pub fn surface_panel(ui: &mut Ui, cfg: &mut WorldgenConfig) -> bool {
         changed
     }
 
-    fn render_condition(
-        ui: &mut Ui,
-        cond: &mut ConditionSource,
-        id_counter: &mut u32,
-    ) -> bool {
+    fn render_condition(ui: &mut Ui, cond: &mut ConditionSource, id_counter: &mut u32) -> bool {
         // Numeric variants get inline DragValue widgets so common
         // tuning (snow line, beach band, surface band thickness) is
         // a single drag away. Compound and pure-categorical

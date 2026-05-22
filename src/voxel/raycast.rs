@@ -84,9 +84,21 @@ pub fn raycast(world: &World, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<
     );
     // How much `t` advances per full cell on each axis.
     let t_delta = Vec3::new(
-        if dir.x != 0.0 { (1.0 / dir.x).abs() } else { f32::INFINITY },
-        if dir.y != 0.0 { (1.0 / dir.y).abs() } else { f32::INFINITY },
-        if dir.z != 0.0 { (1.0 / dir.z).abs() } else { f32::INFINITY },
+        if dir.x != 0.0 {
+            (1.0 / dir.x).abs()
+        } else {
+            f32::INFINITY
+        },
+        if dir.y != 0.0 {
+            (1.0 / dir.y).abs()
+        } else {
+            f32::INFINITY
+        },
+        if dir.z != 0.0 {
+            (1.0 / dir.z).abs()
+        } else {
+            f32::INFINITY
+        },
     );
 
     // Inside-block start: hit immediately.
@@ -161,13 +173,7 @@ mod tests {
     #[test]
     fn hits_block_along_x() {
         let w = world_with_block((5, 0, 0));
-        let hit = raycast(
-            &w,
-            Vec3::new(0.5, 0.5, 0.5),
-            Vec3::new(1.0, 0.0, 0.0),
-            10.0,
-        )
-        .unwrap();
+        let hit = raycast(&w, Vec3::new(0.5, 0.5, 0.5), Vec3::new(1.0, 0.0, 0.0), 10.0).unwrap();
         assert_eq!(hit.block.0, IVec3::new(5, 0, 0));
         assert_eq!(hit.face as u8, Face::NegX as u8);
     }
@@ -175,24 +181,14 @@ mod tests {
     #[test]
     fn misses_when_nothing_in_path() {
         let w = world_with_block((5, 0, 0));
-        let hit = raycast(
-            &w,
-            Vec3::new(0.5, 0.5, 0.5),
-            Vec3::new(0.0, 0.0, 1.0),
-            10.0,
-        );
+        let hit = raycast(&w, Vec3::new(0.5, 0.5, 0.5), Vec3::new(0.0, 0.0, 1.0), 10.0);
         assert!(hit.is_none());
     }
 
     #[test]
     fn max_distance_respected() {
         let w = world_with_block((10, 0, 0));
-        let hit = raycast(
-            &w,
-            Vec3::new(0.5, 0.5, 0.5),
-            Vec3::new(1.0, 0.0, 0.0),
-            5.0,
-        );
+        let hit = raycast(&w, Vec3::new(0.5, 0.5, 0.5), Vec3::new(1.0, 0.0, 0.0), 5.0);
         assert!(hit.is_none());
     }
 }

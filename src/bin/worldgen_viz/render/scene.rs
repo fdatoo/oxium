@@ -264,7 +264,6 @@ impl SceneRenderer {
             .filter(|c| chunk_in_frustum(self.last_view_proj, **c))
             .count()
     }
-
 }
 
 /// CPU-side frustum culling for a 32³ chunk. Projects all 8 AABB

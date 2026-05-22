@@ -84,8 +84,16 @@ mod tests {
         // Knots at x=0 (y=0, slope=0) and x=1 (y=1, slope=0).
         // With both slopes 0, Hermite gives an S-curve from (0,0) to (1,1).
         let s = CubicSpline::Multipoint(vec![
-            Knot { loc: 0.0, val: 0.0, slope: 0.0 },
-            Knot { loc: 1.0, val: 1.0, slope: 0.0 },
+            Knot {
+                loc: 0.0,
+                val: 0.0,
+                slope: 0.0,
+            },
+            Knot {
+                loc: 1.0,
+                val: 1.0,
+                slope: 0.0,
+            },
         ]);
         assert!((s.evaluate(0.0) - 0.0).abs() < 1e-5);
         assert!((s.evaluate(1.0) - 1.0).abs() < 1e-5);
@@ -100,8 +108,16 @@ mod tests {
     #[test]
     fn below_first_knot_extrapolates_linearly() {
         let s = CubicSpline::Multipoint(vec![
-            Knot { loc: 0.0, val: 0.0, slope: 1.0 },
-            Knot { loc: 1.0, val: 1.0, slope: 1.0 },
+            Knot {
+                loc: 0.0,
+                val: 0.0,
+                slope: 1.0,
+            },
+            Knot {
+                loc: 1.0,
+                val: 1.0,
+                slope: 1.0,
+            },
         ]);
         // At x=-1 with slope=1 extrapolation: y = 0 + 1·(-1) = -1.
         assert!((s.evaluate(-1.0) - (-1.0)).abs() < 1e-5);
@@ -110,8 +126,16 @@ mod tests {
     #[test]
     fn above_last_knot_extrapolates_linearly() {
         let s = CubicSpline::Multipoint(vec![
-            Knot { loc: 0.0, val: 0.0, slope: 0.0 },
-            Knot { loc: 1.0, val: 1.0, slope: 0.5 },
+            Knot {
+                loc: 0.0,
+                val: 0.0,
+                slope: 0.0,
+            },
+            Knot {
+                loc: 1.0,
+                val: 1.0,
+                slope: 0.5,
+            },
         ]);
         // At x=2 with endpoint slope=0.5: y = 1 + 0.5·1 = 1.5.
         assert!((s.evaluate(2.0) - 1.5).abs() < 1e-5);
@@ -120,8 +144,16 @@ mod tests {
     #[test]
     fn ron_roundtrip_preserves_knots() {
         let s = CubicSpline::Multipoint(vec![
-            Knot { loc: -0.5, val: 0.3, slope: 0.0 },
-            Knot { loc: 0.5, val: -0.2, slope: 1.0 },
+            Knot {
+                loc: -0.5,
+                val: 0.3,
+                slope: 0.0,
+            },
+            Knot {
+                loc: 0.5,
+                val: -0.2,
+                slope: 1.0,
+            },
         ]);
         let r = ron::to_string(&s).unwrap();
         let parsed: CubicSpline = ron::from_str(&r).unwrap();

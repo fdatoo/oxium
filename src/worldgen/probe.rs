@@ -7,8 +7,8 @@
 //! "sliding y" section.
 
 use crate::voxel::block::Block;
-use crate::worldgen::plates::{PlateId, PlateLookup};
 use crate::worldgen::Biome;
+use crate::worldgen::plates::{PlateId, PlateLookup};
 
 /// Lean per-column snapshot for viz paint modes. Cheaper than
 /// `ColumnProbe` — populated with just the fields the per-face paint
@@ -146,39 +146,55 @@ impl Stage {
     /// Categorical stages need a discrete colormap (PlateId, BiomeId,
     /// AquiferSubstance); the rest are scalar.
     pub fn is_categorical(self) -> bool {
-        matches!(self, Stage::PlateId | Stage::BiomeId | Stage::AquiferSubstance)
+        matches!(
+            self,
+            Stage::PlateId | Stage::BiomeId | Stage::AquiferSubstance
+        )
     }
 
     /// One-line human description of what this stage represents.
     /// Shown beneath the map's stage dropdown.
     pub fn description(self) -> &'static str {
         match self {
-            Stage::Continentalness =>
-                "Signed plate-Voronoi distance field. Positive inland, negative offshore — drives continent/ocean shape.",
-            Stage::PlateId =>
-                "Hashed plate ID (categorical). Each tectonic plate gets a stable hue.",
-            Stage::Temperature =>
-                "Raw temperature noise in [-1, 1]. Combines with humidity + continentalness to pick the biome.",
-            Stage::Humidity =>
-                "Raw humidity noise in [-1, 1]. Combines with temperature + continentalness to pick the biome.",
-            Stage::Desertness =>
-                "Desert-mask noise. Above the desert threshold the column flips to sand surface.",
-            Stage::Weirdness =>
-                "Weirdness noise. Selects rare biome variants (ice spikes / sunflower plains analogues).",
-            Stage::HPre =>
-                "Pre-carve heightmap value (blocks). Plate base + ridges + warped FBM, before river carving.",
-            Stage::ValleyCarve =>
-                "Depth (blocks) that hydrology subtracts from h_pre to cut rivers. Brighter = deeper carve.",
-            Stage::HTarget =>
-                "Final terrain height (blocks) after the river carve. The actual top of the column.",
-            Stage::FlowAccum =>
-                "Hydrology flow accumulation (log-scaled). High values are trunk rivers; low values are headwaters.",
-            Stage::BiomeId =>
-                "Discrete biome label (categorical): Tundra, SnowyForest, Plains, Forest, Desert, Tropical.",
-            Stage::AquiferY =>
-                "Per-cell aquifer water-table Y. Cells below this Y get fluid; cells above stay dry.",
-            Stage::AquiferSubstance =>
-                "Aquifer cell fluid: blue = Water, orange = Lava. Cells are 16×16×16 blocks.",
+            Stage::Continentalness => {
+                "Signed plate-Voronoi distance field. Positive inland, negative offshore — drives continent/ocean shape."
+            }
+            Stage::PlateId => {
+                "Hashed plate ID (categorical). Each tectonic plate gets a stable hue."
+            }
+            Stage::Temperature => {
+                "Raw temperature noise in [-1, 1]. Combines with humidity + continentalness to pick the biome."
+            }
+            Stage::Humidity => {
+                "Raw humidity noise in [-1, 1]. Combines with temperature + continentalness to pick the biome."
+            }
+            Stage::Desertness => {
+                "Desert-mask noise. Above the desert threshold the column flips to sand surface."
+            }
+            Stage::Weirdness => {
+                "Weirdness noise. Selects rare biome variants (ice spikes / sunflower plains analogues)."
+            }
+            Stage::HPre => {
+                "Pre-carve heightmap value (blocks). Plate base + ridges + warped FBM, before river carving."
+            }
+            Stage::ValleyCarve => {
+                "Depth (blocks) that hydrology subtracts from h_pre to cut rivers. Brighter = deeper carve."
+            }
+            Stage::HTarget => {
+                "Final terrain height (blocks) after the river carve. The actual top of the column."
+            }
+            Stage::FlowAccum => {
+                "Hydrology flow accumulation (log-scaled). High values are trunk rivers; low values are headwaters."
+            }
+            Stage::BiomeId => {
+                "Discrete biome label (categorical): Tundra, SnowyForest, Plains, Forest, Desert, Tropical."
+            }
+            Stage::AquiferY => {
+                "Per-cell aquifer water-table Y. Cells below this Y get fluid; cells above stay dry."
+            }
+            Stage::AquiferSubstance => {
+                "Aquifer cell fluid: blue = Water, orange = Lava. Cells are 16×16×16 blocks."
+            }
         }
     }
 }
@@ -215,7 +231,12 @@ mod tests {
         for &stage in Stage::ALL {
             let a = g.sample_stage(stage, 200, 300);
             let b = g.sample_stage(stage, 200, 300);
-            assert_eq!(a.to_bits(), b.to_bits(), "stage {:?} not byte-stable", stage);
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "stage {:?} not byte-stable",
+                stage
+            );
         }
     }
 
@@ -240,7 +261,9 @@ mod tests {
             // It is OK if a single stage happens to be equal at two
             // points (e.g., flat ocean continentalness); we only fail
             // if EVERY stage matches at both coords.
-            if a != b { return; }
+            if a != b {
+                return;
+            }
         }
         panic!("no stage varied across (0,0) vs (1000,1000) — dispatch broken");
     }
@@ -259,10 +282,14 @@ mod tests {
         // y=200 is well above any reasonable surface — should be air or water.
         let g = Generator::new(42);
         let b = g.evaluate_density_breakdown(0, 200, 0);
-        assert!(matches!(
-            b.block,
-            crate::voxel::block::Block::Air | crate::voxel::block::Block::Water
-        ), "got {:?}", b.block);
+        assert!(
+            matches!(
+                b.block,
+                crate::voxel::block::Block::Air | crate::voxel::block::Block::Water
+            ),
+            "got {:?}",
+            b.block
+        );
     }
 
     #[test]
@@ -270,10 +297,15 @@ mod tests {
         // y=-100 (deep underground) should almost always be solid.
         let g = Generator::new(42);
         let b = g.evaluate_density_breakdown(0, -100, 0);
-        assert!(b.final_density > 0.0, "expected positive density deep underground, got {}", b.final_density);
-        assert!(!matches!(
-            b.block,
-            crate::voxel::block::Block::Air
-        ), "expected solid block deep underground, got {:?}", b.block);
+        assert!(
+            b.final_density > 0.0,
+            "expected positive density deep underground, got {}",
+            b.final_density
+        );
+        assert!(
+            !matches!(b.block, crate::voxel::block::Block::Air),
+            "expected solid block deep underground, got {:?}",
+            b.block
+        );
     }
 }

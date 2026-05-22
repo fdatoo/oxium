@@ -11,5 +11,5 @@ pub mod region;
 pub mod save_index;
 pub mod thread;
 
-pub use manifest::{WorldManifest, CURRENT_VERSION as MANIFEST_CURRENT_VERSION};
+pub use manifest::{CURRENT_VERSION as MANIFEST_CURRENT_VERSION, WorldManifest};
 pub use save_index::SaveIndex;

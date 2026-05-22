@@ -27,28 +27,28 @@ use std::sync::Arc;
 use winit::window::Window;
 
 use crate::mesher::ChunkMesh;
-use crate::render::atlas::{build_atlas, upload_atlas, AtlasGpu};
+use crate::render::atlas::{AtlasGpu, build_atlas, upload_atlas};
+use crate::render::bloom::BloomChain;
 use crate::render::camera::{
-    make_camera_bind_group_layout, make_camera_buffer, make_chunk_bind_group_layout, view_proj,
-    CameraUniform, ChunkUniform,
+    CameraUniform, ChunkUniform, make_camera_bind_group_layout, make_camera_buffer,
+    make_chunk_bind_group_layout, view_proj,
 };
-use crate::render::font::{build_font_atlas, ATLAS_H as FONT_ATLAS_H, ATLAS_W as FONT_ATLAS_W};
+use crate::render::font::{ATLAS_H as FONT_ATLAS_H, ATLAS_W as FONT_ATLAS_W, build_font_atlas};
 use crate::render::gpu::{
-    make_depth_sample_texture, make_depth_texture, make_msaa_color_texture,
-    make_reflection_color_textures, make_reflection_depth_texture, Gpu,
+    Gpu, make_depth_sample_texture, make_depth_texture, make_msaa_color_texture,
+    make_reflection_color_textures, make_reflection_depth_texture,
 };
 use crate::render::hud::HudFrame;
-use crate::render::mesh::{upload_mesh, GpuMesh};
-use crate::render::bloom::BloomChain;
-use crate::render::pipelines::bloom::{build as build_bloom, BloomPipelines};
-use crate::render::pipelines::composite::{build as build_composite, CompositePipeline};
+use crate::render::mesh::{GpuMesh, upload_mesh};
+use crate::render::pipelines::bloom::{BloomPipelines, build as build_bloom};
+use crate::render::pipelines::composite::{CompositePipeline, build as build_composite};
 use crate::render::pipelines::cursor::{
-    build as build_cursor, make_cursor_bind_group_layout, CursorPipeline,
+    CursorPipeline, build as build_cursor, make_cursor_bind_group_layout,
 };
-use crate::render::pipelines::hud::{build as build_hud, HudPipeline};
-use crate::render::pipelines::opaque::{build as build_opaque, FrontFace, OpaquePipeline};
-use crate::render::pipelines::sky::{build as build_sky, SkyPipeline};
-use crate::render::pipelines::water::{build as build_water, WaterPipeline};
+use crate::render::pipelines::hud::{HudPipeline, build as build_hud};
+use crate::render::pipelines::opaque::{FrontFace, OpaquePipeline, build as build_opaque};
+use crate::render::pipelines::sky::{SkyPipeline, build as build_sky};
+use crate::render::pipelines::water::{WaterPipeline, build as build_water};
 use crate::voxel::coords::{BlockPos, ChunkCoord};
 use glam::{Mat4, Vec3, Vec4};
 use wgpu::util::DeviceExt;
@@ -297,7 +297,11 @@ impl Renderer {
         // light volume hasn't been uploaded yet.
         let placeholder_light_tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("chunk-light-placeholder"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D3,
@@ -318,18 +322,19 @@ impl Renderer {
                 bytes_per_row: Some(4),
                 rows_per_image: Some(1),
             },
-            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
         );
         let placeholder_light_view = placeholder_light_tex.create_view(&Default::default());
         let hdr_target =
             hdr::HdrTarget::new(&gpu.device, gpu.surface_cfg.width, gpu.surface_cfg.height);
         let (depth_texture, depth_view) =
             make_depth_texture(&gpu.device, gpu.surface_cfg.width, gpu.surface_cfg.height);
-        let (depth_sample_texture, depth_sample_view) = make_depth_sample_texture(
-            &gpu.device,
-            gpu.surface_cfg.width,
-            gpu.surface_cfg.height,
-        );
+        let (depth_sample_texture, depth_sample_view) =
+            make_depth_sample_texture(&gpu.device, gpu.surface_cfg.width, gpu.surface_cfg.height);
         // World pass MSAA color attachment is HDR-format so the
         // resolved output goes into the HdrTarget; the composite pass
         // then reads HDR and writes the swapchain. Reflection pass keeps
@@ -429,11 +434,7 @@ impl Renderer {
         let sky_pipe = build_sky(&gpu.device, hdr::HDR_FORMAT, &camera_bgl);
         let sky_pipe_reflection = build_sky(&gpu.device, gpu.surface_cfg.format, &camera_bgl);
         let composite_pipe = build_composite(&gpu.device, gpu.surface_cfg.format);
-        let bloom = BloomChain::new(
-            &gpu.device,
-            gpu.surface_cfg.width,
-            gpu.surface_cfg.height,
-        );
+        let bloom = BloomChain::new(&gpu.device, gpu.surface_cfg.width, gpu.surface_cfg.height);
         let bloom_pipes = build_bloom(&gpu.device, crate::render::bloom::BLOOM_FORMAT);
 
         // HUD: build the pipeline + upload the font atlas. The font
@@ -444,8 +445,9 @@ impl Renderer {
         // the opaque pipeline's bind group because the HUD pipeline
         // uses its own bind-group layout (different binding indices).
         let hud_pipe = build_hud(&gpu.device, gpu.surface_cfg.format);
-        let hud_screen_buf =
-            gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let hud_screen_buf = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("hud-screen-uniform"),
                 contents: bytemuck::cast_slice(&[
                     gpu.surface_cfg.width as f32,
@@ -513,8 +515,14 @@ impl Renderer {
             label: Some("hud-font-bg"),
             layout: &hud_pipe.tex_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&font_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&hud_sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&font_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&hud_sampler),
+                },
             ],
         });
         // Block-atlas bind group for the HUD pipeline's layout (the
@@ -528,18 +536,26 @@ impl Renderer {
             label: Some("hud-atlas-bg"),
             layout: &hud_pipe.tex_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&atlas_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&hud_sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&hud_sampler),
+                },
             ],
         });
 
         // Cursor highlight pipeline + buffer.
         let cursor_bgl = make_cursor_bind_group_layout(&gpu.device);
-        let cursor_buf = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("cursor-uniform"),
-            contents: bytemuck::cast_slice(&[0.0f32; 4]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
+        let cursor_buf = gpu
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("cursor-uniform"),
+                contents: bytemuck::cast_slice(&[0.0f32; 4]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
         let cursor_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("cursor-bg"),
             layout: &cursor_bgl,
@@ -550,12 +566,7 @@ impl Renderer {
         });
         // Cursor is drawn into the world's HDR MSAA view (inside the
         // water pass) so it shares the HDR format.
-        let cursor_pipe = build_cursor(
-            &gpu.device,
-            hdr::HDR_FORMAT,
-            &camera_bgl,
-            &cursor_bgl,
-        );
+        let cursor_pipe = build_cursor(&gpu.device, hdr::HDR_FORMAT, &camera_bgl, &cursor_bgl);
 
         // Initial water-pass depth bind group. Recreated on resize.
         let water_depth_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -648,12 +659,7 @@ impl Renderer {
     pub fn set_cursor(&mut self, hit: Option<BlockPos>) {
         match hit {
             Some(block) => {
-                let v = [
-                    block.0.x as f32,
-                    block.0.y as f32,
-                    block.0.z as f32,
-                    1.0,
-                ];
+                let v = [block.0.x as f32, block.0.y as f32, block.0.z as f32, 1.0];
                 self.gpu
                     .queue
                     .write_buffer(&self.cursor_buf, 0, bytemuck::cast_slice(&v));
@@ -677,36 +683,38 @@ impl Renderer {
         let (depth_tex, depth_view) = make_depth_texture(&self.gpu.device, w, h);
         let (depth_sample_tex, depth_sample_view) =
             make_depth_sample_texture(&self.gpu.device, w, h);
-        let (refl_msaa, refl_resolve_tex, refl_resolve_view) = make_reflection_color_textures(
-            &self.gpu.device,
-            w,
-            h,
-            self.gpu.surface_cfg.format,
-        );
+        let (refl_msaa, refl_resolve_tex, refl_resolve_view) =
+            make_reflection_color_textures(&self.gpu.device, w, h, self.gpu.surface_cfg.format);
         let refl_depth = make_reflection_depth_texture(&self.gpu.device, w, h);
         // Rebuild every bind group that references a (now-stale) view.
-        self.water_depth_bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("water-depth-bg"),
-            layout: &self.water_pipe.depth_bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&depth_sample_view),
-            }],
-        });
-        self.water_reflection_bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("water-reflection-bg"),
-            layout: &self.water_pipe.reflection_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
+        self.water_depth_bg = self
+            .gpu
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("water-depth-bg"),
+                layout: &self.water_pipe.depth_bgl,
+                entries: &[wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&refl_resolve_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.reflection_sampler),
-                },
-            ],
-        });
+                    resource: wgpu::BindingResource::TextureView(&depth_sample_view),
+                }],
+            });
+        self.water_reflection_bg = self
+            .gpu
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("water-reflection-bg"),
+                layout: &self.water_pipe.reflection_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&refl_resolve_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.reflection_sampler),
+                    },
+                ],
+            });
         self.depth_texture = depth_tex;
         self.depth_view = depth_view;
         self.depth_sample_texture = depth_sample_tex;
@@ -715,8 +723,7 @@ impl Renderer {
         self.reflection_resolve_texture = refl_resolve_tex;
         self.reflection_resolve_view = refl_resolve_view;
         self.reflection_depth_view = refl_depth;
-        self.msaa_color_view =
-            make_msaa_color_texture(&self.gpu.device, w, h, hdr::HDR_FORMAT);
+        self.msaa_color_view = make_msaa_color_texture(&self.gpu.device, w, h, hdr::HDR_FORMAT);
         // HUD lays out in pixel space so the screen-size uniform also
         // needs the new dimensions; otherwise the HUD shrinks/expands
         // to fill the old framebuffer rect.
@@ -737,28 +744,30 @@ impl Renderer {
         ubuf: &wgpu::Buffer,
         light_view: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
-        self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("chunk-bg"),
-            layout: &self.chunk_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: ubuf,
-                        offset: 0,
-                        size: std::num::NonZeroU64::new(16),
-                    }),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(light_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.light_sampler),
-                },
-            ],
-        })
+        self.gpu
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("chunk-bg"),
+                layout: &self.chunk_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: ubuf,
+                            offset: 0,
+                            size: std::num::NonZeroU64::new(16),
+                        }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(light_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.light_sampler),
+                    },
+                ],
+            })
     }
 
     /// Upload (or replace) the GPU mesh for chunk `coord` at LOD `lod`
@@ -826,11 +835,8 @@ impl Renderer {
                 e.get().update(&self.gpu.queue, blob);
             }
             Entry::Vacant(e) => {
-                let vol = light_volume::ChunkLightVolume::new(
-                    &self.gpu.device,
-                    &self.gpu.queue,
-                    blob,
-                );
+                let vol =
+                    light_volume::ChunkLightVolume::new(&self.gpu.device, &self.gpu.queue, blob);
                 e.insert(vol);
             }
         }
@@ -924,8 +930,7 @@ impl Renderer {
         fullbright: bool,
         hud: Option<&HudFrame>,
     ) -> Result<(), wgpu::SurfaceError> {
-        let aspect =
-            self.gpu.surface_cfg.width as f32 / self.gpu.surface_cfg.height.max(1) as f32;
+        let aspect = self.gpu.surface_cfg.width as f32 / self.gpu.surface_cfg.height.max(1) as f32;
         let vp = view_proj(eye, yaw, pitch, 70f32.to_radians(), aspect);
         // Inverse for the sky shader's NDC → world ray reconstruction.
         // Inversion fails for a degenerate matrix; that can only happen
@@ -1032,8 +1037,7 @@ impl Renderer {
         // Walking once and indexing by `&ChunkGpu` in the per-pass loops
         // collapses that work to a single pass and lets us short-circuit
         // the reflection render when nothing visible contains water.
-        let (visible_main, any_water_visible) =
-            self.build_visible_chunks(eye, &frustum);
+        let (visible_main, any_water_visible) = self.build_visible_chunks(eye, &frustum);
 
         let frame = self.gpu.surface.get_current_texture()?;
         let view = frame
@@ -1061,8 +1065,7 @@ impl Renderer {
             // different set of chunks. Build a second visible list
             // against it. Only worth doing when we're actually going
             // to render the pass.
-            let (visible_reflection, _) =
-                self.build_visible_chunks(eye, &refl_frustum);
+            let (visible_reflection, _) = self.build_visible_chunks(eye, &refl_frustum);
             self.encode_reflection_pass(&mut enc, &visible_reflection);
         }
         // Main world pass (sky + opaque + water + cursor) into the
@@ -1111,8 +1114,7 @@ impl Renderer {
         // single source of truth.
         const CULL_DISTANCE: f32 = 600.0 + 28.0;
         let cull_sq = CULL_DISTANCE * CULL_DISTANCE;
-        let mut out: Vec<(ChunkCoord, &ChunkGpu)> =
-            Vec::with_capacity(self.chunk_meshes.len());
+        let mut out: Vec<(ChunkCoord, &ChunkGpu)> = Vec::with_capacity(self.chunk_meshes.len());
         let mut any_water = false;
         for (coord, slots) in &self.chunk_meshes {
             let origin = coord.origin().0;
@@ -1155,16 +1157,19 @@ impl Renderer {
         // Helper: a one-shot fullscreen pass with a single color target
         // and one bind group.
         let mut one_pass = |label: &str,
-                        pipeline: &wgpu::RenderPipeline,
-                        bg: &wgpu::BindGroup,
-                        target: &wgpu::TextureView,
-                        load: wgpu::LoadOp<wgpu::Color>| {
+                            pipeline: &wgpu::RenderPipeline,
+                            bg: &wgpu::BindGroup,
+                            target: &wgpu::TextureView,
+                            load: wgpu::LoadOp<wgpu::Color>| {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some(label),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target,
                     resolve_target: None,
-                    ops: wgpu::Operations { load, store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations {
+                        load,
+                        store: wgpu::StoreOp::Store,
+                    },
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
@@ -1176,20 +1181,23 @@ impl Renderer {
         };
 
         // Pass 0: HDR → bloom[0]. Threshold + downsample in one shader.
-        let bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("bloom-threshold-bg"),
-            layout: &self.bloom_pipes.bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.hdr.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.bloom.sampler),
-                },
-            ],
-        });
+        let bg = self
+            .gpu
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("bloom-threshold-bg"),
+                layout: &self.bloom_pipes.bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&self.hdr.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.bloom.sampler),
+                    },
+                ],
+            });
         one_pass(
             "bloom-threshold",
             &self.bloom_pipes.threshold,
@@ -1200,20 +1208,23 @@ impl Renderer {
 
         // Passes 1..4: bloom[n] → bloom[n+1] via the 13-tap downsample.
         for n in 0..(crate::render::bloom::BLOOM_MIP_COUNT as usize - 1) {
-            let bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(&format!("bloom-downsample-{n}-bg")),
-                layout: &self.bloom_pipes.bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&self.bloom.mips[n].view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.bloom.sampler),
-                    },
-                ],
-            });
+            let bg = self
+                .gpu
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(&format!("bloom-downsample-{n}-bg")),
+                    layout: &self.bloom_pipes.bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&self.bloom.mips[n].view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.bloom.sampler),
+                        },
+                    ],
+                });
             one_pass(
                 "bloom-downsample",
                 &self.bloom_pipes.downsample,
@@ -1227,20 +1238,25 @@ impl Renderer {
         // from the smallest mip outward, accumulating onto the destination
         // mip's existing downsample content.
         for n in (0..(crate::render::bloom::BLOOM_MIP_COUNT as usize - 1)).rev() {
-            let bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(&format!("bloom-upsample-{n}-bg")),
-                layout: &self.bloom_pipes.bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&self.bloom.mips[n + 1].view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.bloom.sampler),
-                    },
-                ],
-            });
+            let bg = self
+                .gpu
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(&format!("bloom-upsample-{n}-bg")),
+                    layout: &self.bloom_pipes.bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(
+                                &self.bloom.mips[n + 1].view,
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.bloom.sampler),
+                        },
+                    ],
+                });
             // Upsample uses `LoadOp::Load` — destination mip already
             // holds the downsample result; we accumulate via additive
             // blend (configured in the pipeline).
@@ -1259,37 +1275,36 @@ impl Renderer {
     /// Tasks 5/6 fold in ACES tonemap and underwater tint. The bind
     /// group is created per-frame because the HDR view is recreated on
     /// resize — caching it would dangle.
-    fn encode_composite_pass(
-        &self,
-        enc: &mut wgpu::CommandEncoder,
-        target: &wgpu::TextureView,
-    ) {
-        let bg = self.gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("composite-bg"),
-            layout: &self.composite_pipe.bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.hdr.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.composite_pipe.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.camera_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&self.bloom.mips[0].view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::Sampler(&self.bloom.sampler),
-                },
-            ],
-        });
+    fn encode_composite_pass(&self, enc: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        let bg = self
+            .gpu
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("composite-bg"),
+                layout: &self.composite_pipe.bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&self.hdr.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.composite_pipe.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.camera_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&self.bloom.mips[0].view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&self.bloom.sampler),
+                    },
+                ],
+            });
         let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("composite-pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1355,14 +1370,18 @@ impl Renderer {
             if batch.vertices.is_empty() {
                 return;
             }
-            let vbuf =
-                self.gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            let vbuf = self
+                .gpu
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("hud-vbuf"),
                     contents: bytemuck::cast_slice(&batch.vertices),
                     usage: wgpu::BufferUsages::VERTEX,
                 });
-            let ibuf =
-                self.gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            let ibuf = self
+                .gpu
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("hud-ibuf"),
                     contents: bytemuck::cast_slice(&batch.indices),
                     usage: wgpu::BufferUsages::INDEX,

@@ -96,7 +96,11 @@ impl CliOptions {
                 "--spawn" => {
                     let v = args.next().expect("--spawn requires `x,y,z`");
                     let parts: Vec<f32> = v.split(',').map(|s| s.parse().unwrap()).collect();
-                    assert_eq!(parts.len(), 3, "--spawn expects three comma-separated floats");
+                    assert_eq!(
+                        parts.len(),
+                        3,
+                        "--spawn expects three comma-separated floats"
+                    );
                     spawn = Some(Vec3::new(parts[0], parts[1], parts[2]));
                 }
                 "--look" => {
@@ -116,9 +120,7 @@ impl CliOptions {
                     uncapped = true;
                 }
                 "--profile" => {
-                    let path = args
-                        .next()
-                        .expect("--profile requires a path argument");
+                    let path = args.next().expect("--profile requires a path argument");
                     profile_path = Some(PathBuf::from(path));
                 }
                 "--ui" => {
@@ -269,12 +271,16 @@ impl ApplicationHandler for App {
         }
 
         if let Some(ref kind) = self.cli.ui_state {
-            use crate::ui::state::{MenuNav, UiState};
             use crate::ui::chat::ChatInput;
+            use crate::ui::state::{MenuNav, UiState};
             state.ui.state = match kind.as_str() {
-                "paused" => UiState::Paused { menu: MenuNav::Top { hovered: 0 } },
-                "chat"   => UiState::Chat { input: ChatInput::new("/he") },
-                other    => panic!("--ui: expected 'paused' or 'chat', got {other}"),
+                "paused" => UiState::Paused {
+                    menu: MenuNav::Top { hovered: 0 },
+                },
+                "chat" => UiState::Chat {
+                    input: ChatInput::new("/he"),
+                },
+                other => panic!("--ui: expected 'paused' or 'chat', got {other}"),
             };
             // Pre-seed a few chat lines so the chat snapshot shows content.
             state.ui.log.push_system("System: hello there");
@@ -291,12 +297,7 @@ impl ApplicationHandler for App {
         self.state = Some(state);
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(state) = self.state.as_mut() else {
             return;
         };
@@ -328,7 +329,9 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 if !state.ui.is_playing() {
                     let (w, h) = state.renderer.framebuffer_size();
-                    state.ui.on_mouse_move(position.x as f32, position.y as f32, (w, h));
+                    state
+                        .ui
+                        .on_mouse_move(position.x as f32, position.y as f32, (w, h));
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -360,9 +363,12 @@ impl ApplicationHandler for App {
                     // avoids macOS quirks where set_cursor_position on a
                     // freshly-grabbed window sometimes silently no-ops.
                     let (w, h) = state.renderer.framebuffer_size();
-                    let _ = state.window.set_cursor_position(
-                        winit::dpi::PhysicalPosition::new(w as f64 / 2.0, h as f64 / 2.0),
-                    );
+                    let _ = state
+                        .window
+                        .set_cursor_position(winit::dpi::PhysicalPosition::new(
+                            w as f64 / 2.0,
+                            h as f64 / 2.0,
+                        ));
                     if state.ui.is_playing() {
                         grab_cursor(&state.window);
                     } else {
@@ -410,8 +416,7 @@ impl ApplicationHandler for App {
                         yaw = y;
                         pitch = p;
                     }
-                    let (sun_dir, sun_intensity) =
-                        ecs::systems::time_of_day::sun_state(&state.ecs);
+                    let (sun_dir, sun_intensity) = ecs::systems::time_of_day::sun_state(&state.ecs);
                     // Screenshot mode zeros the shader animation clock so
                     // captures are deterministic. Without this, runs
                     // differ because cloud/water/caustic animation phases
@@ -480,12 +485,7 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn device_event(
-        &mut self,
-        _: &ActiveEventLoop,
-        _: winit::event::DeviceId,
-        event: DeviceEvent,
-    ) {
+    fn device_event(&mut self, _: &ActiveEventLoop, _: winit::event::DeviceId, event: DeviceEvent) {
         let Some(state) = self.state.as_mut() else {
             return;
         };
@@ -530,20 +530,23 @@ fn capture_offscreen(
     let height = renderer.gpu.surface_cfg.height;
     let format = renderer.gpu.surface_cfg.format;
 
-    let texture = renderer.gpu.device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("screenshot-target"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
+    let texture = renderer
+        .gpu
+        .device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("screenshot-target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     let aspect = width as f32 / height.max(1) as f32;
     // Capture the HUD too so screenshots can verify HUD layout.
@@ -552,15 +555,7 @@ fn capture_offscreen(
     // path runs in one shot after warmup).
     let registry = crate::voxel::block::BlockRegistry::new();
     let perf = crate::app::PerfSnapshot::default();
-    let hud = crate::render::hud::build_hud(
-        (width, height),
-        60.0,
-        eye,
-        0,
-        &registry,
-        &perf,
-        None,
-    );
+    let hud = crate::render::hud::build_hud((width, height), 60.0, eye, 0, &registry, &perf, None);
     renderer.render_to_view(
         &view,
         eye,
@@ -591,12 +586,10 @@ fn grab_cursor(window: &winit::window::Window) {
     match window.set_cursor_grab(CursorGrabMode::Locked) {
         Ok(()) => log::debug!("cursor grab: Locked"),
         Err(e_locked) => match window.set_cursor_grab(CursorGrabMode::Confined) {
-            Ok(()) => log::info!(
-                "cursor grab: Confined (Locked unavailable: {e_locked:?})"
-            ),
-            Err(e_confined) => log::warn!(
-                "cursor grab failed (Locked: {e_locked:?}; Confined: {e_confined:?})"
-            ),
+            Ok(()) => log::info!("cursor grab: Confined (Locked unavailable: {e_locked:?})"),
+            Err(e_confined) => {
+                log::warn!("cursor grab failed (Locked: {e_locked:?}; Confined: {e_confined:?})")
+            }
         },
     }
     window.set_cursor_visible(false);

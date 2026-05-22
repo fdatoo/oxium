@@ -95,7 +95,14 @@ impl FlyCamera {
     /// Apply WASD/QE motion. `forward_back` is +1 for W, −1 for S; `strafe`
     /// is +1 for D, −1 for A; `vertical` is +1 for E, −1 for Q. `dt` in
     /// seconds. Uses `self.speed` as units per second, boosted if `boost`.
-    pub fn translate(&mut self, forward_back: f32, strafe: f32, vertical: f32, boost: bool, dt: f32) {
+    pub fn translate(
+        &mut self,
+        forward_back: f32,
+        strafe: f32,
+        vertical: f32,
+        boost: bool,
+        dt: f32,
+    ) {
         let mul = if boost { 4.0 } else { 1.0 };
         // W/S walk along the yaw-only horizontal direction — pitch
         // controls where you're looking, Q/E controls elevation.
@@ -175,7 +182,11 @@ mod tests {
         };
         cam.translate(1.0, 0.0, 0.0, false, 1.0);
         let expected = cam.forward() * 10.0;
-        assert!((cam.position - expected).length() < 1e-4, "got {:?}", cam.position);
+        assert!(
+            (cam.position - expected).length() < 1e-4,
+            "got {:?}",
+            cam.position
+        );
     }
 
     #[test]
@@ -187,7 +198,10 @@ mod tests {
             speed: 1.0,
         };
         let dot = cam.forward().dot(cam.right());
-        assert!(dot.abs() < 1e-4, "forward and right must be orthogonal, got dot={dot}");
+        assert!(
+            dot.abs() < 1e-4,
+            "forward and right must be orthogonal, got dot={dot}"
+        );
     }
 
     #[test]
@@ -197,7 +211,11 @@ mod tests {
         for _ in 0..100 {
             cam.look(0.0, -10000.0);
         }
-        assert!(cam.pitch <= 1.5 && cam.pitch >= -1.5, "pitch escape: {}", cam.pitch);
+        assert!(
+            cam.pitch <= 1.5 && cam.pitch >= -1.5,
+            "pitch escape: {}",
+            cam.pitch
+        );
     }
 
     #[test]

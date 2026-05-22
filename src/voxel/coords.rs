@@ -89,23 +89,47 @@ mod tests {
 
     #[test]
     fn block_to_chunk_positive() {
-        assert_eq!(BlockPos(IVec3::new(0, 0, 0)).to_chunk(), ChunkCoord(IVec3::ZERO));
-        assert_eq!(BlockPos(IVec3::new(31, 0, 0)).to_chunk(), ChunkCoord(IVec3::ZERO));
-        assert_eq!(BlockPos(IVec3::new(32, 0, 0)).to_chunk(), ChunkCoord(IVec3::new(1, 0, 0)));
+        assert_eq!(
+            BlockPos(IVec3::new(0, 0, 0)).to_chunk(),
+            ChunkCoord(IVec3::ZERO)
+        );
+        assert_eq!(
+            BlockPos(IVec3::new(31, 0, 0)).to_chunk(),
+            ChunkCoord(IVec3::ZERO)
+        );
+        assert_eq!(
+            BlockPos(IVec3::new(32, 0, 0)).to_chunk(),
+            ChunkCoord(IVec3::new(1, 0, 0))
+        );
     }
 
     #[test]
     fn block_to_chunk_negative() {
         // floor-div, NOT truncation: -1 → chunk -1, not chunk 0
-        assert_eq!(BlockPos(IVec3::new(-1, 0, 0)).to_chunk(), ChunkCoord(IVec3::new(-1, 0, 0)));
-        assert_eq!(BlockPos(IVec3::new(-32, 0, 0)).to_chunk(), ChunkCoord(IVec3::new(-1, 0, 0)));
-        assert_eq!(BlockPos(IVec3::new(-33, 0, 0)).to_chunk(), ChunkCoord(IVec3::new(-2, 0, 0)));
+        assert_eq!(
+            BlockPos(IVec3::new(-1, 0, 0)).to_chunk(),
+            ChunkCoord(IVec3::new(-1, 0, 0))
+        );
+        assert_eq!(
+            BlockPos(IVec3::new(-32, 0, 0)).to_chunk(),
+            ChunkCoord(IVec3::new(-1, 0, 0))
+        );
+        assert_eq!(
+            BlockPos(IVec3::new(-33, 0, 0)).to_chunk(),
+            ChunkCoord(IVec3::new(-2, 0, 0))
+        );
     }
 
     #[test]
     fn block_to_local_negative() {
-        assert_eq!(BlockPos(IVec3::new(-1, 0, 0)).to_local(), LocalPos(UVec3::new(31, 0, 0)));
-        assert_eq!(BlockPos(IVec3::new(-32, 0, 0)).to_local(), LocalPos(UVec3::ZERO));
+        assert_eq!(
+            BlockPos(IVec3::new(-1, 0, 0)).to_local(),
+            LocalPos(UVec3::new(31, 0, 0))
+        );
+        assert_eq!(
+            BlockPos(IVec3::new(-32, 0, 0)).to_local(),
+            LocalPos(UVec3::ZERO)
+        );
     }
 
     #[test]

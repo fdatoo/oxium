@@ -1,8 +1,8 @@
 //! Column probe state: pinned (wx, wz), last `ColumnProbe` snapshot,
 //! and the Y at which the user is currently inspecting density.
 
-use oxium::worldgen::probe::{ColumnProbe, DensityBreakdown};
 use oxium::worldgen::Generator;
+use oxium::worldgen::probe::{ColumnProbe, DensityBreakdown};
 
 pub struct Probe {
     pub pinned: Option<(i32, i32)>,
@@ -13,7 +13,12 @@ pub struct Probe {
 
 impl Probe {
     pub fn new() -> Self {
-        Self { pinned: None, snapshot: None, probe_y: 70, breakdown: None }
+        Self {
+            pinned: None,
+            snapshot: None,
+            probe_y: 70,
+            breakdown: None,
+        }
     }
 
     /// Pin a new column and refresh its snapshot.
@@ -88,6 +93,9 @@ mod tests {
         p.set_y(&g, p.probe_y + 20);
         let new_breakdown = p.breakdown.unwrap();
         // Y should have changed; breakdown's bias should differ.
-        assert_ne!(initial_breakdown.bias.to_bits(), new_breakdown.bias.to_bits());
+        assert_ne!(
+            initial_breakdown.bias.to_bits(),
+            new_breakdown.bias.to_bits()
+        );
     }
 }

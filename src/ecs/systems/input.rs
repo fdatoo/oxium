@@ -11,8 +11,8 @@
 //! This split — buffer → apply → clear — keeps the asynchronous OS event
 //! arrival decoupled from the deterministic per-frame logic.
 
-use crate::ecs::components::{Camera, MovementMode, Movement, PlayerInput};
 use crate::ecs::GameEcs;
+use crate::ecs::components::{Camera, Movement, MovementMode, PlayerInput};
 use glam::Vec3;
 use std::time::{Duration, Instant};
 use winit::event::{ElementState, MouseButton};
@@ -91,10 +91,20 @@ impl InputBuf {
     /// continuous held state is set on press and cleared on release.
     pub fn on_mouse_button(&mut self, btn: MouseButton, state: ElementState) {
         match (btn, state) {
-            (MouseButton::Left,  ElementState::Pressed)  => { self.lmb_pressed = true; self.lmb_down = true;  }
-            (MouseButton::Left,  ElementState::Released) => { self.lmb_down = false; }
-            (MouseButton::Right, ElementState::Pressed)  => { self.rmb_pressed = true; self.rmb_down = true;  }
-            (MouseButton::Right, ElementState::Released) => { self.rmb_down = false; }
+            (MouseButton::Left, ElementState::Pressed) => {
+                self.lmb_pressed = true;
+                self.lmb_down = true;
+            }
+            (MouseButton::Left, ElementState::Released) => {
+                self.lmb_down = false;
+            }
+            (MouseButton::Right, ElementState::Pressed) => {
+                self.rmb_pressed = true;
+                self.rmb_down = true;
+            }
+            (MouseButton::Right, ElementState::Released) => {
+                self.rmb_down = false;
+            }
             _ => {}
         }
     }
@@ -104,8 +114,8 @@ impl InputBuf {
 /// across `apply_input` calls.
 #[derive(Debug, Default)]
 pub struct InputState {
-    pub last_break_at:       Option<Instant>,
-    pub last_place_at:       Option<Instant>,
+    pub last_break_at: Option<Instant>,
+    pub last_place_at: Option<Instant>,
     pub last_space_press_at: Option<Instant>,
 }
 
@@ -169,10 +179,13 @@ pub fn apply_input(ecs: &mut GameEcs, buf: &InputBuf, state: &mut InputState) {
     const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(280);
     if buf.key_pressed_this_frame.contains(&KeyCode::Space) {
         let now = Instant::now();
-        if state.last_space_press_at.map_or(false, |t| now - t <= DOUBLE_TAP_WINDOW) {
+        if state
+            .last_space_press_at
+            .map_or(false, |t| now - t <= DOUBLE_TAP_WINDOW)
+        {
             movement.mode = match movement.mode {
                 MovementMode::Walk => MovementMode::Fly,
-                MovementMode::Fly  => MovementMode::Walk,
+                MovementMode::Fly => MovementMode::Walk,
             };
             state.last_space_press_at = None;
         } else {
@@ -185,16 +198,30 @@ pub fn apply_input(ecs: &mut GameEcs, buf: &InputBuf, state: &mut InputState) {
     // Release resets the timer so the *next* tap fires immediately too.
     let now = Instant::now();
     let break_fired = buf.lmb_pressed
-        || (buf.lmb_down && state.last_break_at.map_or(true, |t| now - t >= ACTION_REPEAT));
+        || (buf.lmb_down
+            && state
+                .last_break_at
+                .map_or(true, |t| now - t >= ACTION_REPEAT));
     input.break_ = break_fired;
-    if break_fired { state.last_break_at = Some(now); }
-    if !buf.lmb_down { state.last_break_at = None; }
+    if break_fired {
+        state.last_break_at = Some(now);
+    }
+    if !buf.lmb_down {
+        state.last_break_at = None;
+    }
 
     let place_fired = buf.rmb_pressed
-        || (buf.rmb_down && state.last_place_at.map_or(true, |t| now - t >= ACTION_REPEAT));
+        || (buf.rmb_down
+            && state
+                .last_place_at
+                .map_or(true, |t| now - t >= ACTION_REPEAT));
     input.place = place_fired;
-    if place_fired { state.last_place_at = Some(now); }
-    if !buf.rmb_down { state.last_place_at = None; }
+    if place_fired {
+        state.last_place_at = Some(now);
+    }
+    if !buf.rmb_down {
+        state.last_place_at = None;
+    }
 
     // Number-row 1..8 + scroll wheel cycle the currently-selected
     // block. Held in its own query so the borrow above can release
@@ -268,10 +295,15 @@ mod tests {
     use std::thread::sleep;
     use winit::keyboard::KeyCode;
 
-    fn ecs() -> GameEcs { GameEcs::new(Vec3::new(0.0, 64.0, 0.0)) }
+    fn ecs() -> GameEcs {
+        GameEcs::new(Vec3::new(0.0, 64.0, 0.0))
+    }
 
     fn read_pi(e: &mut GameEcs) -> crate::ecs::components::PlayerInput {
-        let mut q = e.world.query_one::<&crate::ecs::components::PlayerInput>(e.player).unwrap();
+        let mut q = e
+            .world
+            .query_one::<&crate::ecs::components::PlayerInput>(e.player)
+            .unwrap();
         *q.get().unwrap()
     }
 
@@ -329,15 +361,25 @@ mod tests {
         buf.key_pressed_this_frame.insert(KeyCode::Space);
         buf.keys_down.insert(KeyCode::Space);
         apply_input(&mut e, &buf, &mut st);
-        let mv = e.world.query_one::<&crate::ecs::components::Movement>(e.player)
-            .unwrap().get().unwrap().mode;
+        let mv = e
+            .world
+            .query_one::<&crate::ecs::components::Movement>(e.player)
+            .unwrap()
+            .get()
+            .unwrap()
+            .mode;
         assert_eq!(mv, crate::ecs::components::MovementMode::Walk);
 
         buf.key_pressed_this_frame.clear();
         buf.key_pressed_this_frame.insert(KeyCode::Space);
         apply_input(&mut e, &buf, &mut st);
-        let mv = e.world.query_one::<&crate::ecs::components::Movement>(e.player)
-            .unwrap().get().unwrap().mode;
+        let mv = e
+            .world
+            .query_one::<&crate::ecs::components::Movement>(e.player)
+            .unwrap()
+            .get()
+            .unwrap()
+            .mode;
         assert_eq!(mv, crate::ecs::components::MovementMode::Fly);
     }
 
@@ -352,8 +394,13 @@ mod tests {
         buf.key_pressed_this_frame.clear();
         buf.key_pressed_this_frame.insert(KeyCode::Space);
         apply_input(&mut e, &buf, &mut st);
-        let mv = e.world.query_one::<&crate::ecs::components::Movement>(e.player)
-            .unwrap().get().unwrap().mode;
+        let mv = e
+            .world
+            .query_one::<&crate::ecs::components::Movement>(e.player)
+            .unwrap()
+            .get()
+            .unwrap()
+            .mode;
         assert_eq!(mv, crate::ecs::components::MovementMode::Walk);
     }
 
@@ -364,8 +411,13 @@ mod tests {
         let mut st = InputState::default();
         buf.key_pressed_this_frame.insert(KeyCode::KeyF);
         apply_input(&mut e, &buf, &mut st);
-        let mv = e.world.query_one::<&crate::ecs::components::Movement>(e.player)
-            .unwrap().get().unwrap().mode;
+        let mv = e
+            .world
+            .query_one::<&crate::ecs::components::Movement>(e.player)
+            .unwrap()
+            .get()
+            .unwrap()
+            .mode;
         assert_eq!(mv, crate::ecs::components::MovementMode::Fly);
     }
 }

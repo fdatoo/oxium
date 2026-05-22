@@ -23,7 +23,10 @@ pub const CHUNK_VOL: usize = 32 * 32 * 32;
 /// by `DenseChunk::block_rgb`. Out-of-range inputs are masked to 4 bits.
 #[inline]
 pub fn pack_rgb(r: u8, g: u8, b: u8) -> u16 {
-    debug_assert!(r < 16 && g < 16 && b < 16, "pack_rgb: channel out of range (max 15)");
+    debug_assert!(
+        r < 16 && g < 16 && b < 16,
+        "pack_rgb: channel out of range (max 15)"
+    );
     ((r as u16 & 0x0F) << 8) | ((g as u16 & 0x0F) << 4) | (b as u16 & 0x0F)
 }
 
@@ -60,8 +63,7 @@ pub fn build_light_volume_blob(
     neighbors: &Neighbors,
 ) -> Box<[u8; 33 * 33 * 33 * 4]> {
     let mut buf = vec![0u8; 33 * 33 * 33 * 4].into_boxed_slice();
-    let out: &mut [u8; 33 * 33 * 33 * 4] =
-        buf.as_mut().try_into().expect("size mismatch");
+    let out: &mut [u8; 33 * 33 * 33 * 4] = buf.as_mut().try_into().expect("size mismatch");
     // Scale 0..=15 → 0..=255 with rounding so 15 maps to 255 exactly.
     let scale = |v: u8| ((v as u32 * 255 + 7) / 15) as u8;
     for z in 0..33 {
@@ -69,7 +71,7 @@ pub fn build_light_volume_blob(
             for x in 0..33 {
                 let (r, g, b, a) = sample_for_blob(dense, neighbors, x, y, z);
                 let idx = (z * 33 * 33 + y * 33 + x) * 4;
-                out[idx]     = scale(r);
+                out[idx] = scale(r);
                 out[idx + 1] = scale(g);
                 out[idx + 2] = scale(b);
                 out[idx + 3] = scale(a);
@@ -98,10 +100,8 @@ fn sample_for_blob(
     z: usize,
 ) -> (u8, u8, u8, u8) {
     let (chunk_src, lx, ly, lz) = resolve_cell(dense, neighbors, x, y, z);
-    let idx = crate::voxel::coords::LocalPos(
-        glam::UVec3::new(lx as u32, ly as u32, lz as u32),
-    )
-    .to_index();
+    let idx = crate::voxel::coords::LocalPos(glam::UVec3::new(lx as u32, ly as u32, lz as u32))
+        .to_index();
     let block = chunk_src.blocks[idx];
     let (mut r, mut g, mut b) = unpack_rgb(chunk_src.block_rgb[idx]);
     let mut a = chunk_src.sky_light[idx] & 0x0F;
@@ -118,9 +118,12 @@ fn sample_for_blob(
         // 0..=32 grid, so an axis underflow / overflow reads -X/-Y/-Z
         // neighbors when available).
         for (dx, dy, dz) in [
-            ( 1, 0, 0), (-1, 0, 0),
-            ( 0, 1, 0), ( 0,-1, 0),
-            ( 0, 0, 1), ( 0, 0,-1),
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
         ] {
             let nx = x as isize + dx;
             let ny = y as isize + dy;
@@ -131,9 +134,9 @@ fn sample_for_blob(
             }
             let (ns, nlx, nly, nlz) =
                 resolve_cell(dense, neighbors, nx as usize, ny as usize, nz as usize);
-            let nidx = crate::voxel::coords::LocalPos(
-                glam::UVec3::new(nlx as u32, nly as u32, nlz as u32),
-            )
+            let nidx = crate::voxel::coords::LocalPos(glam::UVec3::new(
+                nlx as u32, nly as u32, nlz as u32,
+            ))
             .to_index();
             let (nr, ng, nb) = unpack_rgb(ns.block_rgb[nidx]);
             let na = ns.sky_light[nidx] & 0x0F;
@@ -161,17 +164,17 @@ fn resolve_cell<'a>(
     if x == 32 {
         match neighbors.chunks[Face::PosX as usize] {
             Some(n) => (n, 0, y.min(31), z.min(31)),
-            None    => (dense, 31, y.min(31), z.min(31)),
+            None => (dense, 31, y.min(31), z.min(31)),
         }
     } else if y == 32 {
         match neighbors.chunks[Face::PosY as usize] {
             Some(n) => (n, x.min(31), 0, z.min(31)),
-            None    => (dense, x.min(31), 31, z.min(31)),
+            None => (dense, x.min(31), 31, z.min(31)),
         }
     } else if z == 32 {
         match neighbors.chunks[Face::PosZ as usize] {
             Some(n) => (n, x.min(31), y.min(31), 0),
-            None    => (dense, x.min(31), y.min(31), 31),
+            None => (dense, x.min(31), y.min(31), 31),
         }
     } else {
         (dense, x, y, z)
@@ -519,7 +522,11 @@ mod tests {
 
     #[test]
     fn boundary_indices_in_range() {
-        let p = LocalPos(UVec3::new(CHUNK_DIM_U - 1, CHUNK_DIM_U - 1, CHUNK_DIM_U - 1));
+        let p = LocalPos(UVec3::new(
+            CHUNK_DIM_U - 1,
+            CHUNK_DIM_U - 1,
+            CHUNK_DIM_U - 1,
+        ));
         assert_eq!(p.to_index(), CHUNK_VOL - 1);
     }
 

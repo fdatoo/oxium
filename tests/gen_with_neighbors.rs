@@ -21,7 +21,7 @@
 use glam::{IVec3, UVec3};
 use oxium::jobs::{JobResult, Jobs};
 use oxium::voxel::block::{Block, BlockRegistry};
-use oxium::voxel::chunk::{unpack_rgb, DenseChunk, Neighbors, PalettedChunk};
+use oxium::voxel::chunk::{DenseChunk, Neighbors, PalettedChunk, unpack_rgb};
 use oxium::voxel::coords::{ChunkCoord, LocalPos};
 use oxium::worldgen::Generator;
 use std::sync::Arc;
@@ -99,6 +99,12 @@ fn spawn_gen_uses_neighbour_block_light_at_boundary() {
         "B's -X boundary did not pick up neighbour seeding: red={b_r} (expected ≥ 10). \
          spawn_gen is not propagating the `neighbors` argument into recompute_chunk."
     );
-    assert_eq!(b_g, 0, "green channel should not leak from a red-only source");
-    assert_eq!(b_b, 0, "blue channel should not leak from a red-only source");
+    assert_eq!(
+        b_g, 0,
+        "green channel should not leak from a red-only source"
+    );
+    assert_eq!(
+        b_b, 0,
+        "blue channel should not leak from a red-only source"
+    );
 }
