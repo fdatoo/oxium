@@ -5,6 +5,15 @@ edition = "2024"
 rust-version = "1.95"
 default-run = "oxium"
 
+[features]
+default = []
+
+# Opt-in fallback to the legacy per-chunk BFS lighting. Off by default;
+# the graph-engine LightEngine is authoritative in the default build.
+# Build with `cargo build --features legacy-lighting` to fall back if
+# the engine has a regression.
+legacy-lighting = []
+
 [dependencies]
 # Graphics / window / input
 wgpu = "23"

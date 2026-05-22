@@ -11,10 +11,15 @@
 //! milliseconds of worker time for ~10× less code complexity — see the design
 //! spec's "Why recompute over incremental" table.
 
+#[cfg(feature = "legacy-lighting")]
 use crate::voxel::block::{Block, BlockRegistry};
+#[cfg(feature = "legacy-lighting")]
 use crate::voxel::chunk::{pack_rgb, unpack_rgb, DenseChunk, Neighbors};
+#[cfg(feature = "legacy-lighting")]
 use crate::voxel::coords::{LocalPos, CHUNK_DIM_U};
+#[cfg(feature = "legacy-lighting")]
 use glam::UVec3;
+#[cfg(feature = "legacy-lighting")]
 use std::collections::VecDeque;
 
 pub mod engine;
@@ -26,6 +31,7 @@ pub use queue::{BucketQueue, QueueEntry};
 pub use sky_sources::{ChunkSkyLightSources, NO_SOURCE_FLOOR};
 
 /// Chunk side length as a signed integer (mirrors `D` in the mesher).
+#[cfg(feature = "legacy-lighting")]
 const D: i32 = CHUNK_DIM_U as i32;
 
 /// Recompute *both* sky and block light for one chunk, in place.
@@ -35,6 +41,7 @@ const D: i32 = CHUNK_DIM_U as i32;
 /// only spreads *within* this chunk — cross-boundary leaks are picked up
 /// later by the streaming system, which marks the bordering chunk as
 /// `light_dirty` and queues another recompute.
+#[cfg(feature = "legacy-lighting")]
 pub fn recompute_chunk(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegistry) {
     sky_light(chunk, neighbors, reg);
     block_rgb(chunk, neighbors, reg);
@@ -47,6 +54,7 @@ pub fn recompute_chunk(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &
 /// from the four lateral chunk neighbours' boundary cells, so a tunnel
 /// dug across a chunk seam keeps a smooth light gradient instead of
 /// hard-switching to black at the boundary.
+#[cfg(feature = "legacy-lighting")]
 fn sky_light(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegistry) {
     chunk.sky_light.iter_mut().for_each(|v| *v = 0);
 
@@ -105,6 +113,7 @@ fn sky_light(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegis
     bfs_spread_sky(&mut q, chunk, reg);
 }
 
+#[cfg(feature = "legacy-lighting")]
 #[derive(Copy, Clone)]
 enum BfsChannel {
     Sky,
@@ -122,6 +131,7 @@ enum BfsChannel {
 /// neighbour was just regenerated and has high light at its boundary
 /// (e.g., the lit end of a tunnel), this seeds *our* boundary cells
 /// so the BFS continues the gradient from there.
+#[cfg(feature = "legacy-lighting")]
 fn seed_from_neighbors(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, channel: BfsChannel) {
     use crate::mesher::Face;
     for face in Face::all() {
@@ -176,6 +186,7 @@ fn seed_from_neighbors(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, channe
 /// walked in the same `(u, v)` order as `mirror_boundary`. The
 /// per-byte comparison is cheap (~12 KB total per chunk) and exact —
 /// no hash collisions to worry about.
+#[cfg(feature = "legacy-lighting")]
 pub fn snapshot_face_boundaries(chunk: &crate::voxel::chunk::DenseChunk) -> [Vec<u8>; 6] {
     use crate::mesher::Face;
     std::array::from_fn(|face_i| {
@@ -209,6 +220,7 @@ pub fn snapshot_face_boundaries(chunk: &crate::voxel::chunk::DenseChunk) -> [Vec
 /// in the two axes orthogonal to the face's normal; `face` decides
 /// which axis is `u` vs `v` and which extreme of the chunk dimension
 /// the boundary sits on.
+#[cfg(feature = "legacy-lighting")]
 fn mirror_boundary(face: crate::mesher::Face, u: i32, v: i32) -> (LocalPos, LocalPos) {
     use crate::mesher::Face;
     let last = D as u32 - 1;
@@ -247,6 +259,7 @@ fn mirror_boundary(face: crate::mesher::Face, u: i32, v: i32) -> (LocalPos, Loca
 /// extra in water). Boundary cells are also seeded from neighbour chunks so
 /// colored sources continue to glow into adjacent chunks rather than
 /// hard-cutting at the seam.
+#[cfg(feature = "legacy-lighting")]
 fn block_rgb(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegistry) {
     chunk.block_rgb.iter_mut().for_each(|v| *v = 0);
 
@@ -291,6 +304,7 @@ fn block_rgb(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegis
 
 /// Sky BFS step. Spreads sky light to neighbours within this chunk only;
 /// cross-chunk spread is the streaming system's responsibility.
+#[cfg(feature = "legacy-lighting")]
 fn bfs_spread_sky(
     q: &mut VecDeque<(i32, i32, i32, u8)>,
     chunk: &mut DenseChunk,
@@ -329,6 +343,7 @@ fn bfs_spread_sky(
 /// RGB BFS step. Spreads all three channels simultaneously to neighbours
 /// within this chunk only; cross-chunk spread is the streaming system's
 /// responsibility (via `light_dirty` cascade).
+#[cfg(feature = "legacy-lighting")]
 fn bfs_spread_rgb(
     q: &mut VecDeque<(i32, i32, i32, u16)>,
     chunk: &mut DenseChunk,
@@ -369,7 +384,7 @@ fn bfs_spread_rgb(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-lighting"))]
 mod tests {
     use super::*;
     use crate::voxel::chunk::DenseChunk;

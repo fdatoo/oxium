@@ -61,6 +61,11 @@ pub fn drain_jobs(
                 // see it.
                 world.insert(coord, data);
 
+                // Hand the new chunk to the graph engine. on_chunk_loaded
+                // enqueues sky sources, emissives, and neighbour boundary
+                // cells; the engine's next tick spreads them.
+                world.on_chunk_loaded(coord);
+
                 // Used to cascade `dirty.light` to self + 6
                 // neighbours here for "underground chunks generated
                 // with no above-neighbour need re-lighting." But the
@@ -125,6 +130,7 @@ pub fn drain_jobs(
                     }
                 }
             }
+            #[cfg(feature = "legacy-lighting")]
             JobResult::Relit { coord, data, changed_faces, light_volume } => {
                 // Push the light volume to the GPU FIRST so the chunk's bind
                 // group picks up the new lighting on the next draw — even if
@@ -201,6 +207,7 @@ pub fn drain_jobs(
             JobResult::LoadedFromDisk { coord, data } => match data {
                 Some(data) => {
                     world.insert(coord, data);
+                    world.on_chunk_loaded(coord);
                     // Same neighbour-remesh strategy as Generated.
                     // The parallel `spawn_load` was the trigger for
                     // the out-of-order arrival bug, and Loaded is
@@ -249,6 +256,7 @@ pub fn drain_jobs(
 /// same shape of regression as the cancelled v0.1.19 per-edit cascade.
 /// At 4 chunks per frame a couple thousand pending chunks converge in
 /// ~5 seconds at 120 fps without dropping frames.
+#[cfg(feature = "legacy-lighting")]
 pub fn relight_pump(
     world: &mut World,
     jobs: &Jobs,
@@ -317,6 +325,7 @@ pub fn drain_persistence(
             PersistResult::Loaded { coord, data } => match data {
                 Some(data) => {
                     world.insert(coord, data);
+                    world.on_chunk_loaded(coord);
                     // Mark `dirty.light = true` on the just-loaded
                     // chunk. Saved chunks can carry stale
                     // sky_light / block_light values when an
@@ -331,6 +340,7 @@ pub fn drain_persistence(
                     // "flat fog plane where I modified terrain"
                     // bug. The relight pump picks this up and
                     // converges over a few frames.
+                    #[cfg(feature = "legacy-lighting")]
                     if let Some(ChunkSlot::Stored { meta, .. }) =
                         world.chunks.get_mut(&coord)
                     {
@@ -389,4 +399,52 @@ pub fn gather_neighbors(world: &World, c: ChunkCoord) -> [Option<Arc<PalettedChu
         }
     }
     out
+}
+
+/// Scan loaded chunks for `light_gpu_dirty` and re-upload their 3D
+/// light textures. Bounded to `UPLOAD_BUDGET` chunks per frame so a
+/// big convergence wave doesn't saturate PCIe bandwidth.
+pub fn upload_dirty_light_volumes(
+    world: &mut crate::voxel::world::World,
+    renderer: &mut crate::render::Renderer,
+) {
+    use crate::voxel::world::ChunkSlot;
+    use crate::voxel::chunk::Neighbors;
+    const UPLOAD_BUDGET: usize = 32;
+    let mut uploaded = 0;
+    // Collect the dirty coords first; rebuilding the volume needs to
+    // gather_neighbors which borrows the world immutably.
+    let dirty: Vec<_> = world.chunks.iter()
+        .filter_map(|(c, slot)| match slot {
+            ChunkSlot::Stored { meta, .. } if meta.light_gpu_dirty => Some(*c),
+            _ => None,
+        })
+        .take(UPLOAD_BUDGET)
+        .collect();
+    for coord in dirty {
+        // Gather neighbour Arc refs then decompress them — Neighbors<'_>
+        // holds &DenseChunk refs so we need the decompressed values to
+        // outlive the borrow. This mirrors the pattern in app.rs's edit path.
+        let neighbor_arcs = gather_neighbors(world, coord);
+        let neighbor_dense: Vec<Option<crate::voxel::chunk::DenseChunk>> = neighbor_arcs
+            .iter()
+            .map(|opt| opt.as_ref().map(|p| p.decompress()))
+            .collect();
+        let neighbor_refs: [Option<&crate::voxel::chunk::DenseChunk>; 6] = [
+            neighbor_dense[0].as_ref(),
+            neighbor_dense[1].as_ref(),
+            neighbor_dense[2].as_ref(),
+            neighbor_dense[3].as_ref(),
+            neighbor_dense[4].as_ref(),
+            neighbor_dense[5].as_ref(),
+        ];
+        let ns = Neighbors { chunks: neighbor_refs };
+        let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get_mut(&coord) else { continue };
+        let dense = data.decompress();
+        let blob = crate::voxel::chunk::build_light_volume_blob(&dense, &ns);
+        renderer.upload_chunk_light_volume(coord, blob.as_ref());
+        meta.light_gpu_dirty = false;
+        uploaded += 1;
+    }
+    let _ = uploaded;
 }
