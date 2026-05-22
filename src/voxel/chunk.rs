@@ -415,6 +415,12 @@ pub struct ChunkMeta {
     /// floor means "treat every cell as a potential source"
     /// (matches today's BFS column-drop default of `light = 15`).
     pub sky_sources: crate::lighting::ChunkSkyLightSources,
+    /// True when the engine has written to this chunk's `sky_light` or
+    /// `block_rgb` since the last GPU upload of the light volume. The
+    /// `upload_dirty_light_volumes` pass in `mesh_upload` scans this
+    /// flag each frame and re-uploads + clears for any chunk that's
+    /// flagged.
+    pub light_gpu_dirty: bool,
 }
 
 /// Legacy v1 paletted-chunk layout used by region files written before

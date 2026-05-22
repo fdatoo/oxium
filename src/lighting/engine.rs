@@ -272,8 +272,7 @@ fn drain_pending_block_changes(
                     );
                     dense.block_rgb[idx] = new_packed;
                     *data = std::sync::Arc::new(crate::voxel::chunk::PalettedChunk::compress(&dense));
-                    // TODO(T6): meta.light_gpu_dirty = true;
-                    let _ = meta;
+                    meta.light_gpu_dirty = true;
                     engine.block_rgb[ch_i].increase.push(crate::lighting::queue::QueueEntry {
                         pos,
                         from_level: new_info.emission[ch_i],
@@ -415,8 +414,7 @@ fn recompute_chunk_light_from_scratch(
     }
 
     *data = std::sync::Arc::new(PalettedChunk::compress(&dense));
-    // TODO(T6): meta.light_gpu_dirty = true;
-    let _ = meta;
+    meta.light_gpu_dirty = true;
 }
 
 /// Write level=15 into the chunk's sky_light at `(lx, ly, lz)` and
@@ -522,8 +520,7 @@ fn drain_increase_channel(
                         }
                     }
                     *data = std::sync::Arc::new(crate::voxel::chunk::PalettedChunk::compress(&dense));
-                    // TODO(T6): meta.light_gpu_dirty = true;
-                    let _ = meta;
+                    meta.light_gpu_dirty = true;
                 }
             }
         }
@@ -579,8 +576,7 @@ fn drain_increase_channel(
                 }
             }
             *data = std::sync::Arc::new(crate::voxel::chunk::PalettedChunk::compress(&dense));
-            // TODO(T6): meta.light_gpu_dirty = true;
-            let _ = meta;
+            meta.light_gpu_dirty = true;
 
             // Enqueue onward propagation, blocking back-face.
             ch_engine.increase.push(crate::lighting::queue::QueueEntry {

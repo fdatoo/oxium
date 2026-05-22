@@ -488,10 +488,9 @@ mod tests {
             iters += 1;
         }
         assert!(w.light_engine.is_idle(), "tick should drain all queued work given big enough budget");
-        // TODO(T6): uncomment after light_gpu_dirty field exists on ChunkMeta
-        // if let Some(ChunkSlot::Stored { meta, .. }) = w.chunks.get(&coord) {
-        //     assert!(meta.light_gpu_dirty, "engine writes should set light_gpu_dirty");
-        // }
+        if let Some(ChunkSlot::Stored { meta, .. }) = w.chunks.get(&coord) {
+            assert!(meta.light_gpu_dirty, "engine writes should set light_gpu_dirty");
+        }
         let _ = BlockPos(IVec3::ZERO);  // silence unused import warning
     }
 }
