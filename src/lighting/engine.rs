@@ -296,14 +296,10 @@ fn drain_pending_block_changes(
 
     // Execute the recompute fallback for every affected chunk.
     for coord in recompute_chunks {
-        if budget == 0 {
-            // Bail and let next tick resume — but we've already drained
-            // pending_block_changes for this tick, so the recompute
-            // won't be retriggered automatically. To keep correctness
-            // simple, do the recompute anyway and only check budget
-            // between chunks.
-            // (Defer: PR4 will revisit budgeting under heavy edit load.)
-        }
+        // Budget enforcement is intentionally relaxed here — the recompute
+        // is atomic per chunk and we already drained pending_block_changes
+        // for this tick, so a partial bail would lose work. PR4 will
+        // revisit budgeting under heavy edit load.
         budget = budget.saturating_sub(estimate_chunk_recompute_cost());
         recompute_chunk_light_from_scratch(engine, chunks, registry, coord);
     }
@@ -491,6 +487,16 @@ fn drain_increase_channel(
         // (and future callers) may skip that. Writing here is idempotent if
         // the cell already holds a higher value.
         {
+            // TODO(perf): this unconditionally decompresses the chunk to check
+            // whether the source cell needs writing, even though most callers
+            // (recompute_chunk_light_from_scratch, drain_pending_block_changes)
+            // pre-write before enqueuing — `needs_write` then evaluates to false.
+            // At a 50k-op budget that's 50k extra 128 KB decompress allocs/frame.
+            // Mitigation: add PalettedChunk::sky_light_at(idx) and
+            // block_rgb_at(idx) accessors that read directly from Packed4Bit
+            // without decompressing the whole chunk, then check `needs_write`
+            // before decompressing. Out of scope for PR3 (engine correctness
+            // priority); revisit in PR4 or a perf-pass PR.
             let src_chunk_coord = entry.pos.to_chunk();
             let src_local = entry.pos.to_local();
             let src_idx = src_local.to_index();
@@ -724,9 +730,10 @@ mod tests {
         let adj_idx = LocalPos(UVec3::new(17, 16, 16)).to_index();
         let (cr, _cg, _cb) = unpack_rgb(dense.block_rgb[center_idx]);
         let (ar, _ag, _ab) = unpack_rgb(dense.block_rgb[adj_idx]);
-        // Torch emission is [13, 13, 13]. Center should hold ~13, adj at least 12.
+        // Torch emission is [13, 13, 13]. Center holds 13; an adjacent
+        // air cell receives one step of attenuation (cost 1), so >= 12.
         assert!(cr >= 13, "torch cell R should hold its own emission: got {}", cr);
-        assert!(ar >= 11, "adjacent cell R should be lit: got {}", ar);
+        assert!(ar >= 12, "adjacent cell R should be lit at least 12: got {}", ar);
         let _ = pack_rgb(0, 0, 0);  // silence unused import on warn build
     }
 
@@ -742,5 +749,70 @@ mod tests {
         let mut engine = LightEngine::default();
         engine.tick_with(&mut chunks, &registry, 10_000);
         assert!(engine.is_idle());
+    }
+
+    #[test]
+    fn opacity_increase_triggers_chunk_recompute_via_pending_change() {
+        use crate::voxel::block::{Block, BlockRegistry};
+        use crate::voxel::chunk::{DenseChunk, PalettedChunk};
+        use crate::voxel::coords::{BlockPos, ChunkCoord, LocalPos};
+        use crate::voxel::world::ChunkSlot;
+        use glam::{IVec3, UVec3};
+        use std::collections::HashMap;
+
+        let registry = BlockRegistry::new();
+        // Pre-lit chunk: pretend sky has fully propagated (set sky_light = 15
+        // at and above y=10, 0 below). One air block sits at (16, 10, 16).
+        let mut dense = DenseChunk::empty();
+        for ly in 10..32 {
+            for lz in 0..32 {
+                for lx in 0..32 {
+                    dense.sky_light[LocalPos(UVec3::new(lx, ly, lz)).to_index()] = 15;
+                }
+            }
+        }
+        let coord = ChunkCoord(IVec3::ZERO);
+        let chunk = PalettedChunk::compress(&dense);
+        let mut chunks: HashMap<ChunkCoord, ChunkSlot> = HashMap::new();
+        chunks.insert(coord, ChunkSlot::Stored {
+            data: std::sync::Arc::new(chunk),
+            meta: crate::voxel::chunk::ChunkMeta {
+                sky_sources: crate::lighting::ChunkSkyLightSources::build_from_dense(
+                    &dense, coord, &registry,
+                ),
+                ..Default::default()
+            },
+        });
+
+        let mut engine = LightEngine::default();
+        // Simulate placing stone at (16, 20, 16): opacity changes 0 → 1.
+        // This should trigger a chunk recompute that rebuilds the heightmap
+        // and re-floods light. After tick, cells below the stone should
+        // be dark (sky can't reach them).
+        let pos = BlockPos(IVec3::new(16, 20, 16));
+        // Update the chunk's block first (mirroring what set_block does).
+        if let Some(ChunkSlot::Stored { data, .. }) = chunks.get_mut(&coord) {
+            let mut dense = data.decompress();
+            dense.set(LocalPos(UVec3::new(16, 20, 16)), Block::Stone);
+            *data = std::sync::Arc::new(PalettedChunk::compress(&dense));
+        }
+        engine.enqueue_block_change(pos, Block::Air, Block::Stone);
+        engine.tick_with(&mut chunks, &registry, 50_000);
+
+        // Verify cell directly below stone (16, 19, 16) is no longer at 15
+        // (it should be dark because stone blocks the column).
+        let ChunkSlot::Stored { data, meta } = chunks.get(&coord).unwrap() else { panic!() };
+        let dense = data.decompress();
+        let below_idx = LocalPos(UVec3::new(16, 19, 16)).to_index();
+        // The lowest_source_y for column (16, 16) should now be 21 (cell
+        // immediately above stone y=20).
+        assert_eq!(meta.sky_sources.lowest_source_y(16, 16), 21);
+        // Cell below stone should be lit only by lateral propagation
+        // from neighbouring columns — strictly less than 15.
+        assert!(
+            dense.sky_light[below_idx] < 15,
+            "cell below new stone should be shaded; got {}",
+            dense.sky_light[below_idx],
+        );
     }
 }
