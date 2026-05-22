@@ -1784,16 +1784,9 @@ mod tests {
     /// future runs catch unintentional behavioural drift.
     #[test]
     fn golden_seed42_chunk_0_2_0() {
-        // Hash re-baselined for the carver-trilerp pass: the noise
-        // carvers (cheese / pillar) now run through a 9³ corner
-        // lattice + trilerp instead of per-voxel FBM. Voxels near a
-        // cave sign-boundary can resolve differently from the
-        // pre-trilerp implementation; cave shapes are visually
-        // equivalent. Same precedent as the PR-5 hash bump for the
-        // base density.
-        // Note: this golden will be rebaselined in PR1.6 after
-        // density composition changes from removing spaghetti/wormhole.
-        const GOLDEN_42_002: u64 = 0xE4E964788BEB26DD;
+        // Rebaselined 2026-05-21: cave overhaul PR1 added terasology_ambient
+        // carver to the density composition (and removed spaghetti/wormhole).
+        const GOLDEN_42_002: u64 = 0x91890CF00C08C3A1;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);

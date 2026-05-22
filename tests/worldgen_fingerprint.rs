@@ -15,7 +15,9 @@ use std::hash::{Hash, Hasher};
 
 /// Pinned hash of the PNG bytes. Update whenever an intentional
 /// generator change lands.
-const EXPECTED_HASH: u64 = 0x25E0_9164_E204_E2C7;
+// Rebaselined 2026-05-21: cave overhaul PR1 added terasology_ambient
+// carver to the density composition.
+const EXPECTED_HASH: u64 = 0x0652_5CEE_A30F_9710;
 
 /// Render a 256 × 256 fingerprint PNG of `h_pre` at seed 42 sampled
 /// every 8 blocks over `[-1024, 1024]²`. Returns the PNG bytes.
