@@ -181,6 +181,24 @@ impl LightEngine {
         // Phase A — drain pending block changes.
         remaining = drain_pending_block_changes(self, &mut cache, chunks, registry, remaining);
 
+        // Phase B — drain per-channel decrease queues.
+        if remaining > 0 {
+            remaining = drain_decrease_channel(
+                &mut self.sky, &mut cache, chunks, registry, Channel::Sky, remaining,
+            );
+        }
+        for ch_i in 0..3 {
+            if remaining == 0 { break }
+            remaining = drain_decrease_channel(
+                &mut self.block_rgb[ch_i],
+                &mut cache,
+                chunks,
+                registry,
+                Channel::BlockRgb(ch_i),
+                remaining,
+            );
+        }
+
         // Phase C — drain per-channel increase queues.
         if remaining > 0 {
             remaining = drain_increase_channel(
@@ -312,18 +330,44 @@ fn drain_pending_block_changes(
         let new_info = registry.info(new_block);
 
         let opacity_changed = old_info.opaque != new_info.opaque;
-        let emission_decreased =
-            new_info.emission[0] < old_info.emission[0]
-            || new_info.emission[1] < old_info.emission[1]
-            || new_info.emission[2] < old_info.emission[2];
 
-        // PR3-compatible minimal-decrease handling for opacity changes
-        // and emission decreases: defer to a chunk recompute. PR4 keeps
-        // this branch for now; PR4 task 5 replaces emission-decrease
-        // with proper decrease propagation, and opacity changes still
-        // route through recompute because they affect the heightmap.
-        if opacity_changed || emission_decreased {
+        if opacity_changed {
+            // Opacity changes affect the heightmap; the chunk recompute
+            // path handles them (heightmap already rebuilt in the pre-pass).
             recompute_chunks.insert(pos.to_chunk());
+        }
+
+        // Emission decrease per channel: enqueue a proper decrease op
+        // at the OLD emission level so the tear-down chain knows how
+        // bright the source was.
+        for ch_i in 0..3 {
+            if new_info.emission[ch_i] < old_info.emission[ch_i]
+                && old_info.emission[ch_i] > 0
+            {
+                // Zero the cell on this channel first so the decrease
+                // wave doesn't see this cell as still-lit-by-source.
+                let chunk = pos.to_chunk();
+                let idx = pos.to_local().to_index();
+                let zeroed = {
+                    if let Some(dense) = cache.dense(chunks, chunk) {
+                        let (r, g, b) = crate::voxel::chunk::unpack_rgb(dense.block_rgb[idx]);
+                        let mut chans = [r, g, b];
+                        chans[ch_i] = 0;
+                        dense.block_rgb[idx] = crate::voxel::chunk::pack_rgb(chans[0], chans[1], chans[2]);
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if zeroed {
+                    cache.mark_written(chunk);
+                }
+                engine.block_rgb[ch_i].decrease.push(crate::lighting::queue::QueueEntry {
+                    pos,
+                    from_level: old_info.emission[ch_i],
+                    propagation_mask: 0,
+                });
+            }
         }
 
         // Strict emission increase per channel: write the new level and
