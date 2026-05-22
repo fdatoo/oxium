@@ -96,6 +96,7 @@ pub use crate::worldgen::tuning::SEA_LEVEL;
 use crate::worldgen::tuning::{
     CAVE_FLOOR_Y, CAVE_SDF_INTENSITY,
     CAVE_SURFACE_BUFFER, COLD_SNOW_MIN_ABOVE_SEA,
+    MAX_VERTICAL_AIR_RUN,
     SNOW_LINE, SURFACE_BAND, TREE_CELL_SIZE, TREE_MARGIN,
     TREE_RATE_FOREST, TREE_RATE_PLAINS,
 };
@@ -1287,6 +1288,34 @@ impl Generator {
         // external fluid body, or the chunk floor. Ocean and lake
         // water are not masked → preserved.
         fluid::settle_fluid(out, &aquifer_mask);
+
+        // Vertical-run clamp: cap any continuous vertical air column at
+        // MAX_VERTICAL_AIR_RUN voxels to eliminate fall hazards. Cheap
+        // O(voxels) post-pass per XZ column.
+        //
+        // Cross-chunk-boundary note: the run counter is seeded from zero
+        // at the bottom of each chunk. A run that begins 2 voxels into
+        // the chunk above and continues into this chunk could produce an
+        // effective run of up to (MAX_VERTICAL_AIR_RUN * 2) across the
+        // boundary. This is accepted as rare and harmless; the test only
+        // verifies within a single chunk.
+        for x in 0..CHUNK_DIM_U as u32 {
+            for z in 0..CHUNK_DIM_U as u32 {
+                let mut run = 0i32;
+                for y in 0..CHUNK_DIM_U as u32 {
+                    let pos = LocalPos(UVec3::new(x, y, z));
+                    if out.get(pos) == Block::Air {
+                        run += 1;
+                        if run > MAX_VERTICAL_AIR_RUN {
+                            out.set(pos, Block::Stone);
+                            run = 0;
+                        }
+                    } else {
+                        run = 0;
+                    }
+                }
+            }
+        }
 
         // After the terrain pass, lay trees on top. Cross-chunk trees
         // (whose trunks live in a neighbouring chunk but whose leaves

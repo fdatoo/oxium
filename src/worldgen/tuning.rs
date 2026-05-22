@@ -96,6 +96,13 @@ pub const MACRO_HALO_REGIONS: i32 = 1;
 /// flagged as a trunk river.
 pub const MACRO_RIVER_THRESH: u32 = 500;
 
+// ── Fall-hazard clamp ─────────────────────────────────────────────────
+
+/// Maximum consecutive vertical air voxels per XZ column before a stone
+/// "ledge" is inserted by the post-density-fill pass. Eliminates
+/// fall-to-death drops.
+pub const MAX_VERTICAL_AIR_RUN: i32 = 6;
+
 // ── Caves ────────────────────────────────────────────────────────────
 
 /// Inclusive range of cave systems rolled per fine region.
