@@ -18,8 +18,10 @@
 
 use crate::worldgen::tuning::*;
 use lru::LruCache;
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 // ── Region coordinate keys ────────────────────────────────────────────
 
@@ -261,43 +263,110 @@ pub fn bitset_set(bytes: &mut [u8], i: usize, v: bool) {
 
 // ── Cache infrastructure ──────────────────────────────────────────────
 
-/// LRU cache of fine regions. Shared via `Arc<Mutex<…>>` so concurrent
-/// chunk jobs can hit it.
-pub type FineCache = Arc<Mutex<LruCache<RegionCoord, Arc<FineRegion>>>>;
-pub type MacroCache = Arc<Mutex<LruCache<MacroRegionCoord, Arc<MacroRegion>>>>;
+/// LRU cache of fine regions. Shared so concurrent chunk jobs can hit it.
+pub type FineCache = Arc<BuildCache<RegionCoord, FineRegion>>;
+pub type MacroCache = Arc<BuildCache<MacroRegionCoord, MacroRegion>>;
+
+pub struct BuildCache<K, V> {
+    inner: Mutex<BuildCacheInner<K, V>>,
+}
+
+struct BuildCacheInner<K, V> {
+    lru: LruCache<K, Arc<V>>,
+    in_flight: HashMap<K, Arc<InFlight<V>>>,
+}
+
+struct InFlight<V> {
+    state: Mutex<InFlightState<V>>,
+    ready: Condvar,
+}
+
+struct InFlightState<V> {
+    result: Option<Arc<V>>,
+    aborted: bool,
+}
+
+struct BuildClaim<'a, K, V>
+where
+    K: Copy + Eq + Hash,
+{
+    cache: &'a BuildCache<K, V>,
+    key: K,
+    slot: Arc<InFlight<V>>,
+    active: bool,
+}
+
+impl<K, V> BuildCache<K, V>
+where
+    K: Copy + Eq + Hash,
+{
+    fn new(cap: NonZeroUsize) -> Self {
+        Self {
+            inner: Mutex::new(BuildCacheInner {
+                lru: LruCache::new(cap),
+                in_flight: HashMap::new(),
+            }),
+        }
+    }
+
+    fn peek(&self, key: &K) -> Option<Arc<V>> {
+        self.inner
+            .lock()
+            .expect("region cache mutex poisoned")
+            .lru
+            .peek(key)
+            .cloned()
+    }
+}
+
+impl<K, V> Drop for BuildClaim<'_, K, V>
+where
+    K: Copy + Eq + Hash,
+{
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+
+        self.cache
+            .inner
+            .lock()
+            .expect("region cache mutex poisoned")
+            .in_flight
+            .remove(&self.key);
+
+        let mut state = self
+            .slot
+            .state
+            .lock()
+            .expect("region build state mutex poisoned");
+        state.aborted = true;
+        self.slot.ready.notify_all();
+    }
+}
 
 /// Build a fresh, capped fine LRU.
 pub fn fresh_fine_cache() -> FineCache {
-    Arc::new(Mutex::new(LruCache::new(
+    Arc::new(BuildCache::new(
         NonZeroUsize::new(FINE_CACHE_CAP).expect("FINE_CACHE_CAP must be > 0"),
-    )))
+    ))
 }
 
 /// Build a fresh, capped macro LRU.
 pub fn fresh_macro_cache() -> MacroCache {
-    Arc::new(Mutex::new(LruCache::new(
+    Arc::new(BuildCache::new(
         NonZeroUsize::new(MACRO_CACHE_CAP).expect("MACRO_CACHE_CAP must be > 0"),
-    )))
+    ))
 }
 
 /// Look up `coord` in `cache`; build it on miss. The build runs outside
-/// the lock so cache contention stays minimal. A duplicate-build race
-/// is accepted (two threads on the same cold key both build; the build
-/// is pure so both produce identical output and the second insert
-/// overwrites the first benignly).
+/// the lock, but only one worker builds a given cold key. Other workers
+/// wait for that result instead of rebuilding the same region.
 pub fn get_fine<F>(cache: &FineCache, coord: RegionCoord, build: F) -> Arc<FineRegion>
 where
     F: FnOnce() -> FineRegion,
 {
-    if let Some(r) = cache.lock().expect("fine cache mutex poisoned").get(&coord) {
-        return r.clone();
-    }
-    let region = Arc::new(build());
-    cache
-        .lock()
-        .expect("fine cache mutex poisoned")
-        .put(coord, region.clone());
-    region
+    get_or_build(cache, coord, build)
 }
 
 /// Look up `coord` in the fine cache **without building on miss**.
@@ -306,30 +375,91 @@ where
 /// so repeated peeks from the hydrology stitcher don't reshape the
 /// eviction order.
 pub fn peek_fine(cache: &FineCache, coord: RegionCoord) -> Option<Arc<FineRegion>> {
-    cache
-        .lock()
-        .expect("fine cache mutex poisoned")
-        .peek(&coord)
-        .cloned()
+    cache.peek(&coord)
 }
 
 pub fn get_macro<F>(cache: &MacroCache, coord: MacroRegionCoord, build: F) -> Arc<MacroRegion>
 where
     F: FnOnce() -> MacroRegion,
 {
-    if let Some(r) = cache
-        .lock()
-        .expect("macro cache mutex poisoned")
-        .get(&coord)
-    {
-        return r.clone();
+    get_or_build(cache, coord, build)
+}
+
+fn get_or_build<K, V, F>(cache: &Arc<BuildCache<K, V>>, key: K, build: F) -> Arc<V>
+where
+    K: Copy + Eq + Hash,
+    F: FnOnce() -> V,
+{
+    let mut build = Some(build);
+    loop {
+        let slot = {
+            let mut inner = cache.inner.lock().expect("region cache mutex poisoned");
+            if let Some(value) = inner.lru.get(&key) {
+                return value.clone();
+            }
+            if let Some(slot) = inner.in_flight.get(&key) {
+                Some(slot.clone())
+            } else {
+                let slot = Arc::new(InFlight {
+                    state: Mutex::new(InFlightState {
+                        result: None,
+                        aborted: false,
+                    }),
+                    ready: Condvar::new(),
+                });
+                inner.in_flight.insert(key, slot.clone());
+                None
+            }
+        };
+
+        if let Some(slot) = slot {
+            let mut state = slot
+                .state
+                .lock()
+                .expect("region build state mutex poisoned");
+            while state.result.is_none() && !state.aborted {
+                state = slot
+                    .ready
+                    .wait(state)
+                    .expect("region build state mutex poisoned");
+            }
+            if let Some(value) = &state.result {
+                return value.clone();
+            }
+            continue;
+        }
+
+        let slot = {
+            let inner = cache.inner.lock().expect("region cache mutex poisoned");
+            inner
+                .in_flight
+                .get(&key)
+                .expect("new in-flight region build must be registered")
+                .clone()
+        };
+        let mut claim = BuildClaim {
+            cache,
+            key,
+            slot: slot.clone(),
+            active: true,
+        };
+        let value = Arc::new(build.take().expect("region build closure consumed")());
+        {
+            let mut inner = cache.inner.lock().expect("region cache mutex poisoned");
+            inner.lru.put(key, value.clone());
+            inner.in_flight.remove(&key);
+        }
+        {
+            let mut state = slot
+                .state
+                .lock()
+                .expect("region build state mutex poisoned");
+            state.result = Some(value.clone());
+        }
+        claim.active = false;
+        slot.ready.notify_all();
+        return value;
     }
-    let region = Arc::new(build());
-    cache
-        .lock()
-        .expect("macro cache mutex poisoned")
-        .put(coord, region.clone());
-    region
 }
 
 /// Convenience: build a fine region for `coord` filled with PR 1
@@ -391,26 +521,18 @@ mod tests {
             let c = RegionCoord { x: i, z: 0 };
             let _ = get_fine(&cache, c, || build_fine_region_placeholder(c));
         }
-        let was_evicted = cache
-            .lock()
-            .unwrap()
-            .peek(&RegionCoord { x: 0, z: 0 })
-            .is_none();
+        let was_evicted = cache.peek(&RegionCoord { x: 0, z: 0 }).is_none();
         assert!(
             was_evicted,
             "expected the first-inserted entry to be evicted after CAP+1 inserts"
         );
         // And the most recent one should still be there.
-        assert!(
-            cache
-                .lock()
-                .unwrap()
-                .peek(&RegionCoord {
-                    x: FINE_CACHE_CAP as i32,
-                    z: 0
-                })
-                .is_some()
-        );
+        assert!(cache
+            .peek(&RegionCoord {
+                x: FINE_CACHE_CAP as i32,
+                z: 0
+            })
+            .is_some());
     }
 
     #[test]
@@ -428,10 +550,50 @@ mod tests {
         // peek_fine on cold key returns None and doesn't insert.
         let cold = RegionCoord { x: 999, z: 999 };
         assert!(peek_fine(&cache, cold).is_none());
-        assert!(
-            cache.lock().unwrap().peek(&cold).is_none(),
-            "peek must not insert"
-        );
+        assert!(cache.peek(&cold).is_none(), "peek must not insert");
+    }
+
+    #[test]
+    fn concurrent_lookup_builds_key_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Barrier;
+        use std::thread;
+        use std::time::Duration;
+
+        let cache = fresh_fine_cache();
+        let coord = RegionCoord { x: 7, z: 8 };
+        let starts = Arc::new(Barrier::new(8));
+        let builds = Arc::new(AtomicUsize::new(0));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let cache = cache.clone();
+                let starts = starts.clone();
+                let builds = builds.clone();
+                thread::spawn(move || {
+                    starts.wait();
+                    get_fine(&cache, coord, || {
+                        builds.fetch_add(1, Ordering::SeqCst);
+                        thread::sleep(Duration::from_millis(25));
+                        build_fine_region_placeholder(coord)
+                    })
+                })
+            })
+            .collect();
+
+        let first = handles
+            .into_iter()
+            .map(|h| h.join().expect("worker must not panic"))
+            .reduce(|a, b| {
+                assert!(Arc::ptr_eq(&a, &b));
+                a
+            })
+            .expect("at least one handle");
+
+        assert!(Arc::ptr_eq(
+            &first,
+            &peek_fine(&cache, coord).expect("region must be cached")
+        ));
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
     }
 
     #[test]

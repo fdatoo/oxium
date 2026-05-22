@@ -16,7 +16,7 @@
 //! between adjacent plates' base elevations (continental shelf taper)
 //! and to gate the mountain-ridge lift.
 
-use crate::worldgen::hash::{mix_range, mix_u32, mix_unit};
+use crate::worldgen::hash::{mix_range, mix_unit};
 use crate::worldgen::tuning::*;
 use glam::Vec2;
 

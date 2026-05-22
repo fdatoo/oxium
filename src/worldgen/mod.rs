@@ -52,7 +52,7 @@
 
 use crate::voxel::block::Block;
 use crate::voxel::chunk::DenseChunk;
-use crate::voxel::coords::{CHUNK_DIM_U, ChunkCoord, LocalPos};
+use crate::voxel::coords::{ChunkCoord, LocalPos, CHUNK_DIM_U};
 use crate::worldgen::tuning::{FINE_REGION_SIZE, MAX_TERRAIN_Y, TREE_RATE_TROPICAL};
 use glam::UVec3;
 use noise::{Fbm, MultiFractal, NoiseFn, Simplex};
@@ -95,8 +95,8 @@ pub use crate::worldgen::tuning::SEA_LEVEL;
 // below are imported into this module's scope for ergonomics.
 use crate::worldgen::tuning::{
     CAVE_BAND_MIDDLE, CAVE_BAND_SHALLOW, CAVE_FLOOR_Y, CAVE_SDF_INTENSITY, CAVE_SURFACE_BUFFER,
-    COLD_SNOW_MIN_ABOVE_SEA, MAX_VERTICAL_AIR_RUN, SNOW_LINE, SURFACE_BAND, SURFACE_SPREAD,
-    TREE_CELL_SIZE, TREE_MARGIN, TREE_RATE_FOREST, TREE_RATE_PLAINS,
+    MAX_VERTICAL_AIR_RUN, SNOW_LINE, SURFACE_BAND, SURFACE_SPREAD, TREE_CELL_SIZE, TREE_MARGIN,
+    TREE_RATE_FOREST, TREE_RATE_PLAINS,
 };
 
 /// Pre-built noise fields for one world seed.
@@ -424,8 +424,7 @@ impl Generator {
         // once (segment-first with AABB culling) and passes the
         // per-column result here. Other callers pass `None` and fall back
         // to the full per-column O(segments) path.
-        let carve = precomputed_carve
-            .unwrap_or_else(|| regions.valley_carve(wx, wz, self.seed));
+        let carve = precomputed_carve.unwrap_or_else(|| regions.valley_carve(wx, wz, self.seed));
         let height = (h_pre - carve).clamp((CAVE_FLOOR_Y + 8) as f32, MAX_TERRAIN_Y as f32) as i32;
 
         // PR 4: 6D climate sample + R-tree biome lookup with
@@ -461,6 +460,7 @@ impl Generator {
         let lake_rim = regions.lake_rim_at(wx, wz);
         ColumnData {
             height,
+            h_pre,
             is_cliff,
             desertness,
             biome,
@@ -1078,10 +1078,8 @@ impl Generator {
         // Key is `(cx, cy, cz) = (wx.div_euclid(CELL_X), wy.div_euclid(CELL_Y),
         // wz.div_euclid(CELL_Z))` — the same computation `three_nearest`
         // performs internally — so the cache is always coherent.
-        let mut nearest_cache: ahash::AHashMap<
-            (i32, i32, i32),
-            [aquifer::AquiferCell; 3],
-        > = ahash::AHashMap::new();
+        let mut nearest_cache: ahash::AHashMap<(i32, i32, i32), [aquifer::AquiferCell; 3]> =
+            ahash::AHashMap::new();
 
         // Precompute valley-carve depths for all 32×32 columns in one
         // segment-first pass. AABB culling means only columns actually
@@ -1089,29 +1087,31 @@ impl Generator {
         // This eliminates the O(1024 × N_segments) per-column call to
         // valley_carve, replacing it with O(N_segments × affected_columns).
         let valley_depth_grid = regions.valley_grid(origin.x, origin.z, self.seed);
+        let mut columns = Vec::with_capacity(dim * dim);
+        for z in 0..CHUNK_DIM_U {
+            for x in 0..CHUNK_DIM_U {
+                let wx = origin.x + x as i32;
+                let wz = origin.z + z as i32;
+                columns.push(self.column_data_with(
+                    wx,
+                    wz,
+                    &regions,
+                    Some(valley_depth_grid[z as usize][x as usize]),
+                ));
+            }
+        }
 
         for z in 0..CHUNK_DIM_U {
             for x in 0..CHUNK_DIM_U {
                 let wx = origin.x + x as i32;
                 let wz = origin.z + z as i32;
-                let col = self.column_data_with(
-                    wx,
-                    wz,
-                    &regions,
-                    Some(valley_depth_grid[z as usize][x as usize]),
-                );
+                let col = columns[z as usize * dim + x as usize];
                 let height = col.height;
                 let lake_rim = col.lake_rim;
                 // h_pre is the pre-carve surface Y, used by the tera
                 // surface-suppression depth term. Computed once per
                 // XZ column so the inner y-loop pays no noise cost.
-                let surface_y = self.heightmap.h_pre(
-                    self.seed,
-                    wx as f32,
-                    wz as f32,
-                    &cfg.climate,
-                    &cfg.density,
-                );
+                let surface_y = col.h_pre;
 
                 // PR A: density-based top-down scan. The "surface" is
                 // wherever density transitions from negative (air) to
@@ -1122,7 +1122,6 @@ impl Generator {
                 //     into solid after the most recent air→solid
                 //     transition (so depth=0 is the topmost solid
                 //     block of an exposed surface).
-                let h_target = height as f32;
                 // PR 5: seed `depth_below_surface` from the voxel one
                 // above the chunk's top via the cell evaluator's
                 // *non-interpolated* boundary corner. The chunk
@@ -1289,7 +1288,8 @@ impl Generator {
                         let nearest = nearest_cache
                             .entry(cell_key)
                             .or_insert_with(|| self.aquifer.three_nearest(wx, wy, wz));
-                        self.aquifer.substance_with_nearest(wx, wy, wz, composed, nearest)
+                        self.aquifer
+                            .substance_with_nearest(wx, wy, wz, composed, nearest)
                     };
 
                     // Yield to the ocean / lake surface flood for
@@ -1471,12 +1471,7 @@ impl Generator {
                 for z in 0..dim {
                     let wx = chunk_origin.x + x as i32;
                     let wz = chunk_origin.z + z as i32;
-                    let col = self.column_data_with(
-                        wx,
-                        wz,
-                        &regions,
-                        Some(valley_depth_grid[z as usize][x as usize]),
-                    );
+                    let col = columns[z as usize * dim as usize + x as usize];
                     let h_target = col.height;
 
                     // Is h_target inside this chunk's Y range?
@@ -1603,14 +1598,14 @@ impl Generator {
         // (whose trunks live in a neighbouring chunk but whose leaves
         // overlap this one) are placed too, because we scan every
         // cell in a `TREE_MARGIN`-block ring around the chunk.
-        self.add_trees(coord, out);
+        self.add_trees(coord, out, &regions);
     }
 
     /// Place all trees whose blocks could overlap `coord`'s chunk
     /// volume. Each tree is deterministic in `(seed, cell_x, cell_z)`,
     /// so every chunk that touches the tree writes the same blocks —
     /// no double-placement and no missing slices at chunk boundaries.
-    fn add_trees(&self, coord: ChunkCoord, out: &mut DenseChunk) {
+    fn add_trees(&self, coord: ChunkCoord, out: &mut DenseChunk, regions: &ChunkRegions) {
         let chunk_origin = coord.origin().0;
         let cmin = chunk_origin;
         let cmax = chunk_origin + glam::IVec3::splat(crate::voxel::coords::CHUNK_DIM);
@@ -1626,7 +1621,7 @@ impl Generator {
         let cell_zmax = (zmax - 1).div_euclid(TREE_CELL_SIZE);
         for cell_x in cell_xmin..=cell_xmax {
             for cell_z in cell_zmin..=cell_zmax {
-                if let Some(tree) = self.tree_in_cell(cell_x, cell_z) {
+                if let Some(tree) = self.tree_in_cell_with_regions(cell_x, cell_z, regions) {
                     self.stamp_tree(tree, coord, out);
                 }
             }
@@ -1636,10 +1631,15 @@ impl Generator {
     /// Return the tree (if any) belonging to the `(cell_x, cell_z)` tree
     /// cell. Determined entirely by `(seed, cell coords)` so adjacent
     /// chunks agree on which trees exist.
-    fn tree_in_cell(&self, cell_x: i32, cell_z: i32) -> Option<Tree> {
+    fn tree_in_cell_with_regions(
+        &self,
+        cell_x: i32,
+        cell_z: i32,
+        regions: &ChunkRegions,
+    ) -> Option<Tree> {
         let wx = cell_x * TREE_CELL_SIZE + (tree_hash(self.seed, cell_x, cell_z, 1) % 6) as i32 + 1;
         let wz = cell_z * TREE_CELL_SIZE + (tree_hash(self.seed, cell_x, cell_z, 2) % 6) as i32 + 1;
-        let col = self.column_data(wx, wz);
+        let col = self.column_data_with(wx, wz, regions, None);
 
         // Trees don't grow on cliffs (bare stone), above the alpine
         // snow line, or where the column is submerged under a lake.
@@ -1786,6 +1786,9 @@ impl Generator {
 pub struct ColumnData {
     /// Surface height in world Y, post-carve, clamped.
     pub height: i32,
+    /// Pre-carve surface height. Used by the terasology ambient carver's
+    /// surface suppression.
+    pub h_pre: f32,
     /// True if the column's `h_pre` slope exceeds `CLIFF_SLOPE_THRESH`
     /// AND its elevation is at/above `CLIFF_MIN_HEIGHT`. Cliff
     /// columns expose stone faces directly, skipping the dirt cap.
@@ -1830,11 +1833,6 @@ pub enum Biome {
 }
 
 impl Biome {
-    /// True when the biome should cap the surface column with Snow.
-    fn snow_capped(self) -> bool {
-        matches!(self, Biome::Tundra | Biome::SnowyForest)
-    }
-
     /// Probability (0..100) that a `TREE_CELL_SIZE × TREE_CELL_SIZE`
     /// patch in this biome rolls a tree. `None` for biomes that
     /// don't host trees at all.
@@ -2471,7 +2469,7 @@ mod tests {
         // where `col.height` is comfortably between the cold-snow
         // floor and the snow line so the actual surface lands in
         // the cold-biome cap band.
-        let min_h = SEA_LEVEL + COLD_SNOW_MIN_ABOVE_SEA + 6;
+        let min_h = SEA_LEVEL + crate::worldgen::tuning::COLD_SNOW_MIN_ABOVE_SEA + 6;
         let max_h = SNOW_LINE - 6;
         let mut found: Option<(i32, i32)> = None;
         'outer: for wz in (-1024..1024).step_by(8) {
