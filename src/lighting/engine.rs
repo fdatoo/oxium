@@ -189,6 +189,73 @@ enum Channel {
     BlockRgb(usize),  // 0=R, 1=G, 2=B
 }
 
+/// Per-tick decompress cache. The engine touches each chunk at most a few
+/// hundred times per tick; without caching, each touch decompresses the
+/// chunk (128 KB alloc) and discards the result. With the cache, each
+/// chunk is decompressed at most once per tick into a `DenseChunk`,
+/// mutated many times directly via array indexing, and recompressed at
+/// `flush` time only if it was actually written.
+///
+/// Caller pattern (engine `tick_with`):
+/// 1. Construct a fresh `TickCache::default()` at tick start.
+/// 2. Pass `&mut cache` and `&chunks` (read-only) to drain helpers.
+/// 3. Helpers call `cache.dense(&chunks, coord)` to get a mutable
+///    `DenseChunk`; cache misses trigger one decompress.
+/// 4. Helpers call `cache.mark_written(coord)` after mutating to
+///    indicate the chunk needs recompression at flush.
+/// 5. Call `cache.flush(&mut chunks)` at tick end — recompresses every
+///    written chunk into its `Arc<PalettedChunk>` and sets
+///    `meta.light_gpu_dirty = true`.
+#[derive(Default)]
+pub(crate) struct TickCache {
+    inner: std::collections::HashMap<crate::voxel::coords::ChunkCoord, crate::voxel::chunk::DenseChunk>,
+    written: std::collections::HashSet<crate::voxel::coords::ChunkCoord>,
+}
+
+impl TickCache {
+    /// Borrow the decompressed `DenseChunk` for `coord`. On cache miss,
+    /// decompresses the chunk's `Arc<PalettedChunk>` once and inserts.
+    /// Returns `None` if the chunk is `Pending` or not loaded.
+    pub(crate) fn dense<'a>(
+        &'a mut self,
+        chunks: &std::collections::HashMap<
+            crate::voxel::coords::ChunkCoord,
+            crate::voxel::world::ChunkSlot,
+        >,
+        coord: crate::voxel::coords::ChunkCoord,
+    ) -> Option<&'a mut crate::voxel::chunk::DenseChunk> {
+        use crate::voxel::world::ChunkSlot;
+        if !self.inner.contains_key(&coord) {
+            let ChunkSlot::Stored { data, .. } = chunks.get(&coord)? else { return None };
+            self.inner.insert(coord, data.decompress());
+        }
+        self.inner.get_mut(&coord)
+    }
+
+    /// Mark `coord` as needing recompression at flush.
+    pub(crate) fn mark_written(&mut self, coord: crate::voxel::coords::ChunkCoord) {
+        self.written.insert(coord);
+    }
+
+    /// Recompress every written chunk into its slot's `Arc<PalettedChunk>`
+    /// and set `meta.light_gpu_dirty = true`. Consumes the cache.
+    pub(crate) fn flush(
+        self,
+        chunks: &mut std::collections::HashMap<
+            crate::voxel::coords::ChunkCoord,
+            crate::voxel::world::ChunkSlot,
+        >,
+    ) {
+        use crate::voxel::world::ChunkSlot;
+        for coord in self.written {
+            let Some(ChunkSlot::Stored { data, meta }) = chunks.get_mut(&coord) else { continue };
+            let Some(dense) = self.inner.get(&coord) else { continue };
+            *data = std::sync::Arc::new(crate::voxel::chunk::PalettedChunk::compress(dense));
+            meta.light_gpu_dirty = true;
+        }
+    }
+}
+
 /// Phase A. Drains `engine.pending_block_changes` and, for each entry,
 /// updates the chunk's `sky_sources` heightmap if opacity changed, then
 /// either enqueues increase ops (new emission, new sky-source exposure)
@@ -810,5 +877,97 @@ mod tests {
             "cell below new stone should be shaded; got {}",
             dense.sky_light[below_idx],
         );
+    }
+
+    #[test]
+    fn tick_cache_decompresses_each_chunk_at_most_once() {
+        use crate::voxel::block::BlockRegistry;
+        use crate::voxel::chunk::{DenseChunk, PalettedChunk};
+        use crate::voxel::coords::{ChunkCoord, LocalPos};
+        use crate::voxel::world::ChunkSlot;
+        use glam::{IVec3, UVec3};
+        use std::collections::HashMap;
+
+        let _registry = BlockRegistry::new();
+        let mut dense = DenseChunk::empty();
+        dense.sky_light[0] = 9;
+        let coord = ChunkCoord(IVec3::ZERO);
+        let mut chunks: HashMap<ChunkCoord, ChunkSlot> = HashMap::new();
+        chunks.insert(coord, ChunkSlot::Stored {
+            data: std::sync::Arc::new(PalettedChunk::compress(&dense)),
+            meta: Default::default(),
+        });
+
+        let mut cache = TickCache::default();
+        // First access: should decompress and return the data.
+        {
+            let d = cache.dense(&chunks, coord).expect("loaded chunk");
+            assert_eq!(d.sky_light[0], 9);
+            d.sky_light[0] = 12; // mutate
+        }
+        cache.mark_written(coord);
+        // Second access: cache hit. Mutation is visible.
+        {
+            let d = cache.dense(&chunks, coord).expect("loaded chunk");
+            assert_eq!(d.sky_light[0], 12, "second access should see prior write");
+            assert_eq!(d.sky_light[LocalPos(UVec3::new(1, 0, 0)).to_index()], 0);
+        }
+    }
+
+    #[test]
+    fn tick_cache_flush_writes_back_and_marks_gpu_dirty() {
+        use crate::voxel::chunk::{DenseChunk, PalettedChunk};
+        use crate::voxel::coords::ChunkCoord;
+        use crate::voxel::world::ChunkSlot;
+        use glam::IVec3;
+        use std::collections::HashMap;
+
+        let dense = DenseChunk::empty();
+        let coord = ChunkCoord(IVec3::ZERO);
+        let mut chunks: HashMap<ChunkCoord, ChunkSlot> = HashMap::new();
+        chunks.insert(coord, ChunkSlot::Stored {
+            data: std::sync::Arc::new(PalettedChunk::compress(&dense)),
+            meta: Default::default(),
+        });
+
+        let mut cache = TickCache::default();
+        {
+            let d = cache.dense(&chunks, coord).expect("loaded chunk");
+            d.sky_light[42] = 11;
+        }
+        cache.mark_written(coord);
+        cache.flush(&mut chunks);
+
+        let ChunkSlot::Stored { data, meta } = chunks.get(&coord).unwrap() else { panic!() };
+        assert_eq!(data.sky_light_at(42), 11);
+        assert!(meta.light_gpu_dirty, "flush must mark chunk light_gpu_dirty");
+    }
+
+    #[test]
+    fn tick_cache_flush_skips_unwritten_chunks() {
+        use crate::voxel::chunk::{DenseChunk, PalettedChunk};
+        use crate::voxel::coords::ChunkCoord;
+        use crate::voxel::world::ChunkSlot;
+        use glam::IVec3;
+        use std::collections::HashMap;
+
+        let dense = DenseChunk::empty();
+        let coord = ChunkCoord(IVec3::ZERO);
+        let mut chunks: HashMap<ChunkCoord, ChunkSlot> = HashMap::new();
+        chunks.insert(coord, ChunkSlot::Stored {
+            data: std::sync::Arc::new(PalettedChunk::compress(&dense)),
+            meta: Default::default(),
+        });
+
+        let mut cache = TickCache::default();
+        {
+            let d = cache.dense(&chunks, coord).expect("loaded chunk");
+            let _read = d.sky_light[0];
+        }
+        // Note: NO mark_written call.
+        cache.flush(&mut chunks);
+
+        let ChunkSlot::Stored { meta, .. } = chunks.get(&coord).unwrap() else { panic!() };
+        assert!(!meta.light_gpu_dirty, "flush must not mark untouched chunks dirty");
     }
 }
