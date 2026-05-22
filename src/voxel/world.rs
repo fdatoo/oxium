@@ -279,6 +279,10 @@ impl World {
         // we'd batch and decompress once, but the player can only edit
         // one block per click so it's fine.
         let mut dense = data.decompress();
+        let old_block = dense.get(local);
+        if old_block == new_block {
+            return vec![];
+        }
         dense.set(local, new_block);
         *data = std::sync::Arc::new(PalettedChunk::compress(&dense));
 
@@ -293,6 +297,13 @@ impl World {
         // be the one that lands.
         meta.mesh_version = meta.mesh_version.wrapping_add(1);
         dirty.push(chunk_coord);
+
+        // Notify the graph engine. Engine tick (next frame) processes
+        // the change. Today's BFS path (dirty.light above) continues
+        // to run too — it's still authoritative until Task 9 flips
+        // the GPU upload source. After the cutover, the engine is the
+        // sole writer.
+        self.light_engine.enqueue_block_change(pos, old_block, new_block);
 
         // Border edits propagate to the neighbour on that side: its
         // boundary face may have changed visibility, so it needs a
