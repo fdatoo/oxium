@@ -94,7 +94,7 @@ pub use crate::worldgen::tuning::SEA_LEVEL;
 // All other tuning constants live in `worldgen::tuning`. The names
 // below are imported into this module's scope for ergonomics.
 use crate::worldgen::tuning::{
-    CAVE_FLOOR_Y, CAVE_SDF_INTENSITY,
+    CAVE_BAND_MIDDLE, CAVE_BAND_SHALLOW, CAVE_FLOOR_Y, CAVE_SDF_INTENSITY,
     CAVE_SURFACE_BUFFER, COLD_SNOW_MIN_ABOVE_SEA,
     MAX_VERTICAL_AIR_RUN,
     SNOW_LINE, SURFACE_BAND, SURFACE_SPREAD, TREE_CELL_SIZE, TREE_MARGIN,
@@ -793,6 +793,31 @@ impl Generator {
                 caves::entrance_sdf(wx, wy, wz, &cave_systems),
             );
         }
+        // Identify which cave system (if any) the probe voxel sits inside,
+        // for the probe panel's style / band display rows.
+        let (probe_cave_style, probe_cave_band) = cave_systems
+            .iter()
+            .find(|sys| caves::cave_sdf(wx, wy, wz, &[sys]) > 0.0)
+            .map(|sys| {
+                let style_name: &'static str = match sys.style {
+                    caves::CaveStyle::Cathedral => "Cathedral",
+                    caves::CaveStyle::Warren    => "Warren",
+                    caves::CaveStyle::Slot      => "Slot",
+                    caves::CaveStyle::Sump      => "Sump",
+                    caves::CaveStyle::Karst     => "Karst",
+                };
+                let cy = (sys.bb_min.y + sys.bb_max.y) / 2;
+                let band: &'static str = if cy >= CAVE_BAND_SHALLOW.0 {
+                    "shallow"
+                } else if cy >= CAVE_BAND_MIDDLE.0 {
+                    "middle"
+                } else {
+                    "deep"
+                };
+                (Some(style_name), Some(band))
+            })
+            .unwrap_or((None, None));
+
         // Noise carvers (cheese) — same gate. `cheese_contribution`
         // also takes `raw_density` (gates a density-aware cap).
         let cheese = if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
@@ -959,6 +984,8 @@ impl Generator {
             pillar,
             final_density,
             block,
+            cave_style: probe_cave_style,
+            cave_band: probe_cave_band,
         }
     }
 
@@ -1112,10 +1139,12 @@ impl Generator {
                     //
                     // Layers, in order applied:
                     //   1. Graph cave SDF        (negated → signed)
-                    //   2. Graph entrance SDF    (negated → signed)
-                    //   3. Wormhole carve         (negative const)
-                    //   4. Spaghetti + roughness (signed)
-                    //   5. Cheese                (signed, surface-suppressed)
+                    //   2. Graph trunks SDF      (negated → signed)
+                    //   3. Graph entrance SDF    (negated → signed)
+                    //   4. Cheese                (signed, surface-suppressed)
+                    //   5. Terasology ambient    (signed, depth-driven 2-noise)
+                    //   6. MC carver mask        (hard carve)
+                    //   7. Pillars               (positive, refill stone)
                     //
                     // Spaghetti + cheese only run above the
                     // `underground_density_threshold` — below that

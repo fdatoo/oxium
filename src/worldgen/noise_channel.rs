@@ -14,7 +14,7 @@
 //! tuning knobs live in `assets/worldgen/default.ron`.
 
 use crate::worldgen::config::ChannelParams;
-use noise::{Fbm, MultiFractal, NoiseFn, Simplex};
+use noise::{Fbm, MultiFractal, Simplex};
 
 /// Build an `Fbm<Simplex>` from a [`ChannelParams`] and a seed salt.
 ///

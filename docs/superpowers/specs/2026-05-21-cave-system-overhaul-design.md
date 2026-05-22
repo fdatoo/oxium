@@ -1,6 +1,6 @@
 # Cave System Overhaul — Design
 
-**Status:** design ready for review
+**Status:** implemented (cave-overhaul-pr1 through cave-overhaul-pr4 tags) on `worktree-cave-overhaul` branch
 **Builds on:** [2026-05-19-minecraft-worldgen-research.md](2026-05-19-minecraft-worldgen-research.md) (specifically Q3 Option C — keep graph caves + add noise carvers)
 **Replaces:** the disabled graph-cave system + the deprecated spaghetti / wormhole / surface-entrance noise carvers
 
