@@ -17,7 +17,10 @@
 use bytemuck::{Pod, Zeroable};
 
 use crate::render::atlas::{ATLAS_PX, TILE_PX};
-use crate::render::font::{ATLAS_H as FONT_ATLAS_H, ATLAS_W as FONT_ATLAS_W, CELL_W as FONT_CELL_W, GLYPH_H as FONT_GLYPH_H, GLYPH_W as FONT_GLYPH_W};
+use crate::render::font::{
+    ATLAS_H as FONT_ATLAS_H, ATLAS_W as FONT_ATLAS_W, CELL_W as FONT_CELL_W,
+    GLYPH_H as FONT_GLYPH_H, GLYPH_W as FONT_GLYPH_W,
+};
 
 /// Extra worldgen + camera values shown in the debug overlay.
 pub struct WorldDebug<'a> {
@@ -115,12 +118,29 @@ impl HudBatch {
     ) {
         let base = self.vertices.len() as u32;
         self.vertices.extend_from_slice(&[
-            HudVertex { pos_px: [x, y], uv: [uv_min[0], uv_min[1]], color },
-            HudVertex { pos_px: [x + w, y], uv: [uv_max[0], uv_min[1]], color },
-            HudVertex { pos_px: [x + w, y + h], uv: [uv_max[0], uv_max[1]], color },
-            HudVertex { pos_px: [x, y + h], uv: [uv_min[0], uv_max[1]], color },
+            HudVertex {
+                pos_px: [x, y],
+                uv: [uv_min[0], uv_min[1]],
+                color,
+            },
+            HudVertex {
+                pos_px: [x + w, y],
+                uv: [uv_max[0], uv_min[1]],
+                color,
+            },
+            HudVertex {
+                pos_px: [x + w, y + h],
+                uv: [uv_max[0], uv_max[1]],
+                color,
+            },
+            HudVertex {
+                pos_px: [x, y + h],
+                uv: [uv_min[0], uv_max[1]],
+                color,
+            },
         ]);
-        self.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
 
     /// Append a solid (non-textured) coloured rectangle. Convenience
@@ -164,15 +184,8 @@ impl HudFrame {
             // glyph height (= cell height in the v1 layout).
             let v0 = 0.0;
             let v1 = FONT_GLYPH_H as f32 / atlas_h;
-            self.text.push_quad(
-                x,
-                y,
-                glyph_w_px,
-                glyph_h_px,
-                [u0, v0],
-                [u1, v1],
-                color,
-            );
+            self.text
+                .push_quad(x, y, glyph_w_px, glyph_h_px, [u0, v0], [u1, v1], color);
             x += cell_w_px;
         }
         x
@@ -190,7 +203,8 @@ impl HudFrame {
         let v0 = row * tile_uv;
         let u1 = u0 + tile_uv;
         let v1 = v0 + tile_uv;
-        self.icons.push_quad(x, y, size, size, [u0, v0], [u1, v1], tint);
+        self.icons
+            .push_quad(x, y, size, size, [u0, v0], [u1, v1], tint);
     }
 }
 
@@ -243,13 +257,12 @@ pub fn build_hud(
 
     let fps_str = format!("FPS: {:.0}", fps);
     let xyz_str = format!("XYZ: {:.1}  {:.1}  {:.1}", eye.x, eye.y, eye.z);
-    // Perf line: live counters for the debug HUD. "LQ" = light
-    // queue depth (chunks waiting for the relight pump); steady
-    // non-zero means cascade isn't terminating. "CH" = chunk meshes
-    // currently held by the renderer.
+    // Perf line: live counters for the debug HUD. "LO" = light-engine
+    // op queue depth entering this frame; large during initial stream-in,
+    // approaches zero as lighting converges. "CH" = chunk mesh count.
     let perf_str = format!(
-        "LQ: {} LD: {} PE: {} CH: {} DC: {} WMS: {:.1}",
-        perf.light_queue,
+        "LO: {} LD: {} PE: {} CH: {} DC: {} WMS: {:.1}",
+        perf.light_ops_pending,
         perf.chunks_loaded,
         perf.chunks_pending,
         perf.chunks_rendered,
@@ -266,7 +279,10 @@ pub fn build_hud(
         let cardinal = yaw_to_cardinal(d.yaw);
         let p = d.probe;
         let at_eye = d.sky.at_eye.map_or("-".to_string(), |v| format!("{v:X}"));
-        let above = d.sky.above_bottom.map_or("-".to_string(), |v| format!("{v:X}"));
+        let above = d
+            .sky
+            .above_bottom
+            .map_or("-".to_string(), |v| format!("{v:X}"));
         let col = d.sky.column_hex.as_deref().unwrap_or("-");
         (
             format!(
@@ -283,8 +299,7 @@ pub fn build_hud(
             ),
             format!(
                 "SKY[{},{},{}] eye={}  +Y0={}  col={}",
-                d.sky.eye_chunk.x, d.sky.eye_chunk.y, d.sky.eye_chunk.z,
-                at_eye, above, col,
+                d.sky.eye_chunk.x, d.sky.eye_chunk.y, d.sky.eye_chunk.z, at_eye, above, col,
             ),
         )
     } else {
@@ -362,7 +377,9 @@ pub fn build_hud(
                 cell + pad * 2.0,
                 [255, 255, 255, 255],
             );
-            frame.icons.push_rect(x, bar_y, cell, cell, [40, 40, 40, 200]);
+            frame
+                .icons
+                .push_rect(x, bar_y, cell, cell, [40, 40, 40, 200]);
         }
         if let Some(block) = slot {
             let info = registry.info(*block);

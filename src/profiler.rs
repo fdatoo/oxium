@@ -36,7 +36,7 @@ pub struct FrameCounters {
     pub fps: f32,
     pub work_ms: f32,
     pub draw_calls: u32,
-    pub light_queue: u32,
+    pub light_ops: u32,
     pub chunks_rendered: u32,
     /// Chunks currently in `ChunkSlot::Stored` — gen completed and
     /// `world.data` is populated. Compared against `chunks_rendered`
@@ -129,7 +129,7 @@ impl Profiler {
         if !*self.header_written.borrow() {
             // Header: counters first, then span columns.
             let mut header = String::from(
-                "frame_id,t_session_ms,fps,work_ms,draw_calls,light_queue,chunks_rendered,chunks_loaded,chunks_pending,edits",
+                "frame_id,t_session_ms,fps,work_ms,draw_calls,light_ops,chunks_rendered,chunks_loaded,chunks_pending,edits",
             );
             for c in &cols_snapshot {
                 header.push(',');
@@ -148,7 +148,7 @@ impl Profiler {
             counters.fps,
             counters.work_ms,
             counters.draw_calls,
-            counters.light_queue,
+            counters.light_ops,
             counters.chunks_rendered,
             counters.chunks_loaded,
             counters.chunks_pending,
