@@ -325,6 +325,7 @@ pub fn drain_persistence(
             PersistResult::Loaded { coord, data } => match data {
                 Some(data) => {
                     world.insert(coord, data);
+                    world.on_chunk_loaded(coord);
                     // Mark `dirty.light = true` on the just-loaded
                     // chunk. Saved chunks can carry stale
                     // sky_light / block_light values when an

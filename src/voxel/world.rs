@@ -116,8 +116,10 @@ impl World {
     }
 
     /// Engine entry point for "a chunk just installed". Called from
-    /// the `JobResult::Generated` and `JobResult::LoadedFromDisk`
-    /// handlers in `mesh_upload`. Enqueues every sky-source cell and
+    /// `mesh_upload::drain_jobs` (`JobResult::Generated`,
+    /// `JobResult::LoadedFromDisk`) and
+    /// `mesh_upload::drain_persistence` (`PersistResult::Loaded`).
+    /// Enqueues every sky-source cell and
     /// every emissive block in the chunk as increase ops, plus each
     /// neighbour's boundary cells (so the engine can spread our
     /// freshly-loaded chunk's light across the seam without a
