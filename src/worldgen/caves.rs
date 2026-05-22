@@ -594,10 +594,13 @@ fn build_system(
         ) as i32;
         // 1. Sinkhole.
         if surface_h - cwy_top <= SINKHOLE_DEPTH_MAX && surface_h - cwy_top >= -2 {
+            // Extend the shaft top by SURFACE_BAND so it carves through any
+            // 3D-density bumps above h_pre — otherwise those bumps become
+            // floating terrain islands above the entrance opening.
             entrances.push(Entrance {
                 chamber_idx: ci as u32,
                 kind: EntranceKind::Sinkhole,
-                surface: IVec3::new(cwx, surface_h, cwz),
+                surface: IVec3::new(cwx, surface_h + SURFACE_BAND as i32, cwz),
             });
             continue;
         }
@@ -631,7 +634,7 @@ fn build_system(
             entrances.push(Entrance {
                 chamber_idx: ci as u32,
                 kind: EntranceKind::Skylight,
-                surface: IVec3::new(cwx, surface_h, cwz),
+                surface: IVec3::new(cwx, surface_h + SURFACE_BAND as i32, cwz),
             });
         }
     }

@@ -778,8 +778,8 @@ impl Generator {
         // --- Cave contributions (matching fill_chunk gate logic) ---
         let approx_depth = height - wy;
 
-        // Graph-cave SDF + entrance SDF (gated by CAVE_SURFACE_BUFFER + CAVE_FLOOR_Y
-        // upper bound so chambers never carve above h_target).
+        // Graph-cave SDF + entrance SDF. Chambers/trunks gated at wy <= height;
+        // entrance SDF extended by SURFACE_BAND to match fill_chunk logic.
         let mut cave_sdf_val = 0.0_f32;
         if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y
             && wy <= height
@@ -792,6 +792,10 @@ impl Generator {
                     caves::trunks_sdf(wx, wy, wz, &cave_systems, self.seed, cfg.cave.trunk_r, cfg.cave.trunk_prob),
                 );
             }
+        }
+        if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y
+            && wy <= height + SURFACE_BAND
+        {
             cave_sdf_val = cave_sdf_val.max(
                 caves::entrance_sdf(wx, wy, wz, &cave_systems),
             );
@@ -1176,6 +1180,14 @@ impl Generator {
                                 composed = caves::smin(composed, -trunk_sdf, cfg.cave.smin_k);
                             }
                         }
+                    }
+                    // Entrance SDF (sinkholes, skylights, cliff mouths) gets its
+                    // own gate extended by SURFACE_BAND so the shaft carves through
+                    // any 3D-density bump above h_pre and doesn't leave floating
+                    // terrain islands over the entrance opening.
+                    if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y
+                        && wy <= height + SURFACE_BAND
+                    {
                         let ent = caves::entrance_sdf(wx, wy, wz, &cave_systems);
                         if ent > 0.0 {
                             composed = caves::smin(composed, -ent, cfg.cave.smin_k);
@@ -2038,9 +2050,9 @@ mod tests {
     /// future runs catch unintentional behavioural drift.
     #[test]
     fn golden_seed42_chunk_0_2_0() {
-        // Rebaselined 2026-05-21: final cave overhaul state (PR4.1 smin
-        // composition + PR4.3 surface block fixer changed density).
-        const GOLDEN_42_002: u64 = 0xA6F23A0676979F87;
+        // Rebaselined 2026-05-22: entrance shafts now extend by SURFACE_BAND
+        // to clear 3D-density bumps above h_pre (floating-island fix).
+        const GOLDEN_42_002: u64 = 0x5DF376B58D1E2DE2;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);
