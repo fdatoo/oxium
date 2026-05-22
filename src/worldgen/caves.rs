@@ -1278,6 +1278,16 @@ pub fn pillar_contribution(
     cfg.pillar_intensity * depth
 }
 
+/// Polynomial smooth-min — pulls the result below `min(a, b)` by up to
+/// `k/4` when `|a - b| < k`. Used to merge cave SDFs near layer boundaries
+/// so close-but-not-touching pockets connect into one volume.
+#[inline]
+pub fn smin(a: f32, b: f32, k: f32) -> f32 {
+    if k <= 0.0 { return a.min(b); }
+    let h = ((k - (a - b).abs()).max(0.0)) / k;
+    a.min(b) - h * h * k * 0.25
+}
+
 /// Terasology-style depth-driven 2-noise cave carver.
 ///
 /// Inspired by `org.terasology.caves.CaveFacetProvider`. Two independent
@@ -1539,6 +1549,26 @@ fn corner_index(cx: usize, cy: usize, cz: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn smin_extremes() {
+        // k=0 reduces to ordinary min
+        assert_eq!(smin(0.5, 0.8, 0.0), 0.5);
+        assert_eq!(smin(0.8, 0.5, 0.0), 0.5);
+        // smin(0, 0, k) pulls below min by k/4 (polynomial peak)
+        let v = smin(0.0, 0.0, 1.0);
+        assert!((v + 0.25).abs() < 1e-5, "smin(0,0,1) should be -0.25, got {v}");
+        // smin(a, b, k) <= min(a, b) for all k >= 0
+        for k in [0.0, 0.5, 1.5, 3.0] {
+            for a in [-0.5, 0.0, 0.5, 2.0] {
+                for b in [-0.5, 0.0, 0.5, 2.0] {
+                    let s = smin(a, b, k);
+                    assert!(s <= a.min(b) + 1e-5,
+                        "smin({a},{b},{k}) = {s} > min");
+                }
+            }
+        }
+    }
 
     #[test]
     fn vertical_connector_connects_adjacent_band_systems() {

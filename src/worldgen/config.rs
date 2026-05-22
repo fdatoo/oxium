@@ -179,6 +179,9 @@ pub struct CaveConfig {
     pub trunk_prob: f32,
     /// Cross-region trunk radius.
     pub trunk_r: f32,
+    /// Smooth-min radius for cave layer joins. 0.0 = strict min().
+    /// Default 1.2 merges nearly-touching pockets (within ~1.2 in SDF units).
+    pub smin_k: f32,
 }
 
 /// PR 4 biome lookup config. The 6 existing biomes (Tundra,

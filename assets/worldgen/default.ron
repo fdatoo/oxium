@@ -424,6 +424,7 @@
         vertical_connector_r: 3.4,
         trunk_prob: 0.38,
         trunk_r: 3.4,
+        smin_k: 1.2,
     ),
 
     // ── Aquifer system (PR 7) ────────────────────────────────────────
