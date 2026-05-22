@@ -65,6 +65,18 @@ pub enum RgbChannel {
     B = 2,
 }
 
+impl From<RgbChannel> for usize {
+    fn from(c: RgbChannel) -> usize {
+        c as u8 as usize
+    }
+}
+
+impl RgbChannel {
+    /// All three channels in canonical order (R, G, B). Used by the
+    /// tick loop to iterate channels uniformly.
+    pub const ALL: [RgbChannel; 3] = [RgbChannel::R, RgbChannel::G, RgbChannel::B];
+}
+
 impl LightEngine {
     /// True iff every channel reports `is_idle`.
     pub fn is_idle(&self) -> bool {
@@ -112,5 +124,27 @@ mod tests {
         let mut e = LightEngine::default();
         e.tick(10_000);
         assert!(e.is_idle(), "tick on idle engine must remain idle");
+    }
+
+    #[test]
+    fn rgb_channel_into_usize_uses_discriminant() {
+        assert_eq!(usize::from(RgbChannel::R), 0);
+        assert_eq!(usize::from(RgbChannel::G), 1);
+        assert_eq!(usize::from(RgbChannel::B), 2);
+    }
+
+    #[test]
+    fn rgb_channel_all_lists_three_in_order() {
+        assert_eq!(RgbChannel::ALL, [RgbChannel::R, RgbChannel::G, RgbChannel::B]);
+        assert_eq!(RgbChannel::ALL.len(), 3);
+    }
+
+    #[test]
+    fn rgb_channel_indexes_into_block_rgb_array() {
+        let e = LightEngine::default();
+        // The whole point: e.block_rgb[ch.into()] should work for any ch.
+        for ch in RgbChannel::ALL {
+            assert!(e.block_rgb[usize::from(ch)].is_idle());
+        }
     }
 }
