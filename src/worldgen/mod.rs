@@ -778,9 +778,12 @@ impl Generator {
         // --- Cave contributions (matching fill_chunk gate logic) ---
         let approx_depth = height - wy;
 
-        // Graph-cave SDF + entrance SDF (gated by CAVE_SURFACE_BUFFER + CAVE_FLOOR_Y).
+        // Graph-cave SDF + entrance SDF (gated by CAVE_SURFACE_BUFFER + CAVE_FLOOR_Y
+        // + SURFACE_BAND upper bound so chambers never carve above h_target + SURFACE_BAND).
         let mut cave_sdf_val = 0.0_f32;
-        if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y {
+        if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y
+            && wy <= height + SURFACE_BAND
+        {
             if approx_depth > CAVE_SURFACE_BUFFER {
                 cave_sdf_val = cave_sdf_val.max(
                     caves::cave_sdf(wx, wy, wz, &cave_systems),
@@ -908,7 +911,9 @@ impl Generator {
                 // Cave carving at scan_y changes whether a voxel appears solid.
                 let scan_approx_depth = height - scan_y;
                 let mut scan_cave = 0.0_f32;
-                if !cave_systems.is_empty() && scan_y > CAVE_FLOOR_Y {
+                if !cave_systems.is_empty() && scan_y > CAVE_FLOOR_Y
+                    && scan_y <= height + SURFACE_BAND
+                {
                     if scan_approx_depth > CAVE_SURFACE_BUFFER {
                         scan_cave = scan_cave.max(caves::cave_sdf(wx, scan_y, wz, &cave_systems));
                         scan_cave = scan_cave.max(caves::trunks_sdf(wx, scan_y, wz, &cave_systems, self.seed, cfg.cave.trunk_r, cfg.cave.trunk_prob));
@@ -1158,7 +1163,9 @@ impl Generator {
                     // Negate and smin so a positive SDF pulls density
                     // toward (or below) zero. smin(k>0) additionally
                     // blends nearly-touching cave volumes together.
-                    if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y {
+                    if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y
+                        && wy <= height + SURFACE_BAND
+                    {
                         if approx_depth > CAVE_SURFACE_BUFFER {
                             let sdf = caves::cave_sdf(wx, wy, wz, &cave_systems);
                             if sdf > 0.0 {

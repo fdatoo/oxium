@@ -339,7 +339,7 @@
         // donut pockets the previous isotropic sampling produced.
         cheese_xz_scale: 1.0,
         cheese_y_scale: 0.6666667,
-        cheese_offset: 0.27,
+        cheese_offset: 0.18,
         cheese_suppression_offset: 1.5,
         cheese_suppression_slope: -0.64,
         cheese_suppression_min: 0.0,
@@ -357,7 +357,7 @@
         ),
         cave_layer_xz_scale: 1.0,
         cave_layer_y_scale: 8.0,
-        cave_layer_intensity: 6.0,
+        cave_layer_intensity: 2.0,
 
         // ── Pillars: positive-density blobs that get max()'d
         //     after cave subtraction so they refill carved voxels.

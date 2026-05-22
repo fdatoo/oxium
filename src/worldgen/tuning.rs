@@ -101,7 +101,10 @@ pub const MACRO_RIVER_THRESH: u32 = 500;
 /// Maximum consecutive vertical air voxels per XZ column before a stone
 /// "ledge" is inserted by the post-density-fill pass. Eliminates
 /// fall-to-death drops.
-pub const MAX_VERTICAL_AIR_RUN: i32 = 6;
+// Temporarily raised from 6 to 256 to verify the clamp is the source of
+// the visible 8-block stone-ledge artifact. Restore to 6 (or retune) once
+// the over-carving causes are addressed.
+pub const MAX_VERTICAL_AIR_RUN: i32 = 256;
 
 // ── Caves ────────────────────────────────────────────────────────────
 
