@@ -381,13 +381,26 @@ impl Generator {
             coord.z * (FINE_REGION_SIZE / 32),
         ));
         let regions = self.gather_chunk_regions(chunk_origin);
-        self.column_data_with(wx, wz, &regions)
+        self.column_data_with(wx, wz, &regions, None)
     }
 
     /// Per-column terrain decisions using pre-fetched regions. The
     /// per-column hot path inside `fill_chunk` calls this version so
     /// we don't pay 9 mutex-protected cache lookups per column.
-    fn column_data_with(&self, wx: i32, wz: i32, regions: &ChunkRegions) -> ColumnData {
+    ///
+    /// `precomputed_carve` is an optional already-computed valley-carve
+    /// depth for this column. Pass `Some(depth)` when calling from
+    /// `fill_chunk` (where the depth grid was built once for the whole
+    /// chunk via `ChunkRegions::valley_grid`). Pass `None` at other call
+    /// sites (e.g. `probe_column`) to fall back to the per-column
+    /// `valley_carve` path.
+    fn column_data_with(
+        &self,
+        wx: i32,
+        wz: i32,
+        regions: &ChunkRegions,
+        precomputed_carve: Option<f32>,
+    ) -> ColumnData {
         let cfg = self.config.load();
         // PR 3: spline-driven heightmap. h_pre is now the surface Y
         // derived from the climate-spline `offset_spline`, NOT the
@@ -406,7 +419,13 @@ impl Generator {
         // neighbourhood. Operates on the spline-derived h_pre (PR 3
         // interface change — same shape as before, just a different
         // h_pre source).
-        let carve = regions.valley_carve(wx, wz, self.seed);
+        //
+        // Hot path: `fill_chunk` precomputes the whole 32×32 depth grid
+        // once (segment-first with AABB culling) and passes the
+        // per-column result here. Other callers pass `None` and fall back
+        // to the full per-column O(segments) path.
+        let carve = precomputed_carve
+            .unwrap_or_else(|| regions.valley_carve(wx, wz, self.seed));
         let height = (h_pre - carve).clamp((CAVE_FLOOR_Y + 8) as f32, MAX_TERRAIN_Y as f32) as i32;
 
         // PR 4: 6D climate sample + R-tree biome lookup with
@@ -1049,11 +1068,38 @@ impl Generator {
         // per voxel become 13 per corner — a ~45× reduction in
         // Simplex calls inside the inner loop.
         let carver_eval = caves::CarverEvaluator::new(&self.noise_carvers, &cfg.cave, origin);
+
+        // Aquifer cell cache: `three_nearest` scans 27 cells per call,
+        // but its result depends only on which aquifer cell `(wx, wy, wz)`
+        // falls into (derived via `div_euclid`). A 32³ chunk spans at
+        // most ~27 distinct cell triples, so caching eliminates ~32,741
+        // redundant 27-cell scans per chunk.
+        //
+        // Key is `(cx, cy, cz) = (wx.div_euclid(CELL_X), wy.div_euclid(CELL_Y),
+        // wz.div_euclid(CELL_Z))` — the same computation `three_nearest`
+        // performs internally — so the cache is always coherent.
+        let mut nearest_cache: ahash::AHashMap<
+            (i32, i32, i32),
+            [aquifer::AquiferCell; 3],
+        > = ahash::AHashMap::new();
+
+        // Precompute valley-carve depths for all 32×32 columns in one
+        // segment-first pass. AABB culling means only columns actually
+        // within a river valley pay the perpendicular_distance cost.
+        // This eliminates the O(1024 × N_segments) per-column call to
+        // valley_carve, replacing it with O(N_segments × affected_columns).
+        let valley_depth_grid = regions.valley_grid(origin.x, origin.z, self.seed);
+
         for z in 0..CHUNK_DIM_U {
             for x in 0..CHUNK_DIM_U {
                 let wx = origin.x + x as i32;
                 let wz = origin.z + z as i32;
-                let col = self.column_data_with(wx, wz, &regions);
+                let col = self.column_data_with(
+                    wx,
+                    wz,
+                    &regions,
+                    Some(valley_depth_grid[z as usize][x as usize]),
+                );
                 let height = col.height;
                 let lake_rim = col.lake_rim;
                 // h_pre is the pre-carve surface Y, used by the tera
@@ -1229,7 +1275,22 @@ impl Generator {
                     // Aquifer override. Receives the final composed
                     // density so its solid/air decisions agree with
                     // the cave composition above.
-                    let aq_substance = self.aquifer.substance(wx, wy, wz, composed);
+                    //
+                    // The `three_nearest` result only changes when the
+                    // aquifer cell coordinate changes, so we cache it
+                    // keyed on `(cx, cy, cz)`. This brings per-chunk
+                    // 27-cell scans from 32,768 down to ≤27.
+                    let aq_substance = {
+                        let cell_key = (
+                            wx.div_euclid(aquifer::AQUIFER_CELL_X),
+                            wy.div_euclid(aquifer::AQUIFER_CELL_Y),
+                            wz.div_euclid(aquifer::AQUIFER_CELL_Z),
+                        );
+                        let nearest = nearest_cache
+                            .entry(cell_key)
+                            .or_insert_with(|| self.aquifer.three_nearest(wx, wy, wz));
+                        self.aquifer.substance_with_nearest(wx, wy, wz, composed, nearest)
+                    };
 
                     // Yield to the ocean / lake surface flood for
                     // voxels above the column's heightmap in a
@@ -1410,7 +1471,12 @@ impl Generator {
                 for z in 0..dim {
                     let wx = chunk_origin.x + x as i32;
                     let wz = chunk_origin.z + z as i32;
-                    let col = self.column_data_with(wx, wz, &regions);
+                    let col = self.column_data_with(
+                        wx,
+                        wz,
+                        &regions,
+                        Some(valley_depth_grid[z as usize][x as usize]),
+                    );
                     let h_target = col.height;
 
                     // Is h_target inside this chunk's Y range?
@@ -1919,6 +1985,50 @@ impl ChunkRegions {
             neighbour_regions[i] = self.grid[nz as usize][nx as usize].as_deref();
         }
         hydrology::valley_carve(wx, wz, primary, &neighbour_regions, seed)
+    }
+
+    /// Precompute a 32×32 valley-depth grid for the chunk whose
+    /// (0,0) column is at world `(origin_wx, origin_wz)`. Uses a
+    /// segment-first pass with AABB culling — much faster than calling
+    /// `valley_carve` per-column when most segments don't touch the chunk.
+    fn valley_grid(&self, origin_wx: i32, origin_wz: i32, seed: u64) -> [[f32; 32]; 32] {
+        // Identify which cell of our 3×3 grid contains the chunk origin so
+        // we can pass the primary region and its 8 neighbours to the
+        // hydrology helper. The chunk origin always lies inside exactly one
+        // fine region; we read that region's segments plus those of all
+        // visible neighbours (up to 8 in the pre-fetched 3×3 grid).
+        let c = region::RegionCoord::containing(origin_wx, origin_wz);
+        let center_dx = c.x - self.center.x + 1;
+        let center_dz = c.z - self.center.z + 1;
+        if center_dx < 0 || center_dz < 0 || center_dx >= 3 || center_dz >= 3 {
+            // Chunk origin falls outside the gathered grid — shouldn't
+            // happen in normal use; return an all-zero (no-carve) grid.
+            return [[0.0; 32]; 32];
+        }
+        let primary = self.grid[center_dz as usize][center_dx as usize]
+            .as_deref()
+            .expect("3x3 grid is always populated");
+        let mut neighbour_regions: [Option<&region::FineRegion>; 8] = [None; 8];
+        let nbr_offsets: [(i32, i32); 8] = [
+            (0, -1),
+            (1, -1),
+            (1, 0),
+            (1, 1),
+            (0, 1),
+            (-1, 1),
+            (-1, 0),
+            (-1, -1),
+        ];
+        for i in 0..8 {
+            let (ox, oz) = nbr_offsets[i];
+            let nx = center_dx + ox;
+            let nz = center_dz + oz;
+            if nx < 0 || nz < 0 || nx >= 3 || nz >= 3 {
+                continue;
+            }
+            neighbour_regions[i] = self.grid[nz as usize][nx as usize].as_deref();
+        }
+        hydrology::valley_grid(origin_wx, origin_wz, primary, &neighbour_regions, seed)
     }
 }
 

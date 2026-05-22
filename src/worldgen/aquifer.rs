@@ -279,7 +279,12 @@ impl AquiferSystem {
     /// Walk the 27-cell neighbourhood and return the three cells
     /// whose jittered centers are closest to `(wx, wy, wz)`. Sorted
     /// by ascending squared distance.
-    fn three_nearest(&self, wx: i32, wy: i32, wz: i32) -> [AquiferCell; 3] {
+    ///
+    /// Exposed as `pub(crate)` so callers that process many voxels
+    /// sharing the same aquifer cell — e.g. `fill_chunk` — can compute
+    /// the result once per cell and reuse it across all voxels in that
+    /// cell, rather than repeating the 27-cell scan per voxel.
+    pub(crate) fn three_nearest(&self, wx: i32, wy: i32, wz: i32) -> [AquiferCell; 3] {
         let cx = wx.div_euclid(AQUIFER_CELL_X);
         let cy = wy.div_euclid(AQUIFER_CELL_Y);
         let cz = wz.div_euclid(AQUIFER_CELL_Z);
@@ -320,8 +325,30 @@ impl AquiferSystem {
     /// * `Substance::Density` — aquifer is silent; caller keeps its
     ///   own decision.
     /// * `Substance::Block(b)` — aquifer overrides; place `b`.
+    ///
+    /// This is the simple entry point; it calls [`three_nearest`]
+    /// internally. For hot loops that process many voxels in the same
+    /// aquifer cell, prefer [`substance_with_nearest`] to avoid
+    /// repeating the 27-cell neighbourhood scan.
     pub fn substance(&self, wx: i32, wy: i32, wz: i32, density: f32) -> Substance {
         let nearest = self.three_nearest(wx, wy, wz);
+        self.substance_with_nearest(wx, wy, wz, density, &nearest)
+    }
+
+    /// Like [`substance`] but accepts a pre-computed `nearest` slice
+    /// (as returned by [`three_nearest`]) so the 27-cell scan is not
+    /// repeated. The caller is responsible for ensuring `nearest` was
+    /// computed for the same aquifer cell as `(wx, wy, wz)` — that
+    /// is, all three coords divide to the same `(cx, cy, cz)` under
+    /// `div_euclid(AQUIFER_CELL_*)`.
+    pub fn substance_with_nearest(
+        &self,
+        wx: i32,
+        wy: i32,
+        wz: i32,
+        density: f32,
+        nearest: &[AquiferCell; 3],
+    ) -> Substance {
         let a = nearest[0];
         let in_fluid_a = wy <= a.y_top;
         let want_solid = density > 0.0;

@@ -123,6 +123,11 @@ pub fn drain_jobs(
                     }
                 }
             }
+            JobResult::LightBlobReady { coord, blob } => {
+                // The mesh-pool worker already did the expensive decompress +
+                // 33³ sample loop; just hand the finished blob to the GPU.
+                renderer.upload_chunk_light_volume(coord, blob.as_ref());
+            }
             #[cfg(feature = "legacy-lighting")]
             JobResult::Relit {
                 coord,
@@ -237,6 +242,9 @@ pub fn drain_jobs(
                     // Re-mark as Vacant so world_stream picks it up
                     // next frame and dispatches gen.
                     world.chunks.remove(&coord);
+                    // Evict any stale decompressed copy from the lighting cache so
+                    // a future gen+install doesn't see the old voxel data.
+                    world.light_engine.invalidate_chunk(coord);
                 }
             },
         }
@@ -385,20 +393,29 @@ pub fn gather_neighbors(world: &World, c: ChunkCoord) -> [Option<Arc<PalettedChu
     out
 }
 
-/// Scan loaded chunks for `light_gpu_dirty` and re-upload their 3D
-/// light textures. Bounded to `UPLOAD_BUDGET` chunks per frame so a
-/// big convergence wave doesn't saturate PCIe bandwidth.
+/// Scan loaded chunks for `light_gpu_dirty` and spawn mesh-pool jobs to
+/// rebuild their 3D light textures off the main thread.
+///
+/// Previously this function built each blob inline (decompress + 33³ sample
+/// loop) on the main thread, costing ~8.6% of frame time at a 64-chunk
+/// render radius. Now it merely snapshots the dirty coords, clears the flag
+/// to prevent double-spawning, and hands the heavy work to `spawn_light_blob`.
+/// The finished blobs arrive via `drain_jobs` as `JobResult::LightBlobReady`
+/// and are uploaded to the GPU there without any further CPU work.
+///
+/// Bounded to `UPLOAD_BUDGET` spawns per frame so a large convergence wave
+/// (e.g. the light engine settling after initial streaming) doesn't flood the
+/// mesh pool before it can catch up.
 pub fn upload_dirty_light_volumes(
     world: &mut crate::voxel::world::World,
-    renderer: &mut crate::render::Renderer,
+    jobs: &Jobs,
 ) {
-    use crate::voxel::chunk::Neighbors;
     use crate::voxel::world::ChunkSlot;
     const UPLOAD_BUDGET: usize = 32;
-    let mut uploaded = 0;
-    // Collect the dirty coords first; rebuilding the volume needs to
-    // gather_neighbors which borrows the world immutably.
-    let dirty: Vec<_> = world
+    // Collect dirty coords up-front so the later mutable borrow of each
+    // slot (to clear `light_gpu_dirty`) doesn't conflict with the
+    // immutable iteration over `world.chunks`.
+    let dirty: Vec<ChunkCoord> = world
         .chunks
         .iter()
         .filter_map(|(c, slot)| match slot {
@@ -408,33 +425,17 @@ pub fn upload_dirty_light_volumes(
         .take(UPLOAD_BUDGET)
         .collect();
     for coord in dirty {
-        // Gather neighbour Arc refs then decompress them — Neighbors<'_>
-        // holds &DenseChunk refs so we need the decompressed values to
-        // outlive the borrow. This mirrors the pattern in app.rs's edit path.
-        let neighbor_arcs = gather_neighbors(world, coord);
-        let neighbor_dense: Vec<Option<crate::voxel::chunk::DenseChunk>> = neighbor_arcs
-            .iter()
-            .map(|opt| opt.as_ref().map(|p| p.decompress()))
-            .collect();
-        let neighbor_refs: [Option<&crate::voxel::chunk::DenseChunk>; 6] = [
-            neighbor_dense[0].as_ref(),
-            neighbor_dense[1].as_ref(),
-            neighbor_dense[2].as_ref(),
-            neighbor_dense[3].as_ref(),
-            neighbor_dense[4].as_ref(),
-            neighbor_dense[5].as_ref(),
-        ];
-        let ns = Neighbors {
-            chunks: neighbor_refs,
-        };
+        // Gather neighbor Arcs (cheap atomic refcount bumps only) before
+        // taking the mutable borrow below — gather_neighbors needs a
+        // shared borrow of world.chunks.
+        let neighbors = gather_neighbors(world, coord);
         let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get_mut(&coord) else {
             continue;
         };
-        let dense = data.decompress();
-        let blob = crate::voxel::chunk::build_light_volume_blob(&dense, &ns);
-        renderer.upload_chunk_light_volume(coord, blob.as_ref());
+        // Clear the flag immediately so the next frame's scan doesn't
+        // re-queue this chunk while the worker is still running.
         meta.light_gpu_dirty = false;
-        uploaded += 1;
+        let data_arc = data.clone();
+        jobs.spawn_light_blob(coord, data_arc, neighbors);
     }
-    let _ = uploaded;
 }

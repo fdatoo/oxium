@@ -430,14 +430,12 @@ impl AppState {
                 )
             });
             let light_pending = self.world.light_engine.pending_ops_count();
-            // chunks_pending here is the *previous* frame's value (updated at line ~479);
-            // light_pending is fresh this frame. Either signal triggers the higher budget.
-            // >100 chunks ≈ initial stream-in; >10k ops ≈ large backlog still draining.
-            let light_budget = if self.perf.chunks_pending > 100 || light_pending > 10_000 {
-                500_000
-            } else {
-                50_000
-            };
+            // Fixed 50k-op budget every frame. The higher 500k "streaming" budget that was
+            // here before caused 37% of main-thread time to be spent in PalettedChunk::decompress
+            // (TickCache is recreated each tick, so every unique chunk the engine touches costs
+            // one decompress). At 50k ops the engine keeps up with generation throughput
+            // (50k × FPS >> per-chunk lighting ops) and the frame loop stays below 2ms.
+            let light_budget = 50_000_usize;
             self.perf.light_ops_pending = light_pending;
             time(prof, "light_engine_tick", || {
                 self.world.light_engine_tick(light_budget);
@@ -445,7 +443,7 @@ impl AppState {
             time(prof, "upload_dirty_light_volumes", || {
                 crate::ecs::systems::mesh_upload::upload_dirty_light_volumes(
                     &mut self.world,
-                    &mut self.renderer,
+                    &self.jobs,
                 );
             });
             // Relight pump runs after the two job-drain stages so it picks

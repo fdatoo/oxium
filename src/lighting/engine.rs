@@ -12,15 +12,15 @@
 //! See `docs/superpowers/specs/2026-05-21-lighting-graph-engine-design.md`
 //! — "Architecture" + "Data model" sections.
 
+use ahash::{AHashMap, AHashSet};
 use crate::lighting::queue::BucketQueue;
 use crate::voxel::coords::BlockPos;
-use std::collections::HashSet;
 
 /// One channel's pending work: edits to absorb + two propagation queues.
 /// PR2 contains no logic; the fields are populated and drained by PR3.
 #[derive(Debug, Default)]
 pub struct ChannelEngine {
-    pub block_nodes_to_check: HashSet<BlockPos>,
+    pub block_nodes_to_check: AHashSet<BlockPos>,
     pub increase: BucketQueue,
     pub decrease: BucketQueue,
 }
@@ -36,7 +36,6 @@ impl ChannelEngine {
 /// The four-channel graph engine: sky + R + G + B. RGB channels are
 /// stored as a 3-element array indexed by `RgbChannel`; the indices
 /// are stable so PR3 can iterate them uniformly.
-#[derive(Debug)]
 pub struct LightEngine {
     pub sky: ChannelEngine,
     pub block_rgb: [ChannelEngine; 3],
@@ -44,10 +43,20 @@ pub struct LightEngine {
     /// Maps each changed position to its (old_block, new_block) tuple so
     /// the tick can compute the right combination of increase/decrease ops
     /// per channel without re-querying World state mid-tick.
-    pub pending_block_changes: std::collections::HashMap<
+    pub pending_block_changes: AHashMap<
         crate::voxel::coords::BlockPos,
         (crate::voxel::block::Block, crate::voxel::block::Block),
     >,
+    /// Persistent decompressed-chunk cache. Chunks are decompressed on first
+    /// access by the lighting BFS and kept resident across ticks so subsequent
+    /// ticks skip the `PalettedChunk::decompress` cost entirely. Only the
+    /// `written` sub-set is cleared per-tick (by `flush`); `inner` grows
+    /// as the engine's working set expands and shrinks only via
+    /// `invalidate_chunk`. NOTE: at streaming radius 16 the working set can
+    /// reach ~16 000 chunks; each `DenseChunk` is ~130 KB uncompressed. The
+    /// engine only decompresses chunks it actually propagates light through, so
+    /// in practice the hot set is much smaller. Monitor RSS if this grows large.
+    tick_cache: TickCache,
 }
 
 impl Default for LightEngine {
@@ -57,8 +66,22 @@ impl Default for LightEngine {
             // [ChannelEngine; 3] doesn't auto-derive Default (ChannelEngine
             // isn't Copy because of HashSet/VecDeque), so build via from_fn.
             block_rgb: std::array::from_fn(|_| ChannelEngine::default()),
-            pending_block_changes: std::collections::HashMap::new(),
+            pending_block_changes: AHashMap::new(),
+            tick_cache: TickCache::default(),
         }
+    }
+}
+
+impl std::fmt::Debug for LightEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // tick_cache holds DenseChunk which doesn't implement Debug (large
+        // boxed arrays). Report the cache entry count instead of its contents.
+        f.debug_struct("LightEngine")
+            .field("sky", &self.sky)
+            .field("block_rgb", &self.block_rgb)
+            .field("pending_block_changes", &self.pending_block_changes)
+            .field("tick_cache_entries", &self.tick_cache.inner.len())
+            .finish()
     }
 }
 
@@ -140,6 +163,20 @@ impl LightEngine {
         // PR2 skeleton: deliberately empty. The body lands in PR3.
     }
 
+    /// Remove `coord` from the persistent decompressed-chunk cache.
+    ///
+    /// Must be called whenever voxel data for `coord` changes outside the
+    /// lighting tick so the cache does not serve stale blocks:
+    ///
+    /// - **Chunk unloaded** — prevents a subsequent reload from seeing the
+    ///   old decompressed copy instead of the freshly-generated/loaded data.
+    /// - **Block edit** (`set_block`) — the `PalettedChunk` in the world has
+    ///   been recompressed with the new voxel; the cached `DenseChunk` no
+    ///   longer matches, so we evict it and let the next tick re-decompress.
+    pub fn invalidate_chunk(&mut self, coord: crate::voxel::coords::ChunkCoord) {
+        self.tick_cache.invalidate(coord);
+    }
+
     /// Production tick entry point. Drains pending block changes and
     /// propagation queues, writing light values directly into the
     /// chunks. `chunks` and `registry` are passed in by
@@ -155,6 +192,10 @@ impl LightEngine {
     /// cell's contribution, we fall back to recomputing the chunk's
     /// light from scratch using the increase machinery. PR4 will
     /// replace this with proper Minecraft-style decrease propagation.
+    ///
+    /// The `tick_cache` field persists across calls: each chunk is
+    /// decompressed at most once and stays resident until `invalidate_chunk`
+    /// is called. `flush` clears only the per-tick `written` set.
     pub fn tick_with(
         &mut self,
         chunks: &mut std::collections::HashMap<
@@ -169,7 +210,7 @@ impl LightEngine {
         // immutably via dense().
         {
             use crate::voxel::world::ChunkSlot;
-            let opacity_coords: std::collections::HashSet<_> = self
+            let opacity_coords: AHashSet<_> = self
                 .pending_block_changes
                 .iter()
                 .filter_map(|(pos, (old, new))| {
@@ -186,21 +227,48 @@ impl LightEngine {
                     meta.sky_sources = crate::lighting::ChunkSkyLightSources::build_from_dense(
                         &dense, coord, registry,
                     );
+                    // Evict the cached copy: the dense we just built above was
+                    // only used to rebuild sky_sources; the on-disk PalettedChunk
+                    // hasn't changed yet. The next lighting touch will re-decompress
+                    // from the current Arc<PalettedChunk>.
+                    self.tick_cache.invalidate(coord);
                 }
             }
         }
 
-        let mut cache = TickCache::default();
+        // Destructure self to split the borrow: the borrow-checker sees
+        // `tick_cache`, `sky`, `block_rgb`, and `pending_block_changes` as
+        // disjoint fields and allows passing mutable references to them
+        // simultaneously. Without this, holding `&mut self.tick_cache` while
+        // also passing `&mut self.sky` (or calling any `&mut self` sub-fn)
+        // would be rejected as overlapping borrows.
+        let Self {
+            sky,
+            block_rgb,
+            pending_block_changes,
+            tick_cache: cache,
+        } = self;
+
         let mut remaining = budget;
 
-        // Phase A — drain pending block changes.
-        remaining = drain_pending_block_changes(self, &mut cache, chunks, registry, remaining);
+        // Phase A — drain pending block changes. The helper takes the three
+        // non-cache engine fields explicitly instead of `&mut LightEngine` to
+        // allow the simultaneous `&mut cache` borrow above.
+        remaining = drain_pending_block_changes(
+            sky,
+            block_rgb,
+            pending_block_changes,
+            cache,
+            chunks,
+            registry,
+            remaining,
+        );
 
         // Phase B — drain per-channel decrease queues.
         if remaining > 0 {
             remaining = drain_decrease_channel(
-                &mut self.sky,
-                &mut cache,
+                sky,
+                cache,
                 chunks,
                 registry,
                 Channel::Sky,
@@ -212,8 +280,8 @@ impl LightEngine {
                 break;
             }
             remaining = drain_decrease_channel(
-                &mut self.block_rgb[ch_i],
-                &mut cache,
+                &mut block_rgb[ch_i],
+                cache,
                 chunks,
                 registry,
                 Channel::BlockRgb(ch_i),
@@ -224,8 +292,8 @@ impl LightEngine {
         // Phase C — drain per-channel increase queues.
         if remaining > 0 {
             remaining = drain_increase_channel(
-                &mut self.sky,
-                &mut cache,
+                sky,
+                cache,
                 chunks,
                 registry,
                 Channel::Sky,
@@ -237,8 +305,8 @@ impl LightEngine {
                 break;
             }
             remaining = drain_increase_channel(
-                &mut self.block_rgb[ch_i],
-                &mut cache,
+                &mut block_rgb[ch_i],
+                cache,
                 chunks,
                 registry,
                 Channel::BlockRgb(ch_i),
@@ -247,7 +315,8 @@ impl LightEngine {
         }
         let _ = remaining;
 
-        // Flush all cached writes back into the chunk store.
+        // Flush written chunks back into the store. Clears only `written`;
+        // `inner` persists so the next tick skips re-decompression.
         cache.flush(chunks);
     }
 }
@@ -261,30 +330,30 @@ enum Channel {
     BlockRgb(usize), // 0=R, 1=G, 2=B
 }
 
-/// Per-tick decompress cache. The engine touches each chunk at most a few
-/// hundred times per tick; without caching, each touch decompresses the
-/// chunk (128 KB alloc) and discards the result. With the cache, each
-/// chunk is decompressed at most once per tick into a `DenseChunk`,
-/// mutated many times directly via array indexing, and recompressed at
-/// `flush` time only if it was actually written.
+/// Persistent decompressed-chunk cache shared across lighting ticks.
 ///
-/// Caller pattern (engine `tick_with`):
-/// 1. Construct a fresh `TickCache::default()` at tick start.
-/// 2. Pass `&mut cache` and `&chunks` (read-only) to drain helpers.
-/// 3. Helpers call `cache.dense(&chunks, coord)` to get a mutable
-///    `DenseChunk`; cache misses trigger one decompress.
-/// 4. Helpers call `cache.mark_written(coord)` after mutating to
-///    indicate the chunk needs recompression at flush.
-/// 5. Call `cache.flush(&mut chunks)` at tick end — recompresses every
-///    written chunk into its `Arc<PalettedChunk>` and sets
-///    `meta.light_gpu_dirty = true`.
+/// Before this cache was promoted to a field on `LightEngine` it was
+/// allocated fresh every tick. Now chunks stay resident across ticks:
+/// each chunk is decompressed at most once, mutated in place during BFS,
+/// and recompressed only when `flush` is called (only the `written` set
+/// is flushed and cleared; `inner` persists).
+///
+/// Caller pattern inside `tick_with`:
+/// 1. Call `cache.dense(&chunks, coord)` to get a `&mut DenseChunk`;
+///    cache misses trigger one `PalettedChunk::decompress`.
+/// 2. Call `cache.mark_written(coord)` after mutating.
+/// 3. Call `cache.flush(&mut chunks)` at tick end — recompresses every
+///    written chunk into its `Arc<PalettedChunk>` and marks
+///    `meta.light_gpu_dirty = true`, then clears `written`.
+/// 4. Call `cache.invalidate(coord)` when voxel data changes outside the
+///    lighting tick (block edits, chunk unload/reload).
 #[derive(Default)]
 pub(crate) struct TickCache {
-    inner: std::collections::HashMap<
+    inner: AHashMap<
         crate::voxel::coords::ChunkCoord,
         crate::voxel::chunk::DenseChunk,
     >,
-    written: std::collections::HashSet<crate::voxel::coords::ChunkCoord>,
+    written: AHashSet<crate::voxel::coords::ChunkCoord>,
 }
 
 impl TickCache {
@@ -315,16 +384,21 @@ impl TickCache {
     }
 
     /// Recompress every written chunk into its slot's `Arc<PalettedChunk>`
-    /// and set `meta.light_gpu_dirty = true`. Consumes the cache.
+    /// and set `meta.light_gpu_dirty = true`. Clears only the `written` set
+    /// so the decompressed `inner` entries persist across ticks — callers
+    /// that hold the cache for the engine's lifetime avoid re-decompressing
+    /// chunks that were touched in previous ticks. Unwritten chunks remain
+    /// in `inner` as-is; only chunks that were actually modified this tick
+    /// are recompressed and marked GPU-dirty.
     pub(crate) fn flush(
-        self,
+        &mut self,
         chunks: &mut std::collections::HashMap<
             crate::voxel::coords::ChunkCoord,
             crate::voxel::world::ChunkSlot,
         >,
     ) {
         use crate::voxel::world::ChunkSlot;
-        for coord in self.written {
+        for coord in self.written.drain() {
             let Some(ChunkSlot::Stored { data, meta }) = chunks.get_mut(&coord) else {
                 continue;
             };
@@ -334,16 +408,37 @@ impl TickCache {
             *data = std::sync::Arc::new(crate::voxel::chunk::PalettedChunk::compress(dense));
             meta.light_gpu_dirty = true;
         }
+        // `inner` is intentionally NOT cleared here. Decompressed chunks stay
+        // resident across ticks so subsequent ticks skip the decompress cost.
+        // Call `invalidate_chunk` or `invalidate_all` when voxel data changes
+        // outside the lighting tick (block edits, chunk unload, chunk reload).
+    }
+
+    /// Remove `coord` from the decompressed cache. Must be called when:
+    /// - A chunk is unloaded (prevents stale data from surviving a reload)
+    /// - A block edit modifies voxel data outside the lighting tick
+    pub(crate) fn invalidate(&mut self, coord: crate::voxel::coords::ChunkCoord) {
+        self.inner.remove(&coord);
+        self.written.remove(&coord);
     }
 }
 
-/// Phase A. Drains `engine.pending_block_changes` and, for each entry,
+/// Phase A. Drains `pending_block_changes` and, for each entry,
 /// updates the chunk's `sky_sources` heightmap if opacity changed, then
 /// either enqueues increase ops (new emission, new sky-source exposure)
 /// or marks the chunk for full recompute (minimal-decrease fallback).
 /// Returns the remaining budget.
+///
+/// Takes the three non-cache engine fields explicitly (instead of
+/// `&mut LightEngine`) so the caller can hold `&mut TickCache`
+/// simultaneously without triggering an overlapping-borrow error.
 fn drain_pending_block_changes(
-    engine: &mut LightEngine,
+    sky: &mut ChannelEngine,
+    block_rgb: &mut [ChannelEngine; 3],
+    pending_block_changes: &mut AHashMap<
+        crate::voxel::coords::BlockPos,
+        (crate::voxel::block::Block, crate::voxel::block::Block),
+    >,
     cache: &mut TickCache,
     chunks: &std::collections::HashMap<
         crate::voxel::coords::ChunkCoord,
@@ -354,14 +449,12 @@ fn drain_pending_block_changes(
 ) -> usize {
     use crate::voxel::coords::ChunkCoord;
 
-    let entries: Vec<_> = engine.pending_block_changes.drain().collect();
-    let mut recompute_chunks: std::collections::HashSet<ChunkCoord> = Default::default();
+    let entries: Vec<_> = pending_block_changes.drain().collect();
+    let mut recompute_chunks: AHashSet<ChunkCoord> = AHashSet::default();
 
     for (pos, (old_block, new_block)) in entries {
         if budget == 0 {
-            engine
-                .pending_block_changes
-                .insert(pos, (old_block, new_block));
+            pending_block_changes.insert(pos, (old_block, new_block));
             continue;
         }
         budget -= 1;
@@ -401,7 +494,7 @@ fn drain_pending_block_changes(
                 if zeroed {
                     cache.mark_written(chunk);
                 }
-                engine.block_rgb[ch_i]
+                block_rgb[ch_i]
                     .decrease
                     .push(crate::lighting::queue::QueueEntry {
                         pos,
@@ -431,7 +524,7 @@ fn drain_pending_block_changes(
                 };
                 if written {
                     cache.mark_written(chunk);
-                    engine.block_rgb[ch_i]
+                    block_rgb[ch_i]
                         .increase
                         .push(crate::lighting::queue::QueueEntry {
                             pos,
@@ -448,7 +541,7 @@ fn drain_pending_block_changes(
     // mutation + flush via the cache, so subsequent ops on the same
     // chunk are cheap.
     for coord in recompute_chunks {
-        recompute_chunk_light_in_cache(engine, cache, chunks, registry, coord);
+        recompute_chunk_light_in_cache(sky, block_rgb, cache, chunks, registry, coord);
     }
 
     budget
@@ -458,8 +551,13 @@ fn drain_pending_block_changes(
 /// scratch, mutating via `TickCache` rather than the chunk's
 /// `Arc<PalettedChunk>` directly. Used inside `tick_with` for the
 /// minimal-decrease fallback.
+///
+/// Takes `sky` and `block_rgb` explicitly (rather than `&mut LightEngine`)
+/// to match the borrow-split pattern in `tick_with` and
+/// `drain_pending_block_changes`.
 fn recompute_chunk_light_in_cache(
-    engine: &mut LightEngine,
+    sky: &mut ChannelEngine,
+    block_rgb: &mut [ChannelEngine; 3],
     cache: &mut TickCache,
     chunks: &std::collections::HashMap<
         crate::voxel::coords::ChunkCoord,
@@ -506,14 +604,11 @@ fn recompute_chunk_light_in_cache(
                             chunk_bottom_y + ly as i32,
                             coord.0.z * CHUNK_DIM + lz as i32,
                         ));
-                        engine
-                            .sky
-                            .increase
-                            .push(crate::lighting::queue::QueueEntry {
-                                pos,
-                                from_level: 15,
-                                propagation_mask: 0,
-                            });
+                        sky.increase.push(crate::lighting::queue::QueueEntry {
+                            pos,
+                            from_level: 15,
+                            propagation_mask: 0,
+                        });
                     }
                 }
             }
@@ -538,7 +633,7 @@ fn recompute_chunk_light_in_cache(
                         ));
                         for ch_i in 0..3 {
                             if info.emission[ch_i] > 0 {
-                                engine.block_rgb[ch_i].increase.push(
+                                block_rgb[ch_i].increase.push(
                                     crate::lighting::queue::QueueEntry {
                                         pos,
                                         from_level: info.emission[ch_i],

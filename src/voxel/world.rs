@@ -343,6 +343,13 @@ impl World {
         self.light_engine
             .enqueue_block_change(pos, old_block, new_block);
 
+        // The PalettedChunk for this chunk was just recompressed with the new
+        // voxel above. Evict the (now-stale) DenseChunk from the lighting cache
+        // so the next tick re-decompresses from the updated Arc<PalettedChunk>.
+        // Without this, the cache would serve old block data to the BFS,
+        // producing incorrect light values around the edit.
+        self.light_engine.invalidate_chunk(chunk_coord);
+
         // Border edits propagate to the neighbour on that side: its
         // boundary face may have changed visibility, so it needs a
         // remesh. We deliberately do NOT cascade `dirty.light` here:

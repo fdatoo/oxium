@@ -166,14 +166,16 @@ pub fn world_stream(
     // workers are always servicing the player's actual current
     // priority order.
     //
-    // 64 ≈ a frame of worker output at 7 gen workers × ~10 ms/chunk
-    // = ~90 ms of buffered work — enough that workers never idle
-    // between frames, small enough that the front of the queue
-    // stays within ~90 ms of current player priority. Started at
-    // 32 but that left high-core-count machines noticeably
-    // under-fed; 64 keeps everyone busy without re-introducing the
-    // stale-priority symptom.
-    const DISPATCH_CAP: usize = 64;
+    // Target: enough in-flight to keep all gen workers busy for a
+    // full frame without starving on the next dispatch call. After
+    // the valley_grid segment-first optimisation, per-chunk gen time
+    // dropped from ~10 ms to ~3 ms, so the old 64-job cap only
+    // buffers ~27 ms of work — barely 1.5 frames — and workers idle
+    // 36 % of the time waiting for the next world_stream() call.
+    // 256 ≈ 7 workers × 3 ms/chunk for ~110 ms of work, keeping the
+    // priority queue fresh without reintroducing the stale-FIFO
+    // symptom that the cap was added to prevent.
+    const DISPATCH_CAP: usize = 256;
     let pending_count = world
         .chunks
         .values()
@@ -270,6 +272,11 @@ pub fn world_unload(
             save_index.mark(c);
         }
         world.chunks.remove(&c);
+        // Evict the decompressed copy from the lighting cache. If this chunk
+        // is re-loaded later, the cache will re-decompress from the fresh data;
+        // a stale entry would cause the engine to propagate light through the
+        // old voxel layout instead.
+        world.light_engine.invalidate_chunk(c);
         renderer.remove_chunk_mesh(c);
     }
 }

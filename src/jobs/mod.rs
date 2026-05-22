@@ -61,6 +61,17 @@ pub enum JobResult {
         coord: ChunkCoord,
         data: Option<PalettedChunk>,
     },
+    /// A light-blob job finished; `blob` is the 33³ Rgba8Unorm texture
+    /// ready for GPU upload via `Renderer::upload_chunk_light_volume`.
+    ///
+    /// Produced by `Jobs::spawn_light_blob` which runs `build_light_volume_blob`
+    /// on the mesh pool rather than on the main thread. The upload path
+    /// in `drain_jobs` passes the blob straight to the renderer — no
+    /// world-state mutation required.
+    LightBlobReady {
+        coord: ChunkCoord,
+        blob: Box<[u8; 33 * 33 * 33 * 4]>,
+    },
     /// A relight job finished; `data` is the re-illuminated paletted chunk
     /// to swap into the World. A follow-up mesh job runs as soon as the
     /// caller drains this — without that, the new sky/block light bytes
@@ -383,6 +394,57 @@ impl Jobs {
                 }
                 Err(payload) => {
                     log::error!("mesh job panic at {coord:?}: {}", panic_message(payload));
+                }
+            }
+        });
+    }
+
+    /// Spawn a worker-pool job to rebuild the light volume blob for `coord`.
+    ///
+    /// Snapshots the chunk's `PalettedChunk` (via `Arc`) and its six
+    /// face-neighbors (same representation as `spawn_mesh_lod0`), decompresses
+    /// them on the mesh pool, then sends `JobResult::LightBlobReady` when the
+    /// 33³ blob is built. The main thread's `drain_jobs` handler uploads the
+    /// finished blob to the GPU without any further computation.
+    ///
+    /// Use this instead of calling `build_light_volume_blob` on the main thread
+    /// inside `upload_dirty_light_volumes` — the decompression + blob-build
+    /// accounts for ~8.6% of main-thread frame time at a 64-chunk render
+    /// radius and is purely CPU-bound with no GPU dependency.
+    pub fn spawn_light_blob(
+        &self,
+        coord: ChunkCoord,
+        data: Arc<PalettedChunk>,
+        neighbors: [Option<Arc<PalettedChunk>>; 6],
+    ) {
+        let tx = self.tx.clone();
+        self.mesh_pool.spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let dense = data.decompress();
+                // Decompress each neighbor the same way spawn_mesh_lod0 does:
+                // collect into a Vec so the DenseChunks have a stable address
+                // before we build &-refs into them for Neighbors.
+                let neighbor_dense: Vec<Option<DenseChunk>> = neighbors
+                    .iter()
+                    .map(|opt| opt.as_ref().map(|p| p.decompress()))
+                    .collect();
+                let n_refs: [Option<&DenseChunk>; 6] = [
+                    neighbor_dense[0].as_ref(),
+                    neighbor_dense[1].as_ref(),
+                    neighbor_dense[2].as_ref(),
+                    neighbor_dense[3].as_ref(),
+                    neighbor_dense[4].as_ref(),
+                    neighbor_dense[5].as_ref(),
+                ];
+                let ns = crate::voxel::chunk::Neighbors { chunks: n_refs };
+                crate::voxel::chunk::build_light_volume_blob(&dense, &ns)
+            }));
+            match result {
+                Ok(blob) => {
+                    let _ = tx.send(JobResult::LightBlobReady { coord, blob });
+                }
+                Err(payload) => {
+                    log::error!("light-blob job panic at {coord:?}: {}", panic_message(payload));
                 }
             }
         });

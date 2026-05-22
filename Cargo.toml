@@ -31,6 +31,9 @@ hecs = "0.10"
 rayon = "1.10"
 crossbeam-channel = "0.5"
 
+# Fast non-cryptographic hasher for hot-path HashMaps (lighting engine, chunk map).
+ahash = "0.8"
+
 # Noise
 noise = "0.9"
 
