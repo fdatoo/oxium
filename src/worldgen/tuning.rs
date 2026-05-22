@@ -156,6 +156,10 @@ pub const CAVE_SURFACE_BUFFER: i32 = -1;
 /// Floor (world Y) below which caves stop carving. Keeps the loaded
 /// chunk-stack bottom solid.
 pub const CAVE_FLOOR_Y: i32 = -120;
+/// Lateral spread (in blocks) for cave-surface block displacement when
+/// a cave breaches the heightmap. Terasology default is 3.
+pub const SURFACE_SPREAD: i32 = 3;
+
 // ── Biomes & surface ─────────────────────────────────────────────────
 
 // PR 4: COLD_THRESHOLD, FOREST_HUMIDITY, BIOME_JITTER_*,

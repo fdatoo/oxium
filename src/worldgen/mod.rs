@@ -97,7 +97,7 @@ use crate::worldgen::tuning::{
     CAVE_FLOOR_Y, CAVE_SDF_INTENSITY,
     CAVE_SURFACE_BUFFER, COLD_SNOW_MIN_ABOVE_SEA,
     MAX_VERTICAL_AIR_RUN,
-    SNOW_LINE, SURFACE_BAND, TREE_CELL_SIZE, TREE_MARGIN,
+    SNOW_LINE, SURFACE_BAND, SURFACE_SPREAD, TREE_CELL_SIZE, TREE_MARGIN,
     TREE_RATE_FOREST, TREE_RATE_PLAINS,
 };
 
@@ -1312,6 +1312,174 @@ impl Generator {
                         }
                     } else {
                         run = 0;
+                    }
+                }
+            }
+        }
+
+        // ── Surface block fixer (Terasology-borrowed) ────────────────────
+        //
+        // Two problems fixed in one pass:
+        //
+        //  A. Cave-ceiling grass: if a cave entrance carves *above*
+        //     `h_target` (sinkhole shafts, cliff mouths, entrance SDFs
+        //     can all do this) the topmost-solid block above the cave
+        //     interior can be inside `WithinSurfaceBand(16)` AND above
+        //     `h_target - 1`, so the surface rule legitimately stamps
+        //     Grass/Snow/Sand there — but it reads as a floating grass
+        //     block with air on both sides. Fix: scan the chunk for any
+        //     surface block that has Air above AND Air below and replace
+        //     it with Stone.
+        //
+        //  B. Cave-floor surface block: when a cave breaches the
+        //     heightmap (`h_target` Y is Air inside this chunk), the
+        //     first solid voxel *below* the cave is the new visible
+        //     surface and should receive the climate-correct surface
+        //     block (Grass / Sand / Snow / Dirt) rather than bare Stone.
+        //     Spreads laterally by SURFACE_SPREAD blocks for naturalistic
+        //     cave mouths.
+        {
+            let dim = CHUNK_DIM_U as u32;
+            let chunk_origin = origin;
+
+            // ── Pass A: remove ceiling grass ──────────────────────────
+            // "Ceiling grass" = any surface block (Grass / Sand / Snow)
+            // that has Air directly above AND Air directly below.
+            // These arise when a cave entrance or sinkhole shaft is
+            // carved above `h_target`. Replace with Stone.
+            fn is_surface_block(b: Block) -> bool {
+                matches!(b, Block::Grass | Block::Sand | Block::Snow | Block::Dirt)
+            }
+            for x in 0..dim {
+                for z in 0..dim {
+                    for y in 1..(dim - 1) {
+                        let pos = LocalPos(UVec3::new(x, y, z));
+                        let above = LocalPos(UVec3::new(x, y + 1, z));
+                        let below = LocalPos(UVec3::new(x, y - 1, z));
+                        if is_surface_block(out.get(pos))
+                            && out.get(above) == Block::Air
+                            && out.get(below) == Block::Air
+                        {
+                            out.set(pos, Block::Stone);
+                        }
+                    }
+                }
+            }
+
+            // ── Pass B: cave-floor surface block ─────────────────────
+            // For each XZ column: if `h_target` (col.height) falls
+            // inside this chunk's Y range AND the voxel at that height
+            // is Air, a cave has breached the surface. Find the first
+            // solid voxel below and give it the appropriate surface
+            // block. Then spread the displaced surface laterally by
+            // SURFACE_SPREAD.
+            for x in 0..dim {
+                for z in 0..dim {
+                    let wx = chunk_origin.x + x as i32;
+                    let wz = chunk_origin.z + z as i32;
+                    let col = self.column_data_with(wx, wz, &regions);
+                    let h_target = col.height;
+
+                    // Is h_target inside this chunk's Y range?
+                    let ly_at_h = h_target - chunk_origin.y;
+                    if ly_at_h < 0 || ly_at_h >= dim as i32 {
+                        continue;
+                    }
+                    // Is the voxel at h_target Air? (cave breached the surface)
+                    let at_surface = LocalPos(UVec3::new(x, ly_at_h as u32, z));
+                    if out.get(at_surface) != Block::Air {
+                        continue;
+                    }
+
+                    // Scan downward for the first solid voxel in this chunk.
+                    let mut floor_ly = ly_at_h - 1;
+                    while floor_ly >= 0
+                        && out.get(LocalPos(UVec3::new(x, floor_ly as u32, z))) == Block::Air
+                    {
+                        floor_ly -= 1;
+                    }
+                    if floor_ly < 0 {
+                        continue; // Floor is below chunk bottom; skip.
+                    }
+
+                    // Determine the appropriate surface block for this
+                    // column using the same climate-driven surface rule
+                    // tree as the main fill, but with h_target set to
+                    // the cave floor position so the surface-band and
+                    // above-preliminary-surface checks pass correctly.
+                    let floor_wy = chunk_origin.y + floor_ly;
+                    let surf_ctx = surface::SurfaceContext {
+                        wx,
+                        wy: floor_wy,
+                        wz,
+                        h_target: floor_wy, // floor IS the new local surface
+                        biome: col.biome,
+                        is_cliff: col.is_cliff,
+                        desertness: col.desertness,
+                        depth_below_surface: 0,
+                        lake_rim: col.lake_rim,
+                        seed: self.seed,
+                        cfg: &cfg,
+                        sea_level: SEA_LEVEL,
+                    };
+                    let surface_block = cfg.surface.apply(&surf_ctx).unwrap_or(Block::Grass);
+
+                    // Only replace Stone (bare cave floor) — don't
+                    // overwrite water / lava / already-surface blocks.
+                    // Additionally verify the block below the floor is also
+                    // solid (not Air) to prevent misidentifying a floating
+                    // block (e.g. a ceiling converted from grass by Pass A)
+                    // as a cave floor.
+                    let floor_pos = LocalPos(UVec3::new(x, floor_ly as u32, z));
+                    let floor_is_true_floor = floor_ly == 0
+                        || out.get(LocalPos(UVec3::new(x, (floor_ly - 1) as u32, z))) != Block::Air;
+                    if out.get(floor_pos) == Block::Stone && floor_is_true_floor {
+                        out.set(floor_pos, surface_block);
+                    }
+
+                    // Lateral spread: for neighbours within SURFACE_SPREAD
+                    // in XZ that also have air at the floor_wy level and
+                    // stone below it, apply the same surface block.
+                    for dx in -SURFACE_SPREAD..=SURFACE_SPREAD {
+                        for dz in -SURFACE_SPREAD..=SURFACE_SPREAD {
+                            if dx == 0 && dz == 0 {
+                                continue;
+                            }
+                            let nx = x as i32 + dx;
+                            let nz = z as i32 + dz;
+                            if nx < 0 || nx >= dim as i32 {
+                                continue;
+                            }
+                            if nz < 0 || nz >= dim as i32 {
+                                continue;
+                            }
+                            // The neighbour's floor: scan from the same
+                            // ly_at_h level downward to find *its* floor.
+                            let mut nly = ly_at_h - 1;
+                            while nly >= 0
+                                && out.get(LocalPos(UVec3::new(nx as u32, nly as u32, nz as u32)))
+                                    == Block::Air
+                            {
+                                nly -= 1;
+                            }
+                            if nly < 0 {
+                                continue;
+                            }
+                            let n_floor_pos =
+                                LocalPos(UVec3::new(nx as u32, nly as u32, nz as u32));
+                            let n_above_pos =
+                                LocalPos(UVec3::new(nx as u32, (nly + 1) as u32, nz as u32));
+                            // Apply only if the top face is air (floor, not buried)
+                            // AND the block below is also solid (not a floating block).
+                            let n_below_is_solid = nly == 0
+                                || out.get(LocalPos(UVec3::new(nx as u32, (nly - 1) as u32, nz as u32))) != Block::Air;
+                            if out.get(n_above_pos) == Block::Air
+                                && out.get(n_floor_pos) == Block::Stone
+                                && n_below_is_solid
+                            {
+                                out.set(n_floor_pos, surface_block);
+                            }
+                        }
                     }
                 }
             }
