@@ -1076,4 +1076,133 @@ mod tests {
         let ChunkSlot::Stored { meta, .. } = chunks.get(&coord).unwrap() else { panic!() };
         assert!(!meta.light_gpu_dirty, "flush must not mark untouched chunks dirty");
     }
+
+    #[test]
+    fn decrease_dims_only_cells_lit_by_removed_torch() {
+        use crate::voxel::block::{Block, BlockRegistry};
+        use crate::voxel::chunk::{unpack_rgb, DenseChunk, PalettedChunk};
+        use crate::voxel::coords::{BlockPos, ChunkCoord, LocalPos};
+        use crate::voxel::world::ChunkSlot;
+        use glam::{IVec3, UVec3};
+        use std::collections::HashMap;
+
+        let registry = BlockRegistry::new();
+        let mut dense = DenseChunk::empty();
+        dense.set(LocalPos(UVec3::new(16, 16, 16)), Block::Torch);
+        let coord = ChunkCoord(IVec3::ZERO);
+        let mut chunks: HashMap<ChunkCoord, ChunkSlot> = HashMap::new();
+        chunks.insert(coord, ChunkSlot::Stored {
+            data: std::sync::Arc::new(PalettedChunk::compress(&dense)),
+            meta: crate::voxel::chunk::ChunkMeta {
+                sky_sources: crate::lighting::ChunkSkyLightSources::build_from_dense(
+                    &dense, coord, &registry,
+                ),
+                ..Default::default()
+            },
+        });
+
+        let mut engine = LightEngine::default();
+
+        // Step 1: light up the chunk by enqueueing the torch as a source.
+        let torch_pos = BlockPos(IVec3::new(16, 16, 16));
+        let torch_emission = registry.info(Block::Torch).emission;
+        for ch_i in 0..3 {
+            if torch_emission[ch_i] > 0 {
+                engine.block_rgb[ch_i].increase.push(crate::lighting::queue::QueueEntry {
+                    pos: torch_pos, from_level: torch_emission[ch_i], propagation_mask: 0,
+                });
+            }
+        }
+        engine.tick_with(&mut chunks, &registry, 50_000);
+        // Confirm: adjacent cell is lit.
+        let adj_idx = LocalPos(UVec3::new(17, 16, 16)).to_index();
+        {
+            let ChunkSlot::Stored { data, .. } = chunks.get(&coord).unwrap() else { panic!() };
+            let (r0, _, _) = unpack_rgb(data.decompress().block_rgb[adj_idx]);
+            assert!(r0 >= 12, "torch should light adjacent cell first; got R={r0}");
+        }
+
+        // Step 2: remove the torch — replace with Air, enqueue the block change.
+        if let Some(ChunkSlot::Stored { data, .. }) = chunks.get_mut(&coord) {
+            let mut d = data.decompress();
+            d.set(LocalPos(UVec3::new(16, 16, 16)), Block::Air);
+            *data = std::sync::Arc::new(PalettedChunk::compress(&d));
+        }
+        engine.enqueue_block_change(torch_pos, Block::Torch, Block::Air);
+        engine.tick_with(&mut chunks, &registry, 50_000);
+
+        // Confirm: adjacent cell is now dark on R channel.
+        let ChunkSlot::Stored { data, .. } = chunks.get(&coord).unwrap() else { panic!() };
+        let (r1, _, _) = unpack_rgb(data.decompress().block_rgb[adj_idx]);
+        assert_eq!(r1, 0, "adjacent cell should be fully dark after torch removal; got R={r1}");
+    }
+
+    #[test]
+    fn decrease_preserves_cells_lit_by_independent_torch() {
+        use crate::voxel::block::{Block, BlockRegistry};
+        use crate::voxel::chunk::{unpack_rgb, DenseChunk, PalettedChunk};
+        use crate::voxel::coords::{BlockPos, ChunkCoord, LocalPos};
+        use crate::voxel::world::ChunkSlot;
+        use glam::{IVec3, UVec3};
+        use std::collections::HashMap;
+
+        let registry = BlockRegistry::new();
+        let mut dense = DenseChunk::empty();
+        // Two torches at distance 10 (each lights ~12 blocks away; regions overlap).
+        dense.set(LocalPos(UVec3::new(10, 16, 16)), Block::Torch);
+        dense.set(LocalPos(UVec3::new(20, 16, 16)), Block::Torch);
+        let coord = ChunkCoord(IVec3::ZERO);
+        let mut chunks: HashMap<ChunkCoord, ChunkSlot> = HashMap::new();
+        chunks.insert(coord, ChunkSlot::Stored {
+            data: std::sync::Arc::new(PalettedChunk::compress(&dense)),
+            meta: crate::voxel::chunk::ChunkMeta {
+                sky_sources: crate::lighting::ChunkSkyLightSources::build_from_dense(
+                    &dense, coord, &registry,
+                ),
+                ..Default::default()
+            },
+        });
+
+        let mut engine = LightEngine::default();
+        let pos_a = BlockPos(IVec3::new(10, 16, 16));
+        let pos_b = BlockPos(IVec3::new(20, 16, 16));
+        let torch_emission = registry.info(Block::Torch).emission;
+        for pos in [pos_a, pos_b] {
+            for ch_i in 0..3 {
+                if torch_emission[ch_i] > 0 {
+                    engine.block_rgb[ch_i].increase.push(crate::lighting::queue::QueueEntry {
+                        pos, from_level: torch_emission[ch_i], propagation_mask: 0,
+                    });
+                }
+            }
+        }
+        engine.tick_with(&mut chunks, &registry, 200_000);
+
+        // Cell at (15, 16, 16) is midway — lit by both torches.
+        let mid_idx = LocalPos(UVec3::new(15, 16, 16)).to_index();
+        let mid_before = {
+            let ChunkSlot::Stored { data, .. } = chunks.get(&coord).unwrap() else { panic!() };
+            unpack_rgb(data.decompress().block_rgb[mid_idx]).0
+        };
+        assert!(mid_before >= 7, "midway cell should be lit by both torches; got R={mid_before}");
+
+        // Remove torch A.
+        if let Some(ChunkSlot::Stored { data, .. }) = chunks.get_mut(&coord) {
+            let mut d = data.decompress();
+            d.set(LocalPos(UVec3::new(10, 16, 16)), Block::Air);
+            *data = std::sync::Arc::new(PalettedChunk::compress(&d));
+        }
+        engine.enqueue_block_change(pos_a, Block::Torch, Block::Air);
+        engine.tick_with(&mut chunks, &registry, 200_000);
+
+        // The midway cell should STILL be lit (by torch B).
+        let mid_after = {
+            let ChunkSlot::Stored { data, .. } = chunks.get(&coord).unwrap() else { panic!() };
+            unpack_rgb(data.decompress().block_rgb[mid_idx]).0
+        };
+        assert!(
+            mid_after >= 4,
+            "midway cell should remain lit by torch B after torch A removed; got R={mid_after} (was {mid_before})",
+        );
+    }
 }
