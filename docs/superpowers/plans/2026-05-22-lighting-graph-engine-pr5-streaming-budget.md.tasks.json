@@ -1,0 +1,26 @@
+{
+  "planPath": "docs/superpowers/plans/2026-05-22-lighting-graph-engine-pr5-streaming-budget.md",
+  "tasks": [
+    {
+      "id": 1,
+      "subject": "Task 1: Promote BucketQueue::len() and add LightEngine::pending_ops_count()",
+      "status": "pending",
+      "description": "**Goal:** Expose queue depth from `LightEngine` so the call site in `app.rs` can read it without `#[cfg(test)]` restrictions.\n\n**Files:**\n- Modify: `src/lighting/queue.rs` (remove `#[cfg(test)]` from `len()`)\n- Modify: `src/lighting/engine.rs` (add `pending_ops_count()` + unit test)\n\n**Acceptance Criteria:**\n- [ ] `BucketQueue::len()` compiles in non-test builds\n- [ ] `LightEngine::pending_ops_count()` returns sum of all pending work\n- [ ] `pending_ops_count_reports_queue_depth` test passes\n- [ ] `cargo test` 256+ tests pass\n- [ ] `cargo clippy` clean\n\n**Verify:** `cargo test pending_ops_count -- --nocapture` → 1 test passing\n\n```json:metadata\n{\"files\": [\"src/lighting/queue.rs\", \"src/lighting/engine.rs\"], \"verifyCommand\": \"cargo test pending_ops_count -- --nocapture\", \"acceptanceCriteria\": [\"BucketQueue::len() compiles without #[cfg(test)]\", \"pending_ops_count() sums all channel queue depths\", \"pending_ops_count_reports_queue_depth test passes\", \"cargo test all 256+ tests pass\", \"cargo clippy clean\"]}\n```"
+    },
+    {
+      "id": 2,
+      "subject": "Task 2: Dynamic budget in app.rs + PerfSnapshot::light_ops_pending",
+      "status": "pending",
+      "blockedBy": [1],
+      "description": "**Goal:** Replace the hardcoded 50k budget with a dynamic choice (500k during stream-in, 50k at rest) and track queue depth in `PerfSnapshot` for the HUD.\n\n**Files:**\n- Modify: `src/app.rs`\n\n**Acceptance Criteria:**\n- [ ] `PerfSnapshot` has a `light_ops_pending: usize` field\n- [ ] Budget is 500_000 when `chunks_pending > 100 || light_pending > 10_000`; 50_000 otherwise\n- [ ] `perf.light_ops_pending` is set each frame to the pre-tick queue depth\n- [ ] `cargo test` passes\n- [ ] `cargo clippy` clean\n\n**Verify:** `cargo test && cargo clippy` → all pass\n\n```json:metadata\n{\"files\": [\"src/app.rs\"], \"verifyCommand\": \"cargo test && cargo clippy\", \"acceptanceCriteria\": [\"PerfSnapshot::light_ops_pending field exists\", \"budget 500_000 when chunks_pending > 100 or light_pending > 10_000\", \"budget 50_000 otherwise\", \"perf.light_ops_pending set per frame\", \"all tests pass\", \"clippy clean\"]}\n```"
+    },
+    {
+      "id": 3,
+      "subject": "Task 3: HUD LO rename + profiler light_ops rename",
+      "status": "pending",
+      "blockedBy": [2],
+      "description": "**Goal:** Replace the always-zero legacy `LQ` HUD counter with `LO` (light ops pending) from `perf.light_ops_pending`; rename CSV field.\n\n**Files:**\n- Modify: `src/render/hud.rs`\n- Modify: `src/profiler.rs`\n- Modify: `src/app.rs` (profiler flush call site)\n\n**Acceptance Criteria:**\n- [ ] HUD shows `LO:` not `LQ:` on non-legacy builds\n- [ ] `FrameCounters::light_ops` (not `light_queue`) in profiler.rs\n- [ ] CSV header has `light_ops`\n- [ ] Profiler flush uses `light_ops: self.perf.light_ops_pending as u32`\n- [ ] `grep -r \"light_queue\" src/` only matches legacy-lighting path\n\n**Verify:** `cargo test && cargo clippy && grep -r 'light_queue' src/`\n\n```json:metadata\n{\"files\": [\"src/render/hud.rs\", \"src/profiler.rs\", \"src/app.rs\"], \"verifyCommand\": \"cargo test && cargo clippy && grep -r 'light_queue' src/\", \"acceptanceCriteria\": [\"HUD shows LO: on default builds\", \"FrameCounters::light_ops field\", \"CSV header has light_ops\", \"profiler flush uses light_ops\", \"grep light_queue only legacy-lighting path\"]}\n```"
+    }
+  ],
+  "lastUpdated": "2026-05-22T00:00:00Z"
+}
