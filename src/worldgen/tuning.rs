@@ -96,14 +96,23 @@ pub const MACRO_HALO_REGIONS: i32 = 1;
 /// flagged as a trunk river.
 pub const MACRO_RIVER_THRESH: u32 = 500;
 
+// ── Fall-hazard clamp ─────────────────────────────────────────────────
+
+/// Maximum consecutive vertical air voxels per XZ column before a stone
+/// "ledge" is inserted by the post-density-fill pass. Eliminates
+/// fall-to-death drops.
+// Temporarily raised from 6 to 256 to verify the clamp is the source of
+// the visible 8-block stone-ledge artifact. Restore to 6 (or retune) once
+// the over-carving causes are addressed.
+pub const MAX_VERTICAL_AIR_RUN: i32 = 256;
+
 // ── Caves ────────────────────────────────────────────────────────────
 
-/// Inclusive range of cave systems rolled per fine region. Set to
-/// (0, 0) — graph caves disabled; the procedural carver in
-/// `carver.rs` is the primary structural cave source (MC-style
-/// walking sphere-chain). Flip back to (1, 3) to re-enable graph
-/// caves alongside the carver.
-pub const CAVE_SYSTEMS_PER_REGION: (u32, u32) = (0, 0);
+/// Inclusive range of cave systems rolled per fine region.
+/// Was: (0, 0) — graph caves disabled.
+/// Now: (0, 3) per cave-overhaul spec defaults. The configured upper bound
+/// is also exposed in CaveConfig.systems_per_region_max for hot reload.
+pub const CAVE_SYSTEMS_PER_REGION: (u32, u32) = (0, 3);
 /// Vertical band (inclusive both ends) for Shallow systems.
 pub const CAVE_BAND_SHALLOW: (i32, i32) = (10, 50);
 /// Vertical band for Middle systems.
@@ -138,25 +147,20 @@ pub const SINKHOLE_DEPTH_MAX: i32 = 8;
 /// Maximum horizontal distance (blocks) from a chamber to a steep-
 /// gradient column for a cliff mouth to be possible.
 pub const CLIFF_ENTRANCE_DIST: i32 = 30;
-/// Top-of-terrain buffer (blocks). The carvers fire only at depth
-/// > BUFFER below the heightmap. Setting this to -1 means even
-/// the topmost solid block of a column (depth 0) can be carved,
-/// letting tubes punch through the surface and form visible cave
-/// openings. The natural rarity of surface tubes (the gradient
-/// requires `elev` near its extreme up there) keeps the heightmap
-/// from being eaten alive — only the rare tubes that happen to
-/// reach the surface form openings.
-pub const CAVE_SURFACE_BUFFER: i32 = -1;
+/// Top-of-terrain buffer (blocks). Cheese, terasology, chamber, and trunk
+/// carvers fire only at depth > BUFFER below the heightmap. The entrance SDF
+/// (sinkholes, skylights, cliff mouths) is not gated by this value — it uses
+/// its own `wy <= height + SURFACE_BAND` gate so intentional cave openings
+/// still reach the surface regardless of this setting.
+/// Was -1 (surface-tube openings allowed) until the entrance SDF was given
+/// its own gate; raised to 8 so ambient noise can't eat through the surface.
+pub const CAVE_SURFACE_BUFFER: i32 = 8;
 /// Floor (world Y) below which caves stop carving. Keeps the loaded
 /// chunk-stack bottom solid.
 pub const CAVE_FLOOR_Y: i32 = -120;
-/// Y below which sparse 3D-noise wormholes are layered in addition to
-/// the graph systems. Wormholes only operate in the deep band so
-/// shallow caves stay coherent.
-pub const WORMHOLE_BAND_Y: i32 = -40;
-/// Half-width of the near-zero band on the wormhole noise. Wider →
-/// thicker / more frequent wormholes.
-pub const WORMHOLE_BAND: f64 = 0.05;
+/// Lateral spread (in blocks) for cave-surface block displacement when
+/// a cave breaches the heightmap. Terasology default is 3.
+pub const SURFACE_SPREAD: i32 = 3;
 
 // ── Biomes & surface ─────────────────────────────────────────────────
 

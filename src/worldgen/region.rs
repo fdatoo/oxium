@@ -198,6 +198,15 @@ pub struct CaveSystem {
     pub chambers: Vec<Chamber>,
     pub tunnels: Vec<Tunnel>,
     pub entrances: Vec<Entrance>,
+    /// Style rolled once per system, drives chamber/tunnel parameters.
+    pub style: crate::worldgen::caves::CaveStyle,
+    /// Optional cross-region trunk to a neighbour-region cave system.
+    /// Populated in PR3.3 by `build_trunks`.
+    pub trunk: Option<Tunnel>,
+    /// In-region vertical connectors between this system and adjacent-band
+    /// systems in the same region (Shallow↔Middle, Middle↔Deep).
+    /// Populated in PR3.2 by `build_vertical_connectors`.
+    pub vertical_connectors: Vec<Tunnel>,
 }
 
 /// One chamber — an ellipsoid of air. Radii independent per axis.

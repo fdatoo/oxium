@@ -43,8 +43,43 @@ impl ChannelParams {
     }
 }
 
+/// Per-style parameter ranges for cave-system construction. Lives in
+/// `CaveConfig` so RON hot reload can retune styles without recompile.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CaveStyleTable {
+    /// (min, max) chambers per system, per style.
+    pub cathedral_chamber_count: (u32, u32),
+    pub warren_chamber_count: (u32, u32),
+    pub slot_chamber_count: (u32, u32),
+    pub sump_chamber_count: (u32, u32),
+    pub karst_chamber_count: (u32, u32),
+    /// (min, max) chamber radii in XZ.
+    pub cathedral_r_xz: (f32, f32),
+    pub warren_r_xz: (f32, f32),
+    pub slot_r_xz: (f32, f32),
+    pub sump_r_xz: (f32, f32),
+    pub karst_r_xz: (f32, f32),
+    /// (min, max) chamber radii in Y.
+    pub cathedral_r_y: (f32, f32),
+    pub warren_r_y: (f32, f32),
+    pub slot_r_y: (f32, f32),
+    pub sump_r_y: (f32, f32),
+    pub karst_r_y: (f32, f32),
+    /// (min, max) tunnel radius.
+    pub cathedral_tunnel_r: (f32, f32),
+    pub warren_tunnel_r: (f32, f32),
+    pub slot_tunnel_r: (f32, f32),
+    pub sump_tunnel_r: (f32, f32),
+    pub karst_tunnel_r: (f32, f32),
+    /// Band-biased style weights `[Cathedral, Warren, Slot, Sump, Karst]`.
+    /// Each must sum to 1.0.
+    pub style_weights_shallow: [f32; 5],
+    pub style_weights_middle: [f32; 5],
+    pub style_weights_deep: [f32; 5],
+}
+
 /// Cave-carving tunables — applies to the noise carvers (cheese,
-/// spaghetti, pillars), not the graph cave systems.
+/// pillars), not the graph cave systems.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CaveConfig {
     // Cheese: signed-density carver, see `cheese_contribution`.
@@ -87,39 +122,6 @@ pub struct CaveConfig {
     /// carving everywhere.
     pub cave_layer_intensity: f32,
 
-    // Spaghetti: signed-density tube carver, see `spaghetti_contribution`.
-    pub spaghetti_2d: ChannelParams,
-    pub spaghetti_2d_modulator: ChannelParams,
-    pub spaghetti_2d_elevation: ChannelParams,
-    pub spaghetti_2d_thickness: ChannelParams,
-    pub spaghetti_roughness: ChannelParams,
-    /// Linear remap range for the elevation modulator. The
-    /// elevation noise output is mapped to `[min, max]` and added
-    /// to the y-clamped gradient to find the tube centerline.
-    pub spaghetti_elevation_min: f32,
-    pub spaghetti_elevation_max: f32,
-    /// Y-clamped gradient endpoints. Added to the mapped
-    /// elevation noise before the abs() that defines the tube
-    /// distance. Larger positive values suppress tubes; negative
-    /// values let them carve.
-    pub spaghetti_gradient_from_y: i32,
-    pub spaghetti_gradient_from_value: f32,
-    pub spaghetti_gradient_to_y: i32,
-    pub spaghetti_gradient_to_value: f32,
-    /// Thickness modulator linear remap: `offset + slope *
-    /// thickness_noise`. A negative offset biases the cube term
-    /// (see `spaghetti_contribution`) so tube interiors go
-    /// negative; the noise-driven slope adds per-region width
-    /// variation.
-    pub spaghetti_thickness_offset: f32,
-    pub spaghetti_thickness_slope: f32,
-    /// Final clamp range on the spaghetti density.
-    pub spaghetti_clamp_min: f32,
-    pub spaghetti_clamp_max: f32,
-    /// Coefficient on the thickness modulator inside the
-    /// region-modulated cave noise term.
-    pub spaghetti_cave_noise_offset: f32,
-
     // Pillars: positive density that gets max()'d at the end so
     // they refill carved voxels (stone columns inside open caves).
     pub pillar: ChannelParams,
@@ -130,39 +132,56 @@ pub struct CaveConfig {
     pub pillar_cutoff: f32,
     pub pillar_intensity: f32,
 
-    /// Raw-density threshold below which the noise carvers
-    /// (spaghetti + cheese) are silent. The graph cave system's
-    /// entrances still carve below this, providing the deliberate
-    /// surface openings. Above it (deeper underground), all
-    /// carvers operate.
+    /// Raw-density threshold below which the noise carvers (cheese)
+    /// are silent. The graph cave system's entrances still carve
+    /// below this, providing the deliberate surface openings. Above
+    /// it (deeper underground), all carvers operate.
     pub underground_density_threshold: f32,
 
-    // ── Surface entrance noise ──────────────────────────────────────
-    //
-    // A dedicated noise-driven carver that runs in the surface
-    // band only, punching small holes through the heightmap. Acts
-    // as the "natural cave entrance" carver alongside the graph
-    // cave system's chamber-attached entrances (which fire only
-    // under specific geometric conditions). This one is purely
-    // noise-gated and produces many small openings everywhere.
-    pub surface_entrance: ChannelParams,
-    /// XZ scale on the surface entrance noise sample.
-    pub surface_entrance_xz_scale: f32,
-    /// Y scale on the surface entrance noise sample. Smaller = the
-    /// entrance "shaft" stays straight; larger = wobbly bores.
-    pub surface_entrance_y_scale: f32,
-    /// Noise threshold above which the entrance fires. Larger →
-    /// fewer entrances; smaller → more.
-    pub surface_entrance_threshold: f32,
-    /// Carve intensity. Translated to a negative signed-density
-    /// contribution in `surface_entrance_contribution`.
-    pub surface_entrance_intensity: f32,
-    /// Active Y window. Outside this range the entrance noise is
-    /// silent. Should bracket the player's expected surface band.
-    pub surface_entrance_y_min: i32,
-    pub surface_entrance_y_max: i32,
-    /// Soft-edge fade width at each Y boundary.
-    pub surface_entrance_fade_blocks: i32,
+    // ── Terasology depth-driven ambient ──────────────────────────────
+    /// 4-octave FBM-Simplex channels for the two-noise intersection
+    /// that defines the meandering tubes of the ambient cave layer.
+    pub tera_a: ChannelParams,
+    pub tera_b: ChannelParams,
+    /// Noise wavelength in blocks. Default 200.
+    pub tera_wave: f32,
+    /// Surface-band suppression magnitude — shift applied to noise B
+    /// near the heightmap to push the cave region off-axis. Default 0.17.
+    pub tera_supp: f32,
+    /// Block depth over which the suppression fades to zero. Default 123.
+    pub tera_supp_depth: f32,
+    /// Base radius of the cave region in noise space (at depth 0). Default 0.073.
+    pub tera_thresh_base: f32,
+    /// Depth-divisor: threshold += depth / this. Default 2229.
+    pub tera_thresh_depth: f32,
+    /// Y-anisotropy: multiplier on wy when sampling tera noise. Higher
+    /// values force tube iso-surfaces to bend horizontal. Default 3.56.
+    pub tera_y_factor: f32,
+
+    pub style_table: CaveStyleTable,
+    /// Per-chamber depth-driven radius multiplier.
+    /// `mult(cy) = 1.0 + depth_scale * max(0, (40 - cy) / 80)`.
+    pub depth_scale: f32,
+    /// Share of cave systems rolled into the Deep band.
+    /// 0.0 = uniform thirds; 1.0 = heavily deep.
+    pub deep_band_bias: f32,
+    /// Max cave systems per region; sweep-chosen 3.
+    pub systems_per_region_max: u32,
+    /// Per-chamber radius jitter multiplier range. (0.7, 1.3) → ×0.7..×1.3.
+    pub chamber_radius_jitter: (f32, f32),
+    /// Probability that two systems in adjacent bands of the same region
+    /// are linked by a vertical connector tunnel.
+    pub vertical_connector_prob: f32,
+    /// Vertical-connector tunnel radius.
+    pub vertical_connector_r: f32,
+    /// Probability that a cave system has a cross-region trunk to a
+    /// neighbour-region system's chamber 0.
+    pub trunk_prob: f32,
+    /// Cross-region trunk radius.
+    pub trunk_r: f32,
+    /// Smooth-min radius for cave layer joins. 0.0 = strict min().
+    /// Default 1.2 merges nearly-touching pockets (within ~1.2 in SDF units).
+    pub smin_k: f32,
 }
 
 /// PR 4 biome lookup config. The 6 existing biomes (Tundra,

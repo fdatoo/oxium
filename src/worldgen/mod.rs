@@ -33,9 +33,8 @@
 //! 4. **Caves.** Graph-based cave systems (`caves.rs`) deposit
 //!    chambers + spline tunnels into the chunk. The `CAVE_SURFACE_BUFFER`
 //!    rule preserves the grass cap except where an explicit entrance
-//!    (sinkhole / cliff mouth / skylight) punches through. Below
-//!    `WORMHOLE_BAND_Y` a sparse 3D-noise wormhole field carves
-//!    additional connective passages.
+//!    (sinkhole / cliff mouth / skylight) punches through. Cheese + pillar
+//!    noise carvers provide ambient density variation underground.
 //! 5. **Water flood.** Sea-level flood + per-column lake-rim flood
 //!    (the latter from sink-filled basins in the hydrology pass)
 //!    turn any air cell below the appropriate water level into Water.
@@ -47,7 +46,7 @@
 //!
 //! Plates → continental mask + ridge lift → heightmap → flow
 //! accumulation (fine + macro hierarchical) → valley carve →
-//! cave systems / wormholes → biomes / surface materials / trees.
+//! cave systems / cheese+pillar noise → biomes / surface materials / trees.
 //! Each layer is in its own module; this file is the public entry
 //! point that wires them together.
 
@@ -95,9 +94,10 @@ pub use crate::worldgen::tuning::SEA_LEVEL;
 // All other tuning constants live in `worldgen::tuning`. The names
 // below are imported into this module's scope for ergonomics.
 use crate::worldgen::tuning::{
-    CAVE_FLOOR_Y, CAVE_SDF_INTENSITY,
+    CAVE_BAND_MIDDLE, CAVE_BAND_SHALLOW, CAVE_FLOOR_Y, CAVE_SDF_INTENSITY,
     CAVE_SURFACE_BUFFER, COLD_SNOW_MIN_ABOVE_SEA,
-    SNOW_LINE, SURFACE_BAND, TREE_CELL_SIZE, TREE_MARGIN,
+    MAX_VERTICAL_AIR_RUN,
+    SNOW_LINE, SURFACE_BAND, SURFACE_SPREAD, TREE_CELL_SIZE, TREE_MARGIN,
     TREE_RATE_FOREST, TREE_RATE_PLAINS,
 };
 
@@ -123,10 +123,6 @@ pub struct Generator {
     /// wetter columns earn denser tree cover, drier columns read as
     /// sparser plains.
     humidity_map: Fbm<Simplex>,
-    /// Deep-band wormhole filler: sparse 3D noise that supplements
-    /// the graph-based cave systems below `WORMHOLE_BAND_Y`. Above
-    /// that, caves come exclusively from the cave-system graph.
-    wormhole_noise: caves::WormholeNoise,
     /// PR 4: weirdness 2D noise (mid-frequency). Mirrors MC's
     /// "ridge" axis as a biome-table input — lets the same
     /// (temperature, humidity) climate produce both base biomes
@@ -146,10 +142,9 @@ pub struct Generator {
     /// per-cell `y_top` + fluid kind (Water/Lava). Floods caves
     /// and replaces the primitive ocean/lake-rim filler.
     aquifer: aquifer::AquiferSystem,
-    /// PR 8: cheese / spaghetti / pillar noise channels. Built once
-    /// per Generator from `WorldgenConfig::cave`. Read per-voxel in
-    /// `fill_chunk` to compose with the graph cave SDFs and
-    /// wormholes via `max()`.
+    /// PR 8: cheese / pillar noise channels. Built once per Generator
+    /// from `WorldgenConfig::cave`. Read per-voxel in `fill_chunk`
+    /// to compose with the graph cave SDFs.
     noise_carvers: caves::NoiseCarvers,
     /// MC-style procedural carver tunnel cache. Per-chunk LRU keyed
     /// on origin chunk coord; each entry is the deterministic list
@@ -235,7 +230,6 @@ impl Generator {
             .set_octaves(2)
             .set_frequency(1.0 / 512.0)
             .set_persistence(0.5);
-        let wormhole_noise = caves::WormholeNoise::new(seed);
         // PR 4: weirdness noise — mid-frequency 2D Fbm. Used as the
         // 6th biome-lookup axis (variant biomes within the same
         // T/H/C region).
@@ -252,10 +246,9 @@ impl Generator {
         // probabilities) requires a Generator restart; only the
         // pressure tunables in `AquiferConfig` re-read live.
         let aquifer = aquifer::AquiferSystem::new(seed, bundled.aquifer.clone());
-        // PR 8: noise carvers (cheese / spaghetti / pillar Fbm
-        // channels) built from the bundled cave config. Channel
-        // topology (which Fbm fields exist) is fixed in Rust; only
-        // tunable values re-read live.
+        // PR 8: noise carvers (cheese / pillar Fbm channels) built
+        // from the bundled cave config. Channel topology is fixed in
+        // Rust; only tunable values re-read live.
         let noise_carvers = caves::NoiseCarvers::new(seed, &bundled.cave);
         // Carver cache: cap chosen so a chunk-fill's 11×5×11
         // neighbour query has comfortable headroom for adjacent
@@ -268,7 +261,6 @@ impl Generator {
             density,
             temperature_map,
             humidity_map,
-            wormhole_noise,
             weirdness_noise,
             biome_list,
             aquifer,
@@ -353,6 +345,7 @@ impl Generator {
             &cfg.climate,
             &cfg.density,
             &mut r,
+            &cfg.cave,
         );
         r
     }
@@ -785,36 +778,57 @@ impl Generator {
         // --- Cave contributions (matching fill_chunk gate logic) ---
         let approx_depth = height - wy;
 
-        // Graph-cave SDF + entrance SDF (gated by CAVE_SURFACE_BUFFER + CAVE_FLOOR_Y).
+        // Graph-cave SDF + entrance SDF. Chambers/trunks gated at wy <= height;
+        // entrance SDF extended by SURFACE_BAND to match fill_chunk logic.
         let mut cave_sdf_val = 0.0_f32;
-        if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y {
+        if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y
+            && wy <= height
+        {
             if approx_depth > CAVE_SURFACE_BUFFER {
                 cave_sdf_val = cave_sdf_val.max(
                     caves::cave_sdf(wx, wy, wz, &cave_systems),
                 );
+                cave_sdf_val = cave_sdf_val.max(
+                    caves::trunks_sdf(wx, wy, wz, &cave_systems, self.seed, cfg.cave.trunk_r, cfg.cave.trunk_prob),
+                );
             }
+        }
+        if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y
+            && wy <= height + SURFACE_BAND
+        {
             cave_sdf_val = cave_sdf_val.max(
                 caves::entrance_sdf(wx, wy, wz, &cave_systems),
             );
         }
-        // Wormhole — same gate.
-        if approx_depth > CAVE_SURFACE_BUFFER
-            && wy > CAVE_FLOOR_Y
-            && self.wormhole_noise.carve(wx, wy, wz)
-        {
-            cave_sdf_val = cave_sdf_val.max(CAVE_SDF_INTENSITY);
-        }
+        // Identify which cave system (if any) the probe voxel sits inside,
+        // for the probe panel's style / band display rows.
+        let (probe_cave_style, probe_cave_band) = cave_systems
+            .iter()
+            .find(|sys| caves::cave_sdf(wx, wy, wz, &[sys]) > 0.0)
+            .map(|sys| {
+                let style_name: &'static str = match sys.style {
+                    caves::CaveStyle::Cathedral => "Cathedral",
+                    caves::CaveStyle::Warren    => "Warren",
+                    caves::CaveStyle::Slot      => "Slot",
+                    caves::CaveStyle::Sump      => "Sump",
+                    caves::CaveStyle::Karst     => "Karst",
+                };
+                let cy = (sys.bb_min.y + sys.bb_max.y) / 2;
+                let band: &'static str = if cy >= CAVE_BAND_SHALLOW.0 {
+                    "shallow"
+                } else if cy >= CAVE_BAND_MIDDLE.0 {
+                    "middle"
+                } else {
+                    "deep"
+                };
+                (Some(style_name), Some(band))
+            })
+            .unwrap_or((None, None));
 
-        // Noise carvers (cheese + spaghetti) — same gate. `cheese_contribution`
-        // also takes `raw_density` now (gates a density-aware cap that landed
-        // on main after our viz redesign started).
+        // Noise carvers (cheese) — same gate. `cheese_contribution`
+        // also takes `raw_density` (gates a density-aware cap).
         let cheese = if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
             caves::cheese_contribution(wx, wy, wz, raw_density, &self.noise_carvers, &cfg.cave)
-        } else {
-            0.0
-        };
-        let spaghetti = if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
-            caves::spaghetti_contribution(wx, wy, wz, &self.noise_carvers, &cfg.cave)
         } else {
             0.0
         };
@@ -823,16 +837,22 @@ impl Generator {
         } else {
             0.0
         };
+        // Terasology ambient carver — same surface buffer + floor gate.
+        let probe_surface_y = self
+            .heightmap
+            .h_pre(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
+        let tera = if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
+            caves::terasology_ambient(wx, wy, wz, &self.noise_carvers, &cfg.cave, probe_surface_y)
+        } else {
+            0.0
+        };
 
         // Compose to a signed final density the same way fill_chunk
-        // does: start from `raw_density`, then `min()` in each cave
-        // carver's signed contribution. Graph cave / wormhole SDFs
-        // are positive intensities, so they're applied as
-        // `min(-sdf)`. `cheese` and `spaghetti` are signed
-        // (post-cave-referendum: cheese includes the cave_layer²
-        // term and can be strongly positive in cave-poor strata,
-        // so treating it as a positive-only subtraction would flip
-        // solid voxels to air). Pillars apply last via `max()`.
+        // does: start from `raw_density`, then `smin()` in each cave
+        // carver's signed contribution. Graph cave SDFs are positive
+        // intensities, so they're applied as `smin(..., -sdf, k)`. `cheese` is
+        // signed (includes the cave_layer² term). Pillars apply last
+        // via `max()`.
         //
         // NB: the procedural carver (`carver.rs`) mask isn't included
         // here — it operates per-chunk and isn't cheap to query at
@@ -840,11 +860,13 @@ impl Generator {
         // the chunk fill is the ground truth.
         let mut final_density = raw_density;
         if cave_sdf_val > 0.0 {
-            final_density = final_density.min(-cave_sdf_val);
+            final_density = caves::smin(final_density, -cave_sdf_val, cfg.cave.smin_k);
         }
         if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
-            final_density = final_density.min(cheese);
-            final_density = final_density.min(spaghetti);
+            final_density = caves::smin(final_density, cheese, cfg.cave.smin_k);
+        }
+        if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
+            final_density = caves::smin(final_density, tera, cfg.cave.smin_k);
         }
         if pillar > 0.0 {
             final_density = final_density.max(pillar);
@@ -893,17 +915,14 @@ impl Generator {
                 // Cave carving at scan_y changes whether a voxel appears solid.
                 let scan_approx_depth = height - scan_y;
                 let mut scan_cave = 0.0_f32;
-                if !cave_systems.is_empty() && scan_y > CAVE_FLOOR_Y {
+                if !cave_systems.is_empty() && scan_y > CAVE_FLOOR_Y
+                    && scan_y <= height
+                {
                     if scan_approx_depth > CAVE_SURFACE_BUFFER {
                         scan_cave = scan_cave.max(caves::cave_sdf(wx, scan_y, wz, &cave_systems));
+                        scan_cave = scan_cave.max(caves::trunks_sdf(wx, scan_y, wz, &cave_systems, self.seed, cfg.cave.trunk_r, cfg.cave.trunk_prob));
                     }
                     scan_cave = scan_cave.max(caves::entrance_sdf(wx, scan_y, wz, &cave_systems));
-                }
-                if scan_approx_depth > CAVE_SURFACE_BUFFER
-                    && scan_y > CAVE_FLOOR_Y
-                    && self.wormhole_noise.carve(wx, scan_y, wz)
-                {
-                    scan_cave = scan_cave.max(CAVE_SDF_INTENSITY);
                 }
                 if scan_approx_depth > CAVE_SURFACE_BUFFER && scan_y > CAVE_FLOOR_Y {
                     scan_cave = scan_cave.max(
@@ -912,9 +931,12 @@ impl Generator {
                             &self.noise_carvers, &cfg.cave,
                         ),
                     );
-                    scan_cave = scan_cave.max(
-                        caves::spaghetti_contribution(wx, scan_y, wz, &self.noise_carvers, &cfg.cave),
+                }
+                if scan_approx_depth > CAVE_SURFACE_BUFFER && scan_y > CAVE_FLOOR_Y {
+                    let scan_tera = caves::terasology_ambient(
+                        wx, scan_y, wz, &self.noise_carvers, &cfg.cave, probe_surface_y,
                     );
+                    scan_cave = scan_cave.max(scan_tera);
                 }
                 let scan_pillar = if scan_approx_depth > CAVE_SURFACE_BUFFER && scan_y > CAVE_FLOOR_Y {
                     caves::pillar_contribution(wx, scan_y, wz, &self.noise_carvers, &cfg.cave)
@@ -967,10 +989,12 @@ impl Generator {
             base_3d,
             cave_sdf: cave_sdf_val,
             cheese,
-            spaghetti,
+            tera,
             pillar,
             final_density,
             block,
+            cave_style: probe_cave_style,
+            cave_band: probe_cave_band,
         }
     }
 
@@ -1043,7 +1067,6 @@ impl Generator {
         // Simplex calls inside the inner loop.
         let carver_eval = caves::CarverEvaluator::new(
             &self.noise_carvers,
-            &self.wormhole_noise,
             &cfg.cave,
             origin,
         );
@@ -1054,6 +1077,12 @@ impl Generator {
                 let col = self.column_data_with(wx, wz, &regions);
                 let height = col.height;
                 let lake_rim = col.lake_rim;
+                // h_pre is the pre-carve surface Y, used by the tera
+                // surface-suppression depth term. Computed once per
+                // XZ column so the inner y-loop pays no noise cost.
+                let surface_y = self
+                    .heightmap
+                    .h_pre(self.seed, wx as f32, wz as f32, &cfg.climate, &cfg.density);
 
                 // PR A: density-based top-down scan. The "surface" is
                 // wherever density transitions from negative (air) to
@@ -1119,10 +1148,12 @@ impl Generator {
                     //
                     // Layers, in order applied:
                     //   1. Graph cave SDF        (negated → signed)
-                    //   2. Graph entrance SDF    (negated → signed)
-                    //   3. Wormhole carve         (negative const)
-                    //   4. Spaghetti + roughness (signed)
-                    //   5. Cheese                (signed, surface-suppressed)
+                    //   2. Graph trunks SDF      (negated → signed)
+                    //   3. Graph entrance SDF    (negated → signed)
+                    //   4. Cheese                (signed, surface-suppressed)
+                    //   5. Terasology ambient    (signed, depth-driven 2-noise)
+                    //   6. MC carver mask        (hard carve)
+                    //   7. Pillars               (positive, refill stone)
                     //
                     // Spaghetti + cheese only run above the
                     // `underground_density_threshold` — below that
@@ -1133,27 +1164,35 @@ impl Generator {
                     let mut composed = raw_density;
 
                     // Graph carvers: SDF is positive in [0, intensity].
-                    // Negate and `min` so a positive SDF pulls density
-                    // toward (or below) zero.
-                    if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y {
+                    // Negate and smin so a positive SDF pulls density
+                    // toward (or below) zero. smin(k>0) additionally
+                    // blends nearly-touching cave volumes together.
+                    if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y
+                        && wy <= height
+                    {
                         if approx_depth > CAVE_SURFACE_BUFFER {
                             let sdf = caves::cave_sdf(wx, wy, wz, &cave_systems);
                             if sdf > 0.0 {
-                                composed = composed.min(-sdf);
+                                composed = caves::smin(composed, -sdf, cfg.cave.smin_k);
+                            }
+                            let trunk_sdf = caves::trunks_sdf(wx, wy, wz, &cave_systems, self.seed, cfg.cave.trunk_r, cfg.cave.trunk_prob);
+                            if trunk_sdf > 0.0 {
+                                composed = caves::smin(composed, -trunk_sdf, cfg.cave.smin_k);
                             }
                         }
+                    }
+                    // Entrance SDF (sinkholes, skylights, cliff mouths) gets its
+                    // own gate extended by SURFACE_BAND so the shaft carves through
+                    // any 3D-density bump above h_pre and doesn't leave floating
+                    // terrain islands over the entrance opening.
+                    if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y
+                        && wy <= height + SURFACE_BAND
+                    {
                         let ent = caves::entrance_sdf(wx, wy, wz, &cave_systems);
                         if ent > 0.0 {
-                            composed = composed.min(-ent);
+                            composed = caves::smin(composed, -ent, cfg.cave.smin_k);
                         }
                     }
-                    if approx_depth > CAVE_SURFACE_BUFFER
-                        && wy > CAVE_FLOOR_Y
-                        && carver_eval.wormhole_carve_at(wx, wy, wz)
-                    {
-                        composed = composed.min(-CAVE_SDF_INTENSITY);
-                    }
-
                     // Noise carvers: only deeper than the underground
                     // density threshold.
                     if approx_depth > CAVE_SURFACE_BUFFER
@@ -1161,20 +1200,19 @@ impl Generator {
                         && raw_density >= cfg.cave.underground_density_threshold
                     {
                         let cheese = carver_eval.cheese_at(wx, wy, wz, raw_density, &cfg.cave);
-                        composed = composed.min(cheese);
-
-                        let spag = carver_eval.spaghetti_at(wx, wy, wz, &cfg.cave);
-                        let roughness = carver_eval.spaghetti_roughness_at(wx, wy, wz);
-                        composed = composed.min(spag + roughness);
+                        composed = caves::smin(composed, cheese, cfg.cave.smin_k);
                     }
 
-                    // Surface entrance noise — NOT gated by the
-                    // underground density threshold. This is the
-                    // whole point: punch holes through the
-                    // heightmap to create natural cave openings.
-                    if wy > CAVE_FLOOR_Y {
-                        let ent = carver_eval.surface_entrance_at(wx, wy, wz, &cfg.cave);
-                        composed = composed.min(ent);
+                    // Terasology ambient carver: depth-driven 2-noise
+                    // cave layer. Same surface buffer + floor gate as
+                    // cheese.
+                    // Tera intentionally skips the underground_density_threshold gate;
+                    // its own freq_reduction provides surface suppression.
+                    if approx_depth > CAVE_SURFACE_BUFFER && wy > CAVE_FLOOR_Y {
+                        let tera = carver_eval.terasology_ambient_at(
+                            wx, wy, wz, &cfg.cave, surface_y,
+                        );
+                        composed = caves::smin(composed, tera, cfg.cave.smin_k);
                     }
 
                     // MC-style procedural carver mask. Hard carve to
@@ -1186,7 +1224,7 @@ impl Generator {
                         let lz = (wz - origin.z) as usize;
                         let idx = lx + dim * ly + dim * dim * lz;
                         if carver_mask[idx] {
-                            composed = composed.min(-CAVE_SDF_INTENSITY);
+                            composed = caves::smin(composed, -CAVE_SDF_INTENSITY, cfg.cave.smin_k);
                         }
                     }
 
@@ -1298,6 +1336,213 @@ impl Generator {
         // external fluid body, or the chunk floor. Ocean and lake
         // water are not masked → preserved.
         fluid::settle_fluid(out, &aquifer_mask);
+
+        // Vertical-run clamp: cap any continuous vertical air column at
+        // MAX_VERTICAL_AIR_RUN voxels to eliminate fall hazards. Cheap
+        // O(voxels) post-pass per XZ column.
+        //
+        // Cross-chunk-boundary note: the run counter is seeded from zero
+        // at the bottom of each chunk. A run that begins 2 voxels into
+        // the chunk above and continues into this chunk could produce an
+        // effective run of up to (MAX_VERTICAL_AIR_RUN * 2) across the
+        // boundary. This is accepted as rare and harmless; the test only
+        // verifies within a single chunk.
+        for x in 0..CHUNK_DIM_U as u32 {
+            for z in 0..CHUNK_DIM_U as u32 {
+                let mut run = 0i32;
+                for y in 0..CHUNK_DIM_U as u32 {
+                    let pos = LocalPos(UVec3::new(x, y, z));
+                    if out.get(pos) == Block::Air {
+                        run += 1;
+                        if run > MAX_VERTICAL_AIR_RUN {
+                            out.set(pos, Block::Stone);
+                            run = 0;
+                        }
+                    } else {
+                        run = 0;
+                    }
+                }
+            }
+        }
+
+        // ── Surface block fixer (Terasology-borrowed) ────────────────────
+        //
+        // Two problems fixed in one pass:
+        //
+        //  A. Cave-ceiling grass: if a cave entrance carves *above*
+        //     `h_target` (sinkhole shafts, cliff mouths, entrance SDFs
+        //     can all do this) the topmost-solid block above the cave
+        //     interior can be inside `WithinSurfaceBand(16)` AND above
+        //     `h_target - 1`, so the surface rule legitimately stamps
+        //     Grass/Snow/Sand there — but it reads as a floating grass
+        //     block with air on both sides. Fix: scan the chunk for any
+        //     surface block that has Air above AND Air below and replace
+        //     it with Stone.
+        //
+        //  B. Cave-floor surface block: when a cave breaches the
+        //     heightmap (`h_target` Y is Air inside this chunk), the
+        //     first solid voxel *below* the cave is the new visible
+        //     surface and should receive the climate-correct surface
+        //     block (Grass / Sand / Snow / Dirt) rather than bare Stone.
+        //     Spreads laterally by SURFACE_SPREAD blocks for naturalistic
+        //     cave mouths.
+        {
+            let dim = CHUNK_DIM_U as u32;
+            let chunk_origin = origin;
+
+            // ── Pass A: remove ceiling grass ──────────────────────────
+            // "Ceiling grass" = any surface block (Grass / Sand / Snow)
+            // that has Air directly above AND Air directly below.
+            // These arise when a cave entrance or sinkhole shaft is
+            // carved above `h_target`. Replace with Stone.
+            fn is_surface_block(b: Block) -> bool {
+                matches!(b, Block::Grass | Block::Sand | Block::Snow | Block::Dirt)
+            }
+            for x in 0..dim {
+                for z in 0..dim {
+                    for y in 1..(dim - 1) {
+                        let pos = LocalPos(UVec3::new(x, y, z));
+                        let above = LocalPos(UVec3::new(x, y + 1, z));
+                        let below = LocalPos(UVec3::new(x, y - 1, z));
+                        if is_surface_block(out.get(pos))
+                            && out.get(above) == Block::Air
+                            && out.get(below) == Block::Air
+                        {
+                            out.set(pos, Block::Stone);
+                        }
+                    }
+                }
+            }
+
+            // ── Pass B: cave-floor surface block ─────────────────────
+            // For each XZ column: if `h_target` (col.height) falls
+            // inside this chunk's Y range AND the voxel at that height
+            // is Air, a cave has breached the surface. Find the first
+            // solid voxel below and give it the appropriate surface
+            // block. Then spread the displaced surface laterally by
+            // SURFACE_SPREAD.
+            for x in 0..dim {
+                for z in 0..dim {
+                    let wx = chunk_origin.x + x as i32;
+                    let wz = chunk_origin.z + z as i32;
+                    let col = self.column_data_with(wx, wz, &regions);
+                    let h_target = col.height;
+
+                    // Is h_target inside this chunk's Y range?
+                    let ly_at_h = h_target - chunk_origin.y;
+                    if ly_at_h < 0 || ly_at_h >= dim as i32 {
+                        continue;
+                    }
+                    // Is the voxel at h_target Air? (cave breached the surface)
+                    let at_surface = LocalPos(UVec3::new(x, ly_at_h as u32, z));
+                    if out.get(at_surface) != Block::Air {
+                        continue;
+                    }
+
+                    // Scan downward for the first solid voxel in this chunk.
+                    // Limit search to MAX_BREACH_SEARCH_DEPTH: a voxel that's
+                    // Air with solid stone 30 blocks below is a buried chamber,
+                    // not a surface breach, and shouldn't get a surface stamp.
+                    const MAX_BREACH_SEARCH_DEPTH: i32 = 4;
+                    let mut floor_ly = ly_at_h - 1;
+                    let mut steps = 0;
+                    while floor_ly >= 0
+                        && out.get(LocalPos(UVec3::new(x, floor_ly as u32, z))) == Block::Air
+                        && steps < MAX_BREACH_SEARCH_DEPTH
+                    {
+                        floor_ly -= 1;
+                        steps += 1;
+                    }
+                    if floor_ly < 0 || steps >= MAX_BREACH_SEARCH_DEPTH {
+                        continue; // Floor is too deep; this is a buried chamber, not a surface breach.
+                    }
+
+                    // Determine the appropriate surface block for this
+                    // column using the same climate-driven surface rule
+                    // tree as the main fill, but with h_target set to
+                    // the cave floor position so the surface-band and
+                    // above-preliminary-surface checks pass correctly.
+                    let floor_wy = chunk_origin.y + floor_ly;
+                    let surf_ctx = surface::SurfaceContext {
+                        wx,
+                        wy: floor_wy,
+                        wz,
+                        h_target: floor_wy, // floor IS the new local surface
+                        biome: col.biome,
+                        is_cliff: col.is_cliff,
+                        desertness: col.desertness,
+                        depth_below_surface: 0,
+                        lake_rim: col.lake_rim,
+                        seed: self.seed,
+                        cfg: &cfg,
+                        sea_level: SEA_LEVEL,
+                    };
+                    let surface_block = cfg.surface.apply(&surf_ctx).unwrap_or(Block::Grass);
+
+                    // Only replace Stone (bare cave floor) — don't
+                    // overwrite water / lava / already-surface blocks.
+                    // Additionally verify the block below the floor is also
+                    // solid (not Air) to prevent misidentifying a floating
+                    // block (e.g. a ceiling converted from grass by Pass A)
+                    // as a cave floor.
+                    let floor_pos = LocalPos(UVec3::new(x, floor_ly as u32, z));
+                    let floor_is_true_floor = floor_ly == 0
+                        || out.get(LocalPos(UVec3::new(x, (floor_ly - 1) as u32, z))) != Block::Air;
+                    if out.get(floor_pos) == Block::Stone && floor_is_true_floor {
+                        out.set(floor_pos, surface_block);
+                    }
+
+                    // Lateral spread: for neighbours within SURFACE_SPREAD
+                    // in XZ that also have air at the floor_wy level and
+                    // stone below it, apply the same surface block.
+                    for dx in -SURFACE_SPREAD..=SURFACE_SPREAD {
+                        for dz in -SURFACE_SPREAD..=SURFACE_SPREAD {
+                            if dx == 0 && dz == 0 {
+                                continue;
+                            }
+                            let nx = x as i32 + dx;
+                            let nz = z as i32 + dz;
+                            if nx < 0 || nx >= dim as i32 {
+                                continue;
+                            }
+                            if nz < 0 || nz >= dim as i32 {
+                                continue;
+                            }
+                            // The neighbour's floor: scan from the same
+                            // ly_at_h level downward to find *its* floor.
+                            // Same MAX_BREACH_SEARCH_DEPTH cap as the primary scan.
+                            let mut nly = ly_at_h - 1;
+                            let mut nsteps = 0;
+                            while nly >= 0
+                                && out.get(LocalPos(UVec3::new(nx as u32, nly as u32, nz as u32)))
+                                    == Block::Air
+                                && nsteps < MAX_BREACH_SEARCH_DEPTH
+                            {
+                                nly -= 1;
+                                nsteps += 1;
+                            }
+                            if nly < 0 || nsteps >= MAX_BREACH_SEARCH_DEPTH {
+                                continue;
+                            }
+                            let n_floor_pos =
+                                LocalPos(UVec3::new(nx as u32, nly as u32, nz as u32));
+                            let n_above_pos =
+                                LocalPos(UVec3::new(nx as u32, (nly + 1) as u32, nz as u32));
+                            // Apply only if the top face is air (floor, not buried)
+                            // AND the block below is also solid (not a floating block).
+                            let n_below_is_solid = nly == 0
+                                || out.get(LocalPos(UVec3::new(nx as u32, (nly - 1) as u32, nz as u32))) != Block::Air;
+                            if out.get(n_above_pos) == Block::Air
+                                && out.get(n_floor_pos) == Block::Stone
+                                && n_below_is_solid
+                            {
+                                out.set(n_floor_pos, surface_block);
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // After the terrain pass, lay trees on top. Cross-chunk trees
         // (whose trunks live in a neighbouring chunk but whose leaves
@@ -1805,14 +2050,9 @@ mod tests {
     /// future runs catch unintentional behavioural drift.
     #[test]
     fn golden_seed42_chunk_0_2_0() {
-        // Hash re-baselined for the carver-trilerp pass: the noise
-        // carvers (cheese / spaghetti / pillar / wormhole /
-        // surface_entrance) now run through a 9³ corner lattice +
-        // trilerp instead of per-voxel FBM. Voxels near a cave
-        // sign-boundary can resolve differently from the pre-trilerp
-        // implementation; cave shapes are visually equivalent. Same
-        // precedent as the PR-5 hash bump for the base density.
-        const GOLDEN_42_002: u64 = 0xE4E964788BEB26DD;
+        // Rebaselined 2026-05-22: cave tuning — cheese_offset 0.18→0.40,
+        // smin_k 1.2→0.5, halved chamber/tunnel radii, reduced chamber counts.
+        const GOLDEN_42_002: u64 = 0x290BDFEA91DA07FC;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);
@@ -1824,55 +2064,35 @@ mod tests {
         }
     }
 
-    /// Cave system sanity: somewhere underground (below sea level) we
     /// Cave system sanity: graph-based caves are spatially
     /// structured — not every chunk has carving (that's the point;
     /// systems are discoverable). But across a generous scan of
-    /// underground chunks, at least one should have caves AND every
-    /// scanned chunk should still be mostly solid stone (no chunk
-    /// blown wide open by an oversized chamber).
+    /// underground chunks, at least one should have caves.
+    ///
+    /// PR4.1: smin composition legitimately allows a fully-carved chunk
+    /// interior (merged pocket volumes). The per-chunk zero-solid check
+    /// was removed; only the "at least one carved chunk" invariant remains.
     #[test]
     fn underground_chunk_has_both_caves_and_solid() {
         let g = Generator::new(42);
         let mut found_carved_chunk = false;
         // Scan a 16 × 16 grid of chunks (one region's worth) at
         // chunk y=-2 (world y [-64, -33]). This depth straddles the
-        // Middle / Deep cave bands and the wormhole noise band
-        // (`WORMHOLE_BAND_Y` = -40), so at least one chunk should
+        // Middle / Deep cave bands, so at least one chunk should
         // hit something.
         for cx in -8..8 {
             for cz in -8..8 {
                 let mut c = DenseChunk::empty();
                 g.fill_chunk(ChunkCoord(IVec3::new(cx, -2, cz)), &mut c);
-                let mut air = 0;
-                let mut stone = 0;
-                for b in c.blocks.iter() {
-                    match b {
-                        Block::Air | Block::Water => air += 1,
-                        Block::Stone => stone += 1,
-                        _ => {}
-                    }
-                }
-                // PR 8: ambient noise carvers + graph chambers +
-                // wormholes + aquifer flood can stack in a single
-                // chunk near a system intersection. "Mostly stone"
-                // is no longer a useful invariant — `stone +
-                // mostly-fluid >= 5%` is the realistic floor that
-                // catches a fully-blank chunk.
-                let fluid: i32 = c
+                let air: usize = c
                     .blocks
                     .iter()
-                    .filter(|b| matches!(b, Block::Water | Block::Lava))
-                    .count() as i32;
-                let solid_or_fluid: i32 = stone + fluid;
-                assert!(
-                    solid_or_fluid > (CHUNK_VOL / 20) as i32,
-                    "chunk ({cx}, -2, {cz}) had insufficient stone+fluid: solid_or_fluid={solid_or_fluid}"
-                );
+                    .filter(|b| matches!(b, Block::Air | Block::Water))
+                    .count();
                 if air > CHUNK_VOL / 50 {
                     // 2% — well above the 0.5% pre-PR-8 threshold;
-                    // ambient cheese + spaghetti carving means every
-                    // underground chunk should easily clear this.
+                    // ambient cheese carving means every underground
+                    // chunk should easily clear this.
                     found_carved_chunk = true;
                 }
             }

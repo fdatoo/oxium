@@ -69,12 +69,12 @@ pub struct DensityBreakdown {
     pub bias: f32,
     /// 3D base noise contribution at this voxel.
     pub base_3d: f32,
-    /// Graph cave / entrance / wormhole combined SDF.
+    /// Graph cave / entrance combined SDF.
     pub cave_sdf: f32,
     /// Cheese carver contribution.
     pub cheese: f32,
-    /// Spaghetti carver contribution.
-    pub spaghetti: f32,
+    /// Terasology ambient carver contribution.
+    pub tera: f32,
     /// Pillar contribution (adds back density inside carved volumes).
     pub pillar: f32,
     /// Composed density after all contributions (post-slide).
@@ -82,6 +82,12 @@ pub struct DensityBreakdown {
     /// The block this voxel would resolve to. Computed by re-running
     /// the same selection logic `fill_chunk` uses.
     pub block: Block,
+    /// Name of the cave style if the probe point is inside a graph cave
+    /// chamber or tunnel, else `None`.
+    pub cave_style: Option<&'static str>,
+    /// Depth band ("shallow"/"middle"/"deep") inferred from the cave
+    /// system's bounding-box Y midpoint, if inside a cave system.
+    pub cave_band: Option<&'static str>,
 }
 
 /// Per-column scalar stages the overlay map can render.

@@ -14,76 +14,7 @@
 //! tuning knobs live in `assets/worldgen/default.ron`.
 
 use crate::worldgen::config::ChannelParams;
-use noise::{Fbm, MultiFractal, NoiseFn, Simplex};
-
-/// Y-clamped linear gradient: returns `from_value` at `from_y`,
-/// `to_value` at `to_y`, linear in between, clamped at the
-/// boundaries.
-///
-/// Accepts either ordering of `from_y` vs `to_y`.
-pub fn y_clamped_gradient(wy: i32, from_y: i32, from_value: f32, to_y: i32, to_value: f32) -> f32 {
-    let (lo_y, hi_y, lo_v, hi_v) = if from_y <= to_y {
-        (from_y, to_y, from_value, to_value)
-    } else {
-        (to_y, from_y, to_value, from_value)
-    };
-    if wy <= lo_y {
-        lo_v
-    } else if wy >= hi_y {
-        hi_v
-    } else {
-        let t = (wy - lo_y) as f32 / (hi_y - lo_y) as f32;
-        lo_v + t * (hi_v - lo_v)
-    }
-}
-
-/// Linearly remap a unit-range value (~[-1, 1]) to
-/// `[min_target, max_target]`.
-#[inline]
-pub fn map_from_unit_to(value: f32, min_target: f32, max_target: f32) -> f32 {
-    let middle = (min_target + max_target) * 0.5;
-    let factor = (max_target - min_target) * 0.5;
-    middle + factor * value
-}
-
-/// Quantize a continuous rarity factor (from a low-frequency
-/// modulator noise) into one of five spaghetti-tube feature scales.
-/// Smaller values produce tight, fine tubes in their region;
-/// larger values produce coarse, spread-out passages. Most of the
-/// world falls in the default `1.0` bucket; the extremes are sparse.
-pub fn spaghetti_rarity_2d(rarity_factor: f32) -> f32 {
-    if rarity_factor < -0.75 {
-        0.5
-    } else if rarity_factor < -0.5 {
-        0.75
-    } else if rarity_factor < 0.5 {
-        1.0
-    } else if rarity_factor < 0.75 {
-        2.0
-    } else {
-        3.0
-    }
-}
-
-/// Region-modulated noise sample: sample `noise` at coordinates
-/// scaled by `1/rarity`, then return `rarity * |sample|`. The rarity
-/// is taken from the modulator noise via [`spaghetti_rarity_2d`].
-///
-/// The effect is that different parts of the world sample at
-/// different feature scales — tube networks vary in width and
-/// density across the map without an explicit "tube zone" mask.
-/// Output is always non-negative.
-pub fn weird_scaled_sample(
-    noise: &Fbm<Simplex>,
-    modulator_value: f32,
-    wx: f64,
-    wy: f64,
-    wz: f64,
-) -> f32 {
-    let rarity = spaghetti_rarity_2d(modulator_value) as f64;
-    let v = noise.get([wx / rarity, wy / rarity, wz / rarity]);
-    (rarity as f32) * (v as f32).abs()
-}
+use noise::{Fbm, MultiFractal, Simplex};
 
 /// Build an `Fbm<Simplex>` from a [`ChannelParams`] and a seed salt.
 ///

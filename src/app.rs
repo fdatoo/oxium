@@ -97,6 +97,10 @@ pub struct AppState {
     /// crosses a chunk boundary. See
     /// [`crate::ecs::systems::world_stream::WorldStreamCache`].
     pub world_stream_cache: crate::ecs::systems::world_stream::WorldStreamCache,
+    /// When true, the opaque shader renders all geometry at full
+    /// brightness (skips the direct+block+sky-ambient composition).
+    /// Toggled by pressing B in-game. Default: false.
+    pub fullbright: bool,
 }
 
 /// Per-frame counters shown in the debug HUD. Cheap to keep around;
@@ -311,6 +315,7 @@ impl AppState {
             ui,
             world_stream_cache:
                 crate::ecs::systems::world_stream::WorldStreamCache::default(),
+            fullbright: false,
         }
     }
 
@@ -339,6 +344,14 @@ impl AppState {
                     &mut self.input_state,
                 )
             });
+            // B toggles fullbright: all opaque geometry renders at full
+            // brightness, skipping the lighting composition. Useful for
+            // cave spelunking where dim block-light obscures structure.
+            if self.input_buf.key_pressed_this_frame.contains(
+                &winit::keyboard::KeyCode::KeyB,
+            ) {
+                self.fullbright = !self.fullbright;
+            }
             time(prof, "time_of_day", || {
                 crate::ecs::systems::time_of_day::advance(&mut self.ecs, dt)
             });
@@ -525,6 +538,7 @@ impl AppState {
                 &self.ui,
                 &self.generator,
                 &self.world,
+                self.fullbright,
             ) {
                 log::warn!("render error: {e:?}");
             }
