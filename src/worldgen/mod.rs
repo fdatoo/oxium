@@ -344,6 +344,7 @@ impl Generator {
             &cfg.climate,
             &cfg.density,
             &mut r,
+            &cfg.cave,
         );
         r
     }
@@ -1826,11 +1827,12 @@ mod tests {
                         _ => {}
                     }
                 }
-                // PR 8: ambient noise carvers + graph chambers +
-                // aquifer flood can stack in a single chunk near a
-                // system intersection. "Mostly stone" is no longer a
-                // useful invariant — `stone + mostly-fluid >= 5%` is
-                // the realistic floor that catches a fully-blank chunk.
+                // Cave overhaul PR2: graph caves re-enabled with depth-scaled
+                // radii. Deep Cathedral chambers can reach r_xz ~65 blocks
+                // (depth_mult ~2× at y=-64), so a single chamber may carve
+                // an entire chunk nearly hollow. "Completely zero solid+fluid"
+                // is the only reliable bug signal — even a chamber interior
+                // touching a chunk boundary leaves a few wall voxels.
                 let fluid: i32 = c
                     .blocks
                     .iter()
@@ -1838,8 +1840,8 @@ mod tests {
                     .count() as i32;
                 let solid_or_fluid: i32 = stone + fluid;
                 assert!(
-                    solid_or_fluid > (CHUNK_VOL / 20) as i32,
-                    "chunk ({cx}, -2, {cz}) had insufficient stone+fluid: solid_or_fluid={solid_or_fluid}"
+                    solid_or_fluid > 0,
+                    "chunk ({cx}, -2, {cz}) had zero stone+fluid — generator produced a fully empty chunk"
                 );
                 if air > CHUNK_VOL / 50 {
                     // 2% — well above the 0.5% pre-PR-8 threshold;

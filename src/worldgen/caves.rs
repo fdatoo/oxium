@@ -114,17 +114,66 @@ pub fn build_systems_for_region(
     climate: &crate::worldgen::config::ClimateConfig,
     density: &crate::worldgen::config::DensityConfig,
     region: &mut FineRegion,
+    cave_cfg: &crate::worldgen::config::CaveConfig,
 ) {
     // Decide how many systems this region hosts.
+    // CAVE_SYSTEMS_PER_REGION acts as a compile-time safety cap;
+    // cave_cfg.systems_per_region_max is the hot-reloadable config value.
     let n_min = CAVE_SYSTEMS_PER_REGION.0;
-    let n_max = CAVE_SYSTEMS_PER_REGION.1;
+    let n_max = cave_cfg.systems_per_region_max.min(CAVE_SYSTEMS_PER_REGION.1);
     let n = n_min
         + (mix_u32(seed, &[coord.x, coord.z, 1])
             % (n_max - n_min + 1));
     region.cave_systems.clear();
     for system_idx in 0..n as i32 {
-        let sys = build_system(seed, coord, system_idx, heightmap, climate, density);
+        let sys = build_system(seed, coord, system_idx, heightmap, climate, density, cave_cfg);
         region.cave_systems.push(sys);
+    }
+}
+
+/// Per-style parameter set extracted from the style table.
+struct StyleParams {
+    chamber_count: (u32, u32),
+    r_xz: (f32, f32),
+    r_y: (f32, f32),
+    tunnel_r: (f32, f32),
+}
+
+fn style_params(
+    style: CaveStyle,
+    table: &crate::worldgen::config::CaveStyleTable,
+) -> StyleParams {
+    match style {
+        CaveStyle::Cathedral => StyleParams {
+            chamber_count: table.cathedral_chamber_count,
+            r_xz: table.cathedral_r_xz,
+            r_y: table.cathedral_r_y,
+            tunnel_r: table.cathedral_tunnel_r,
+        },
+        CaveStyle::Warren => StyleParams {
+            chamber_count: table.warren_chamber_count,
+            r_xz: table.warren_r_xz,
+            r_y: table.warren_r_y,
+            tunnel_r: table.warren_tunnel_r,
+        },
+        CaveStyle::Slot => StyleParams {
+            chamber_count: table.slot_chamber_count,
+            r_xz: table.slot_r_xz,
+            r_y: table.slot_r_y,
+            tunnel_r: table.slot_tunnel_r,
+        },
+        CaveStyle::Sump => StyleParams {
+            chamber_count: table.sump_chamber_count,
+            r_xz: table.sump_r_xz,
+            r_y: table.sump_r_y,
+            tunnel_r: table.sump_tunnel_r,
+        },
+        CaveStyle::Karst => StyleParams {
+            chamber_count: table.karst_chamber_count,
+            r_xz: table.karst_r_xz,
+            r_y: table.karst_r_y,
+            tunnel_r: table.karst_tunnel_r,
+        },
     }
 }
 
@@ -136,9 +185,15 @@ fn build_system(
     heightmap: &HeightmapNoise,
     climate: &crate::worldgen::config::ClimateConfig,
     density: &crate::worldgen::config::DensityConfig,
+    cave_cfg: &crate::worldgen::config::CaveConfig,
 ) -> CaveSystem {
     let band = DepthBand::pick(seed, system_idx, coord);
     let (y_min, y_max) = band.range();
+
+    // Roll the style for this system.
+    let style = pick_style(seed, coord, system_idx, band, cave_cfg);
+    let sp = style_params(style, &cave_cfg.style_table);
+
     // Bounding-box footprint inside the region. The box is allowed to
     // straddle the region boundary — neighbouring regions consult our
     // systems via the 3 × 3 region neighbourhood at chunk fill time.
@@ -156,12 +211,15 @@ fn build_system(
     let bb_min = IVec3::new(bb_origin_x, bb_origin_y, bb_origin_z);
     let bb_max = bb_min + bb_size;
 
-    // Chamber count.
-    let cn_min = CHAMBERS_PER_SYSTEM.0;
-    let cn_max = CHAMBERS_PER_SYSTEM.1;
+    // Chamber count — from style table.
+    let (cn_min, cn_max) = sp.chamber_count;
     let chamber_count = cn_min
         + (mix_u32(seed, &[coord.x, coord.z, system_idx, 20])
             % (cn_max - cn_min + 1));
+
+    // Pre-compute Sump bb_center_y / bb_half_y for the bias formula.
+    let bb_center_y = (bb_min.y + bb_max.y) as f32 * 0.5;
+    let bb_half_y = (bb_max.y - bb_min.y) as f32 * 0.5;
 
     // Poisson-disk-like rejection sampling for chamber centers.
     let mut chambers: Vec<Chamber> = Vec::with_capacity(chamber_count as usize);
@@ -187,31 +245,52 @@ fn build_system(
             0.0,
             (bb_max.z - bb_min.z) as f32,
         );
+
+        // Depth multiplier: deeper = larger chambers.
+        let cy_raw = bb_min.y as f32 + sy;
+        let depth_mult = 1.0 + cave_cfg.depth_scale * ((40.0 - cy_raw).max(0.0) / 80.0);
+
         let rx = mix_range(
             seed,
             &[coord.x, coord.z, system_idx, 40, attempt],
-            CHAMBER_RADIUS_RANGE.0,
-            CHAMBER_RADIUS_RANGE.1,
-        );
+            sp.r_xz.0,
+            sp.r_xz.1,
+        ) * depth_mult;
         let ry = mix_range(
             seed,
             &[coord.x, coord.z, system_idx, 41, attempt],
-            CHAMBER_RADIUS_RANGE.0,
-            CHAMBER_RADIUS_RANGE.1,
-        );
+            sp.r_y.0,
+            sp.r_y.1,
+        ) * depth_mult;
         let rz = mix_range(
             seed,
             &[coord.x, coord.z, system_idx, 42, attempt],
-            CHAMBER_RADIUS_RANGE.0,
-            CHAMBER_RADIUS_RANGE.1,
-        );
+            sp.r_xz.0,
+            sp.r_xz.1,
+        ) * depth_mult;
+
+        // Slot deliberately drops rz and derives both XZ radii from rx for
+        // the elongated-in-X look. Other styles use independent rx, rz.
+        let (rx_final, rz_final) = if style == CaveStyle::Slot {
+            (rx * 1.4, rx * 0.6)
+        } else {
+            (rx, rz)
+        };
+
+        // Sump style: bias chambers low in the bounding box (floor cluster).
+        let cy_final = if style == CaveStyle::Sump {
+            bb_center_y - bb_half_y * 0.4 + (cy_raw - bb_center_y).abs() * 0.5
+        } else {
+            cy_raw
+        };
+
         let center = Vec3::new(
             bb_min.x as f32 + sx,
-            bb_min.y as f32 + sy,
+            cy_final,
             bb_min.z as f32 + sz,
         );
-        let radii = Vec3::new(rx, ry, rz);
-        let mean_r = (rx + ry + rz) / 3.0;
+        let radii = Vec3::new(rx_final, ry, rz_final);
+        let mean_r = (rx_final + ry + rz_final) / 3.0;
         let min_spacing = mean_r * POISSON_MIN_SPACING_MULT;
         // Reject if too close to any existing chamber.
         let too_close = chambers.iter().any(|c| {
@@ -270,13 +349,13 @@ fn build_system(
             mst_edges.push((a, b));
             added_extras += 1;
         }
-        // Build a tunnel for each edge.
+        // Build a tunnel for each edge — radius from per-style range.
         for (idx, &(a, b)) in mst_edges.iter().enumerate() {
             let radius = mix_range(
                 seed,
                 &[coord.x, coord.z, system_idx, 60, idx as i32],
-                TUNNEL_RADIUS.0,
-                TUNNEL_RADIUS.1,
+                sp.tunnel_r.0,
+                sp.tunnel_r.1,
             );
             let pa = chambers[a].center;
             let pb = chambers[b].center;
@@ -435,8 +514,7 @@ fn build_system(
         chambers,
         tunnels,
         entrances,
-        // PR2.3 will replace this placeholder with pick_style(...).
-        style: CaveStyle::Karst,
+        style,
     }
 }
 
@@ -1121,7 +1199,7 @@ mod tests {
             for x in -3..=3 {
                 let coord = RegionCoord { x, z };
                 let mut region = FineRegion::empty(coord);
-                build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut region);
+                build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut region, &cfg.cave);
                 let n = region.cave_systems.len();
                 assert!(
                     (CAVE_SYSTEMS_PER_REGION.0 as usize..=CAVE_SYSTEMS_PER_REGION.1 as usize)
@@ -1139,8 +1217,8 @@ mod tests {
         let coord = RegionCoord { x: 2, z: -3 };
         let mut r1 = FineRegion::empty(coord);
         let mut r2 = FineRegion::empty(coord);
-        build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut r1);
-        build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut r2);
+        build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut r1, &cfg.cave);
+        build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut r2, &cfg.cave);
         assert_eq!(r1.cave_systems.len(), r2.cave_systems.len());
         for (a, b) in r1.cave_systems.iter().zip(&r2.cave_systems) {
             assert_eq!(a.chambers.len(), b.chambers.len());
@@ -1157,7 +1235,7 @@ mod tests {
         let hm = HeightmapNoise::new(42, &cfg.climate);
         let coord = RegionCoord { x: 0, z: 0 };
         let mut region = FineRegion::empty(coord);
-        build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut region);
+        build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut region, &cfg.cave);
         for sys in &region.cave_systems {
             if sys.chambers.len() < 2 {
                 continue;
@@ -1205,18 +1283,16 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "graph caves disabled via CAVE_SYSTEMS_PER_REGION = (0, 0); re-enable when graph systems come back"]
     fn cave_air_returns_true_inside_chamber_center() {
-        // Graph systems are now rare (CAVE_SYSTEMS_PER_REGION =
-        // (0, 1)) — many regions have none. Scan a 4×4 grid of
-        // regions until we find one with a chamber.
+        // Scan a 4×4 grid of regions until we find one with a chamber.
+        // CAVE_SYSTEMS_PER_REGION = (0, 3), so most regions have one.
         let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
         let hm = HeightmapNoise::new(42, &cfg.climate);
         for rx in 0..4 {
             for rz in 0..4 {
                 let coord = RegionCoord { x: rx, z: rz };
                 let mut region = FineRegion::empty(coord);
-                build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut region);
+                build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut region, &cfg.cave);
                 for sys in &region.cave_systems {
                     if let Some(c) = sys.chambers.first() {
                         let wx = c.center.x as i32;

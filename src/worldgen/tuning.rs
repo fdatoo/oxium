@@ -98,12 +98,11 @@ pub const MACRO_RIVER_THRESH: u32 = 500;
 
 // ── Caves ────────────────────────────────────────────────────────────
 
-/// Inclusive range of cave systems rolled per fine region. Set to
-/// (0, 0) — graph caves disabled; the procedural carver in
-/// `carver.rs` is the primary structural cave source (MC-style
-/// walking sphere-chain). Flip back to (1, 3) to re-enable graph
-/// caves alongside the carver.
-pub const CAVE_SYSTEMS_PER_REGION: (u32, u32) = (0, 0);
+/// Inclusive range of cave systems rolled per fine region.
+/// Was: (0, 0) — graph caves disabled.
+/// Now: (0, 3) per cave-overhaul spec defaults. The configured upper bound
+/// is also exposed in CaveConfig.systems_per_region_max for hot reload.
+pub const CAVE_SYSTEMS_PER_REGION: (u32, u32) = (0, 3);
 /// Vertical band (inclusive both ends) for Shallow systems.
 pub const CAVE_BAND_SHALLOW: (i32, i32) = (10, 50);
 /// Vertical band for Middle systems.
