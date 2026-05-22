@@ -428,13 +428,16 @@ impl AppState {
             // The return value is the *total* (not just dispatched) count
             // of `dirty.light` chunks, which the HUD prints so we can see
             // whether the cascade is terminating.
-            self.perf.light_queue = time(prof, "relight_pump", || {
-                crate::ecs::systems::mesh_upload::relight_pump(
-                    &mut self.world,
-                    &self.jobs,
-                    &self.registry,
-                )
-            }) as u32 as _;
+            #[cfg(feature = "legacy-lighting")]
+            {
+                self.perf.light_queue = time(prof, "relight_pump", || {
+                    crate::ecs::systems::mesh_upload::relight_pump(
+                        &mut self.world,
+                        &self.jobs,
+                        &self.registry,
+                    )
+                }) as u32 as _;
+            }
             self.perf.chunks_rendered = self.renderer.chunk_mesh_count();
             self.perf.draw_calls = self.renderer.last_draw_calls();
             // Walk the world chunks once to count Stored vs Pending so
@@ -560,13 +563,18 @@ impl AppState {
         registry: &crate::voxel::block::BlockRegistry,
         coord: crate::voxel::coords::ChunkCoord,
     ) {
-        use crate::voxel::chunk::{ChunkDirty, ChunkState, DenseChunk, Neighbors, PalettedChunk};
+        use crate::voxel::chunk::{DenseChunk, Neighbors};
+        #[cfg(feature = "legacy-lighting")]
+        use crate::voxel::chunk::{ChunkDirty, ChunkState, PalettedChunk};
         use crate::voxel::world::ChunkSlot;
 
         let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get(&coord) else {
             return;
         };
+        #[cfg(feature = "legacy-lighting")]
         let needs_light = meta.dirty.light;
+        #[cfg(not(feature = "legacy-lighting"))]
+        let _ = meta;
         let data_arc = data.clone();
 
         // Decompress chunk + neighbours up-front so the greedy mesher
@@ -591,6 +599,9 @@ impl AppState {
 
         // Relight the edited chunk in-place. Skipped when the edit
         // only dirtied a neighbour's mesh (no `dirty.light` set).
+        // In the default (engine) build, the graph engine handles
+        // light propagation — the inline path just re-meshes.
+        #[cfg(feature = "legacy-lighting")]
         if needs_light {
             crate::lighting::recompute_chunk(&mut dense, &ns, registry);
         }
@@ -601,6 +612,7 @@ impl AppState {
         // Swap the relit data back into the chunk slot if we did
         // relight; bump the version so any in-flight cascade mesh
         // for this chunk gets discarded on completion.
+        #[cfg(feature = "legacy-lighting")]
         if needs_light {
             let new_data = std::sync::Arc::new(PalettedChunk::compress(&dense));
             if let Some(ChunkSlot::Stored { data: cur, meta }) = world.chunks.get_mut(&coord) {

@@ -130,6 +130,7 @@ pub fn drain_jobs(
                     }
                 }
             }
+            #[cfg(feature = "legacy-lighting")]
             JobResult::Relit { coord, data, changed_faces, light_volume } => {
                 // Push the light volume to the GPU FIRST so the chunk's bind
                 // group picks up the new lighting on the next draw — even if
@@ -255,6 +256,7 @@ pub fn drain_jobs(
 /// same shape of regression as the cancelled v0.1.19 per-edit cascade.
 /// At 4 chunks per frame a couple thousand pending chunks converge in
 /// ~5 seconds at 120 fps without dropping frames.
+#[cfg(feature = "legacy-lighting")]
 pub fn relight_pump(
     world: &mut World,
     jobs: &Jobs,
@@ -337,6 +339,7 @@ pub fn drain_persistence(
                     // "flat fog plane where I modified terrain"
                     // bug. The relight pump picks this up and
                     // converges over a few frames.
+                    #[cfg(feature = "legacy-lighting")]
                     if let Some(ChunkSlot::Stored { meta, .. }) =
                         world.chunks.get_mut(&coord)
                     {

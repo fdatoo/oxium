@@ -72,6 +72,7 @@ pub enum JobResult {
     /// cascade `dirty.light` only to the neighbours whose seed values
     /// would actually change — bounded propagation that converges in
     /// `O(loaded-chunk-diameter)` iterations without exploding.
+    #[cfg(feature = "legacy-lighting")]
     Relit {
         coord: ChunkCoord,
         data: PalettedChunk,
@@ -207,20 +208,25 @@ impl Jobs {
                 // initial BFS does column-drop inheritance + lateral
                 // seeding correctly. Matches the spawn_relight pattern at
                 // jobs/mod.rs:232-245.
-                let neighbor_dense: Vec<Option<DenseChunk>> = neighbors
-                    .iter()
-                    .map(|opt| opt.as_ref().map(|p| p.decompress()))
-                    .collect();
-                let n_refs: [Option<&DenseChunk>; 6] = [
-                    neighbor_dense[0].as_ref(),
-                    neighbor_dense[1].as_ref(),
-                    neighbor_dense[2].as_ref(),
-                    neighbor_dense[3].as_ref(),
-                    neighbor_dense[4].as_ref(),
-                    neighbor_dense[5].as_ref(),
-                ];
-                let ns = crate::voxel::chunk::Neighbors { chunks: n_refs };
-                crate::lighting::recompute_chunk(&mut dense, &ns, &registry);
+                #[cfg(feature = "legacy-lighting")]
+                {
+                    let neighbor_dense: Vec<Option<DenseChunk>> = neighbors
+                        .iter()
+                        .map(|opt| opt.as_ref().map(|p| p.decompress()))
+                        .collect();
+                    let n_refs: [Option<&DenseChunk>; 6] = [
+                        neighbor_dense[0].as_ref(),
+                        neighbor_dense[1].as_ref(),
+                        neighbor_dense[2].as_ref(),
+                        neighbor_dense[3].as_ref(),
+                        neighbor_dense[4].as_ref(),
+                        neighbor_dense[5].as_ref(),
+                    ];
+                    let ns = crate::voxel::chunk::Neighbors { chunks: n_refs };
+                    crate::lighting::recompute_chunk(&mut dense, &ns, &registry);
+                }
+                #[cfg(not(feature = "legacy-lighting"))]
+                { let _ = neighbors; let _ = registry; }
                 PalettedChunk::compress(&dense)
             }));
             match result {
@@ -241,6 +247,7 @@ impl Jobs {
     /// — that flips `meta.dirty.light` and requires the chunk's voxel
     /// light arrays to be regenerated before the next mesh job picks up
     /// fresh `light` bytes for the vertex format.
+    #[cfg(feature = "legacy-lighting")]
     pub fn spawn_relight(
         &self,
         coord: ChunkCoord,

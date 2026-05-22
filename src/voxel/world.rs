@@ -88,7 +88,7 @@ impl World {
             state: ChunkState::Generated,
             dirty: ChunkDirty {
                 mesh: true,
-                light: false,
+                ..Default::default()
             },
             sky_sources,
             ..Default::default()
@@ -287,7 +287,8 @@ impl World {
         *data = std::sync::Arc::new(PalettedChunk::compress(&dense));
 
         meta.dirty.mesh = true;
-        meta.dirty.light = true;
+        #[cfg(feature = "legacy-lighting")]
+        { meta.dirty.light = true; }
         meta.modified = true;
         meta.state = ChunkState::Generated;
         // Bump version so any in-flight mesh job using the pre-edit

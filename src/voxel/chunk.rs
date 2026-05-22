@@ -370,6 +370,7 @@ pub enum ChunkState {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ChunkDirty {
     pub mesh: bool,
+    #[cfg(feature = "legacy-lighting")]
     pub light: bool,
 }
 
