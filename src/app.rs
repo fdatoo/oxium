@@ -429,6 +429,9 @@ impl AppState {
                 )
             });
             let light_pending = self.world.light_engine.pending_ops_count();
+            // chunks_pending here is the *previous* frame's value (updated at line ~479);
+            // light_pending is fresh this frame. Either signal triggers the higher budget.
+            // >100 chunks ≈ initial stream-in; >10k ops ≈ large backlog still draining.
             let light_budget = if self.perf.chunks_pending > 100 || light_pending > 10_000 {
                 500_000
             } else {
