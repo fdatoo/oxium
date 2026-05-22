@@ -346,6 +346,47 @@ impl PalettedChunk {
     pub fn get(&self, p: LocalPos) -> Block {
         self.palette[self.indices.get(p.to_index()) as usize]
     }
+
+    /// Read the block at a flat index `0..CHUNK_VOL` without decompressing.
+    /// One palette indirection per call; allocates nothing.
+    #[inline]
+    pub fn block_at(&self, idx: usize) -> Block {
+        self.palette[self.indices.get(idx) as usize]
+    }
+
+    /// Read the sky-light level at a flat index `0..CHUNK_VOL` without
+    /// decompressing. Returns 0..=15 directly from the packed nibble.
+    #[inline]
+    pub fn sky_light_at(&self, idx: usize) -> u8 {
+        self.sky_light.get(idx)
+    }
+
+    /// Read the (R, G, B) block-light tuple at a flat index `0..CHUNK_VOL`
+    /// without decompressing. Each channel is 0..=15.
+    #[inline]
+    pub fn block_rgb_at(&self, idx: usize) -> (u8, u8, u8) {
+        (
+            self.block_red.get(idx),
+            self.block_green.get(idx),
+            self.block_blue.get(idx),
+        )
+    }
+
+    /// Write the sky-light level at a flat index. Caller must hold a
+    /// unique `&mut self` (e.g., via `Arc::make_mut`).
+    #[inline]
+    pub fn set_sky_light_at(&mut self, idx: usize, value: u8) {
+        self.sky_light.set(idx, value);
+    }
+
+    /// Write the (R, G, B) block-light tuple at a flat index. Caller must
+    /// hold a unique `&mut self`.
+    #[inline]
+    pub fn set_block_rgb_at(&mut self, idx: usize, r: u8, g: u8, b: u8) {
+        self.block_red.set(idx, r);
+        self.block_green.set(idx, g);
+        self.block_blue.set(idx, b);
+    }
 }
 
 /// Lifecycle marker for a chunk slot. The state machine is the engine's
@@ -537,5 +578,61 @@ mod tests {
         assert_eq!(blob[1], 0);
         assert_eq!(blob[2], 0);
         assert!(blob[3] >= 240, "A channel scaled wrong: {}", blob[3]);
+    }
+
+    #[test]
+    fn paletted_block_at_matches_decompressed_get() {
+        let mut d = DenseChunk::empty();
+        d.set(LocalPos(UVec3::new(0, 0, 0)), Block::Stone);
+        d.set(LocalPos(UVec3::new(31, 31, 31)), Block::Water);
+        d.set(LocalPos(UVec3::new(5, 10, 20)), Block::Torch);
+        let p = PalettedChunk::compress(&d);
+        for i in 0..CHUNK_VOL {
+            assert_eq!(p.block_at(i), d.blocks[i], "block_at mismatch at idx {i}");
+        }
+    }
+
+    #[test]
+    fn paletted_sky_light_at_matches_decompressed() {
+        let mut d = DenseChunk::empty();
+        d.sky_light[0] = 15;
+        d.sky_light[100] = 7;
+        d.sky_light[CHUNK_VOL - 1] = 3;
+        let p = PalettedChunk::compress(&d);
+        assert_eq!(p.sky_light_at(0), 15);
+        assert_eq!(p.sky_light_at(100), 7);
+        assert_eq!(p.sky_light_at(CHUNK_VOL - 1), 3);
+        assert_eq!(p.sky_light_at(50), 0); // untouched
+    }
+
+    #[test]
+    fn paletted_block_rgb_at_matches_decompressed() {
+        let mut d = DenseChunk::empty();
+        d.block_rgb[10] = pack_rgb(15, 7, 3);
+        d.block_rgb[200] = pack_rgb(0, 8, 12);
+        let p = PalettedChunk::compress(&d);
+        assert_eq!(p.block_rgb_at(10), (15, 7, 3));
+        assert_eq!(p.block_rgb_at(200), (0, 8, 12));
+        assert_eq!(p.block_rgb_at(11), (0, 0, 0)); // untouched
+    }
+
+    #[test]
+    fn paletted_set_sky_light_at_round_trip() {
+        let mut p = PalettedChunk::all_air();
+        p.set_sky_light_at(5, 12);
+        p.set_sky_light_at(6, 8);
+        assert_eq!(p.sky_light_at(5), 12);
+        assert_eq!(p.sky_light_at(6), 8);
+        assert_eq!(p.sky_light_at(7), 0); // untouched
+    }
+
+    #[test]
+    fn paletted_set_block_rgb_at_round_trip() {
+        let mut p = PalettedChunk::all_air();
+        p.set_block_rgb_at(42, 11, 9, 5);
+        assert_eq!(p.block_rgb_at(42), (11, 9, 5));
+        assert_eq!(p.block_rgb_at(43), (0, 0, 0)); // untouched
+        p.set_block_rgb_at(42, 0, 0, 0);
+        assert_eq!(p.block_rgb_at(42), (0, 0, 0));
     }
 }
