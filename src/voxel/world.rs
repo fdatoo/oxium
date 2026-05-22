@@ -69,12 +69,22 @@ impl World {
     /// `Generated` + `mesh-dirty` so the next pass through the schedule
     /// will spawn a mesh job.
     pub fn insert(&mut self, c: ChunkCoord, data: PalettedChunk) {
+        // Build the sky-source heightmap once at install time. Decompressing
+        // the chunk is ~50 µs (palette + 4-bit unpack) and the scan is
+        // 32×32×32 opacity lookups (~50 µs more) — small enough to do
+        // inline; PR2/PR3 will move heightmap updates onto the per-edit
+        // path so this only runs on initial install.
+        let dense = data.decompress();
+        let sky_sources = crate::lighting::ChunkSkyLightSources::build_from_dense(
+            &dense, c, &self.registry,
+        );
         let meta = ChunkMeta {
             state: ChunkState::Generated,
             dirty: ChunkDirty {
                 mesh: true,
                 light: false,
             },
+            sky_sources,
             ..Default::default()
         };
         self.chunks.insert(
@@ -196,5 +206,67 @@ mod tests {
             w.get_block(BlockPos(IVec3::new(5, 5, 5))),
             Some(Block::Air)
         );
+    }
+
+    /// World::insert must populate the chunk's sky_sources heightmap
+    /// so PR2/PR3 can consume it without further plumbing.
+    #[test]
+    fn insert_populates_sky_sources_from_chunk_data() {
+        use crate::voxel::chunk::DenseChunk;
+        use crate::voxel::coords::LocalPos;
+        use glam::UVec3;
+
+        let mut w = World::new(42);
+
+        // Build a chunk with a single stone layer at local y=10
+        // across the whole footprint; everything else is air.
+        let mut dense = DenseChunk::empty();
+        for lz in 0..CHUNK_DIM_U {
+            for lx in 0..CHUNK_DIM_U {
+                dense.set(LocalPos(UVec3::new(lx, 10, lz)), Block::Stone);
+            }
+        }
+        let chunk = PalettedChunk::compress(&dense);
+
+        let coord = ChunkCoord(IVec3::ZERO);
+        w.insert(coord, chunk);
+
+        let ChunkSlot::Stored { meta, .. } = w.chunks.get(&coord).unwrap() else {
+            panic!("chunk should be Stored after insert");
+        };
+
+        // Every column should report world-y=11 (one above the stone).
+        for lz in 0..CHUNK_DIM_U {
+            for lx in 0..CHUNK_DIM_U {
+                assert_eq!(
+                    meta.sky_sources.lowest_source_y(lx, lz), 11,
+                    "column ({lx},{lz}) should have floor at world y=11",
+                );
+            }
+        }
+    }
+
+    /// All-air chunk: heightmap should be entirely NO_SOURCE_FLOOR
+    /// (matches the default), but populated rather than default-stub.
+    #[test]
+    fn insert_populates_sky_sources_even_for_all_air() {
+        use crate::lighting::NO_SOURCE_FLOOR;
+        use crate::voxel::chunk::DenseChunk;
+
+        let mut w = World::new(42);
+        let chunk = PalettedChunk::compress(&DenseChunk::empty());
+        let coord = ChunkCoord(IVec3::new(2, 1, -3));
+
+        w.insert(coord, chunk);
+
+        let ChunkSlot::Stored { meta, .. } = w.chunks.get(&coord).unwrap() else {
+            panic!("chunk should be Stored after insert");
+        };
+
+        for lz in 0..CHUNK_DIM_U {
+            for lx in 0..CHUNK_DIM_U {
+                assert_eq!(meta.sky_sources.lowest_source_y(lx, lz), NO_SOURCE_FLOOR);
+            }
+        }
     }
 }

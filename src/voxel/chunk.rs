@@ -405,6 +405,16 @@ pub struct ChunkMeta {
     /// mesh that completed first (the visible "block flickers back
     /// for a moment" artefact).
     pub mesh_version: u64,
+    /// Per-column world-Y of the lowest sky-source cell. Built by
+    /// `crate::lighting::ChunkSkyLightSources::build_from_dense` at
+    /// `World::insert` time and rebuilt whenever the chunk's blocks
+    /// change. Consumed by the graph-engine sky channel (PR3).
+    ///
+    /// Defaults to a heightmap full of `NO_SOURCE_FLOOR`, which is
+    /// the safe value for a freshly-defaulted `ChunkMeta` — no
+    /// floor means "treat every cell as a potential source"
+    /// (matches today's BFS column-drop default of `light = 15`).
+    pub sky_sources: crate::lighting::ChunkSkyLightSources,
 }
 
 /// Legacy v1 paletted-chunk layout used by region files written before
