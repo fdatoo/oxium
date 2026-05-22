@@ -559,6 +559,7 @@ fn capture_offscreen(
         0,
         &registry,
         &perf,
+        None,
     );
     renderer.render_to_view(
         &view,

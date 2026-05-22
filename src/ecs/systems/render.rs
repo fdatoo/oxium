@@ -7,11 +7,15 @@
 //! turning into render-state ceremonies.
 
 use crate::app::PerfSnapshot;
-use crate::ecs::components::{Camera, CursorTarget, Position, Selected};
+use crate::ecs::components::{Camera, CursorTarget, Position, Selected, Sun, TimeOfDay};
 use crate::ecs::GameEcs;
-use crate::render::hud::{build_hud, HOTBAR_BLOCKS};
+use crate::render::hud::{build_hud, SkyProbe, WorldDebug, HOTBAR_BLOCKS};
 use crate::render::Renderer;
 use crate::voxel::block::BlockRegistry;
+use crate::voxel::coords::{BlockPos, ChunkCoord, LocalPos};
+use crate::voxel::world::{ChunkSlot, World};
+use crate::worldgen::Generator;
+use glam::{IVec3, UVec3};
 
 /// Push the cursor target into the renderer and then draw a frame.
 /// The renderer needs `&mut self` for the cursor write — the caller is
@@ -24,6 +28,8 @@ pub fn render(
     time: f32,
     perf: &PerfSnapshot,
     ui: &crate::ui::Ui,
+    generator: &Generator,
+    world: &World,
 ) -> Result<(), wgpu::SurfaceError> {
     let target = ecs
         .world
@@ -65,8 +71,26 @@ pub fn render(
         .position(|b| *b == Some(selected.0))
         .unwrap_or(0);
 
+    let time_of_day = ecs
+        .world
+        .query::<(&Sun, &TimeOfDay)>()
+        .iter()
+        .next()
+        .map(|(_, (_, tod))| tod.t)
+        .unwrap_or(0.5);
+    let probe = generator.probe_column(eye.x as i32, eye.z as i32);
+    let sky = sky_probe(world, eye);
+    let world_debug = WorldDebug {
+        seed: generator.seed(),
+        time_of_day,
+        yaw: cam.yaw,
+        pitch: cam.pitch,
+        probe: &probe,
+        sky,
+    };
+
     let (sw, sh) = renderer.framebuffer_size();
-    let mut hud = build_hud((sw, sh), fps, eye, selected_slot, registry, perf);
+    let mut hud = build_hud((sw, sh), fps, eye, selected_slot, registry, perf, Some(&world_debug));
     ui.draw_overlay((sw, sh), &mut hud);
 
     renderer.render(
@@ -78,4 +102,43 @@ pub fn render(
         time,
         Some(&hud),
     )
+}
+
+/// Read `sky_light` around the eye for the debug HUD. Reads straight
+/// from the `PalettedChunk` (4-bit packed) so no decompression is
+/// needed — the per-frame cost is ~32 packed-array gets per call.
+fn sky_probe(world: &World, eye: glam::Vec3) -> SkyProbe {
+    let block_pos = BlockPos(IVec3::new(
+        eye.x.floor() as i32,
+        eye.y.floor() as i32,
+        eye.z.floor() as i32,
+    ));
+    let eye_chunk = block_pos.to_chunk();
+    let eye_local = block_pos.to_local();
+
+    let mut probe = SkyProbe {
+        eye_chunk: eye_chunk.0,
+        at_eye: None,
+        column_hex: None,
+        above_bottom: None,
+    };
+
+    if let Some(ChunkSlot::Stored { data, .. }) = world.chunks.get(&eye_chunk) {
+        probe.at_eye = Some(data.sky_light.get(eye_local.to_index()));
+        let mut col = String::with_capacity(32);
+        for y in 0..32u32 {
+            let idx = LocalPos(UVec3::new(eye_local.0.x, y, eye_local.0.z)).to_index();
+            let v = data.sky_light.get(idx);
+            col.push(std::char::from_digit(v as u32, 16).unwrap_or('?'));
+        }
+        probe.column_hex = Some(col);
+    }
+
+    let above = ChunkCoord(eye_chunk.0 + IVec3::new(0, 1, 0));
+    if let Some(ChunkSlot::Stored { data, .. }) = world.chunks.get(&above) {
+        let idx = LocalPos(UVec3::new(eye_local.0.x, 0, eye_local.0.z)).to_index();
+        probe.above_bottom = Some(data.sky_light.get(idx));
+    }
+
+    probe
 }

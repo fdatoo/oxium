@@ -523,6 +523,8 @@ impl AppState {
                 now_secs,
                 &self.perf,
                 &self.ui,
+                &self.generator,
+                &self.world,
             ) {
                 log::warn!("render error: {e:?}");
             }

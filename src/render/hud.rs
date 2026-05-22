@@ -19,6 +19,53 @@ use bytemuck::{Pod, Zeroable};
 use crate::render::atlas::{ATLAS_PX, TILE_PX};
 use crate::render::font::{ATLAS_H as FONT_ATLAS_H, ATLAS_W as FONT_ATLAS_W, CELL_W as FONT_CELL_W, GLYPH_H as FONT_GLYPH_H, GLYPH_W as FONT_GLYPH_W};
 
+/// Extra worldgen + camera values shown in the debug overlay.
+pub struct WorldDebug<'a> {
+    pub seed: u64,
+    /// Day-cycle fraction: 0 = midnight, 0.25 = sunrise, 0.5 = noon, 0.75 = sunset.
+    pub time_of_day: f32,
+    /// Camera yaw in radians (yaw=0 → facing +X / East).
+    pub yaw: f32,
+    /// Camera pitch in radians (positive = looking up).
+    pub pitch: f32,
+    pub probe: &'a crate::worldgen::probe::ColumnProbe,
+    pub sky: SkyProbe,
+}
+
+/// Snapshot of `sky_light` around the player's eye, surfaced on the HUD
+/// to debug "chunk is mysteriously dark" cases. Built each frame in
+/// `ecs::systems::render`; `None` for the chunk fields means the slot
+/// isn't `Stored` (Pending or absent).
+pub struct SkyProbe {
+    /// The chunk containing the eye.
+    pub eye_chunk: glam::IVec3,
+    /// `sky_light` 0..=15 at the eye's exact block, or `None` if the
+    /// eye's chunk isn't loaded.
+    pub at_eye: Option<u8>,
+    /// 32-cell vertical column of `sky_light` at the eye's xz, indexed
+    /// y=0..31 within the eye's chunk. Hex-encoded for display.
+    pub column_hex: Option<String>,
+    /// `sky_light` at the bottom row of the +Y neighbour chunk, at the
+    /// same xz as the eye — what the eye's chunk's column drop would
+    /// inherit from above. `None` if +Y not loaded.
+    pub above_bottom: Option<u8>,
+}
+
+fn yaw_to_cardinal(yaw: f32) -> &'static str {
+    let sector = ((yaw.to_degrees().rem_euclid(360.0) + 22.5) / 45.0) as u8 % 8;
+    match sector {
+        0 => "E",
+        1 => "SE",
+        2 => "S",
+        3 => "SW",
+        4 => "W",
+        5 => "NW",
+        6 => "N",
+        7 => "NE",
+        _ => "?",
+    }
+}
+
 /// One HUD vertex: 16 bytes, two `vec4<f32>` slots.
 ///
 /// | Offset | Size | Field     | Notes                              |
@@ -179,6 +226,7 @@ pub fn build_hud(
     selected_slot: usize,
     registry: &BlockRegistry,
     perf: &PerfSnapshot,
+    debug: Option<&WorldDebug<'_>>,
 ) -> HudFrame {
     let mut frame = HudFrame::new();
     let (sw, sh) = (screen_px.0 as f32, screen_px.1 as f32);
@@ -208,19 +256,58 @@ pub fn build_hud(
         perf.draw_calls,
         perf.work_ms,
     );
-    // A semi-transparent dark backdrop behind the three text lines so
-    // the cyan/white glyphs stay readable against bright skies and
-    // grass without us having to author per-character outlines. The
-    // panel width tracks the widest string; the icons batch draws
-    // first in the pass, so this lands beneath the text.
+
+    let (info_str, gen_str, cave_str, sky_str) = if let Some(d) = debug {
+        let total_mins = (d.time_of_day * 24.0 * 60.0) as u32;
+        let hh = total_mins / 60;
+        let mm = total_mins % 60;
+        let yaw_deg = d.yaw.to_degrees().rem_euclid(360.0);
+        let pitch_deg = d.pitch.to_degrees();
+        let cardinal = yaw_to_cardinal(d.yaw);
+        let p = d.probe;
+        let at_eye = d.sky.at_eye.map_or("-".to_string(), |v| format!("{v:X}"));
+        let above = d.sky.above_bottom.map_or("-".to_string(), |v| format!("{v:X}"));
+        let col = d.sky.column_hex.as_deref().unwrap_or("-");
+        (
+            format!(
+                "SEED: {}  TIME: {:02}:{:02}  {} {:.0}°/{:+.0}°",
+                d.seed, hh, mm, cardinal, yaw_deg, pitch_deg,
+            ),
+            format!(
+                "CONT: {:.2}  TEMP: {:.2}  HMD: {:.2}  WRD: {:.2}  {:?}",
+                p.continentalness, p.temperature, p.humidity, p.weirdness, p.biome,
+            ),
+            format!(
+                "H: {}  CAVE: {}  AQY: {}  FLOW: {}",
+                p.h_target, p.cave_systems_count, p.aquifer_y_top, p.flow_accum,
+            ),
+            format!(
+                "SKY[{},{},{}] eye={}  +Y0={}  col={}",
+                d.sky.eye_chunk.x, d.sky.eye_chunk.y, d.sky.eye_chunk.z,
+                at_eye, above, col,
+            ),
+        )
+    } else {
+        (String::new(), String::new(), String::new(), String::new())
+    };
+
+    let extra_lines = if debug.is_some() { 4 } else { 0 };
+    // A semi-transparent dark backdrop behind the text lines so the
+    // cyan/white glyphs stay readable against bright skies and grass.
+    // Panel width tracks the widest string; icons batch draws first in
+    // the pass so this lands beneath the text.
     let glyph_w = crate::render::font::CELL_W as f32 * text_scale;
     let widest = fps_str
         .chars()
         .count()
         .max(xyz_str.chars().count())
-        .max(perf_str.chars().count());
+        .max(perf_str.chars().count())
+        .max(info_str.chars().count())
+        .max(gen_str.chars().count())
+        .max(cave_str.chars().count())
+        .max(sky_str.chars().count());
     let panel_w = widest as f32 * glyph_w + inner_pad * 2.0;
-    let panel_h = line_h * 3.0 + inner_pad * 2.0;
+    let panel_h = line_h * (3 + extra_lines) as f32 + inner_pad * 2.0;
     frame.icons.push_rect(
         pad - inner_pad,
         pad - inner_pad,
@@ -230,9 +317,16 @@ pub fn build_hud(
     );
 
     let yellow = [255, 220, 120, 255];
+    let green = [120, 255, 160, 255];
     frame.push_text(pad, pad, &fps_str, text_scale, white);
     frame.push_text(pad, pad + line_h, &xyz_str, text_scale, cyan);
     frame.push_text(pad, pad + line_h * 2.0, &perf_str, text_scale, yellow);
+    if debug.is_some() {
+        frame.push_text(pad, pad + line_h * 3.0, &info_str, text_scale, white);
+        frame.push_text(pad, pad + line_h * 4.0, &gen_str, text_scale, green);
+        frame.push_text(pad, pad + line_h * 5.0, &cave_str, text_scale, cyan);
+        frame.push_text(pad, pad + line_h * 6.0, &sky_str, text_scale, yellow);
+    }
 
     // ── Bottom-centre hotbar ────────────────────────────────────────
     // 9 cells, 48 px each, 4 px gap. Centred horizontally; 16 px
