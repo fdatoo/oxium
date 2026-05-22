@@ -2050,9 +2050,9 @@ mod tests {
     /// future runs catch unintentional behavioural drift.
     #[test]
     fn golden_seed42_chunk_0_2_0() {
-        // Rebaselined 2026-05-22: entrance shafts now extend by SURFACE_BAND
-        // to clear 3D-density bumps above h_pre (floating-island fix).
-        const GOLDEN_42_002: u64 = 0x5DF376B58D1E2DE2;
+        // Rebaselined 2026-05-22: CAVE_SURFACE_BUFFER raised from -1 to 8;
+        // ambient noise carvers no longer reach the surface.
+        const GOLDEN_42_002: u64 = 0x8A679438F5CAD7B5;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);

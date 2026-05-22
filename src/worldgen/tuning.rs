@@ -147,15 +147,14 @@ pub const SINKHOLE_DEPTH_MAX: i32 = 8;
 /// Maximum horizontal distance (blocks) from a chamber to a steep-
 /// gradient column for a cliff mouth to be possible.
 pub const CLIFF_ENTRANCE_DIST: i32 = 30;
-/// Top-of-terrain buffer (blocks). The carvers fire only at depth
-/// > BUFFER below the heightmap. Setting this to -1 means even
-/// the topmost solid block of a column (depth 0) can be carved,
-/// letting tubes punch through the surface and form visible cave
-/// openings. The natural rarity of surface tubes (the gradient
-/// requires `elev` near its extreme up there) keeps the heightmap
-/// from being eaten alive — only the rare tubes that happen to
-/// reach the surface form openings.
-pub const CAVE_SURFACE_BUFFER: i32 = -1;
+/// Top-of-terrain buffer (blocks). Cheese, terasology, chamber, and trunk
+/// carvers fire only at depth > BUFFER below the heightmap. The entrance SDF
+/// (sinkholes, skylights, cliff mouths) is not gated by this value — it uses
+/// its own `wy <= height + SURFACE_BAND` gate so intentional cave openings
+/// still reach the surface regardless of this setting.
+/// Was -1 (surface-tube openings allowed) until the entrance SDF was given
+/// its own gate; raised to 8 so ambient noise can't eat through the surface.
+pub const CAVE_SURFACE_BUFFER: i32 = 8;
 /// Floor (world Y) below which caves stop carving. Keeps the loaded
 /// chunk-stack bottom solid.
 pub const CAVE_FLOOR_Y: i32 = -120;
