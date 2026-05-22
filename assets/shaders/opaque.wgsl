@@ -302,7 +302,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // is the conventional "AO is ambient occlusion" reading.
     let direct  = camera.sun_color.rgb * sun_lit * camera.sun_intensity;
     let ao_term = mix(0.45, 1.0, in.v_ao);
-    let lit     = direct + block_rgb + sky_amb * ao_term;
+    var lit     = direct + block_rgb + sky_amb * ao_term;
+    // Fullbright override: camera.sun_color.w == 1.0 signals that all opaque
+    // geometry should render at full brightness. The direct+block+sky-ambient
+    // composition is skipped so cave structure is visible regardless of light
+    // occlusion. Fog, variation, and biome tint still apply.
+    if (camera.sun_color.w > 0.5) {
+        lit = vec3<f32>(1.0, 1.0, 1.0);
+    }
 
     let MIN_SHADE = vec3<f32>(0.02, 0.02, 0.02);
 

@@ -24,6 +24,7 @@ pub fn render(
     time: f32,
     perf: &PerfSnapshot,
     ui: &crate::ui::Ui,
+    fullbright: bool,
 ) -> Result<(), wgpu::SurfaceError> {
     let target = ecs
         .world
@@ -76,6 +77,7 @@ pub fn render(
         sun_dir,
         intensity,
         time,
+        fullbright,
         Some(&hud),
     )
 }

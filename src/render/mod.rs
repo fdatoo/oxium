@@ -921,6 +921,7 @@ impl Renderer {
         sun_dir: [f32; 3],
         sun_intensity: f32,
         time: f32,
+        fullbright: bool,
         hud: Option<&HudFrame>,
     ) -> Result<(), wgpu::SurfaceError> {
         let aspect =
@@ -930,13 +931,16 @@ impl Renderer {
         // Inversion fails for a degenerate matrix; that can only happen
         // with a zero frustum, so we fall back to identity for safety.
         let inv_vp = vp.inverse();
+        // sun_color.w carries the fullbright flag to the opaque shader.
+        // 1.0 = skip lighting composition (render at full brightness).
+        let fullbright_flag = if fullbright { 1.0_f32 } else { 0.0_f32 };
         self.gpu.queue.write_buffer(
             &self.camera_buf,
             0,
             bytemuck::cast_slice(&[CameraUniform {
                 view_proj: vp.to_cols_array_2d(),
                 sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.0],
-                sun_color: [1.00, 0.96, 0.90, 0.0],
+                sun_color: [1.00, 0.96, 0.90, fullbright_flag],
                 sky_color: [0.55, 0.70, 0.95, 0.0],
                 sun_intensity,
                 time,
@@ -999,7 +1003,7 @@ impl Renderer {
                 // sun's image lands at the geometrically correct
                 // reflected position via the usual dot product.
                 sun_dir: [sun_dir[0], sun_dir[1], sun_dir[2], 0.0],
-                sun_color: [1.00, 0.96, 0.90, 0.0],
+                sun_color: [1.00, 0.96, 0.90, fullbright_flag],
                 sky_color: [0.55, 0.70, 0.95, 0.0],
                 sun_intensity,
                 time,
