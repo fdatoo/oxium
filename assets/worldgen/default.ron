@@ -387,9 +387,9 @@
         // ── Terasology depth-driven ambient ─────────────────────────
         // Two 4-octave FBM-Simplex channels whose |cross-product|
         // defines meandering tube cave regions. Carver is wired in
-        // PR1.4; these values set the noise shape and thresholds.
-        tera_a: (first_octave: -7, amplitudes: [1.0, 1.0, 1.0, 1.0]),
-        tera_b: (first_octave: -7, amplitudes: [1.0, 1.0, 1.0, 1.0]),
+        // PR1.5; these values set the noise shape and thresholds.
+        tera_a: (first_octave: 0, amplitudes: [1.0, 0.5, 0.25, 0.125]),
+        tera_b: (first_octave: 0, amplitudes: [1.0, 0.5, 0.25, 0.125]),
         tera_wave: 200.0,
         tera_supp: 0.17,
         tera_supp_depth: 123.0,

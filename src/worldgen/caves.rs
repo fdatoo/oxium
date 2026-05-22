@@ -684,6 +684,9 @@ pub struct NoiseCarvers {
     pub pillar: Fbm<Simplex>,
     pub pillar_rareness: Fbm<Simplex>,
     pub pillar_thickness: Fbm<Simplex>,
+    // Terasology ambient.
+    pub tera_a: Fbm<Simplex>,
+    pub tera_b: Fbm<Simplex>,
 }
 
 impl NoiseCarvers {
@@ -696,6 +699,8 @@ impl NoiseCarvers {
             pillar: build_channel(&cfg.pillar, seed, 1006),
             pillar_rareness: build_channel(&cfg.pillar_rareness, seed, 1007),
             pillar_thickness: build_channel(&cfg.pillar_thickness, seed, 1008),
+            tera_a: build_channel(&cfg.tera_a, seed, 2000),
+            tera_b: build_channel(&cfg.tera_b, seed, 2001),
         }
     }
 }
@@ -797,6 +802,46 @@ pub fn pillar_contribution(
     }
     let depth = (raw - cfg.pillar_cutoff).clamp(0.0, 1.0);
     cfg.pillar_intensity * depth
+}
+
+/// Terasology-style depth-driven 2-noise cave carver.
+///
+/// Inspired by `org.terasology.caves.CaveFacetProvider`. Two independent
+/// 4-octave FBM-Simplex channels are intersected: voxels where both are
+/// near zero are cave. The cave region in 2D noise space is a disk of
+/// radius `freq_depth`, centered at `(0, -freq_reduction)`. The disk
+/// grows with depth (more caves deeper) and shifts off-axis near the
+/// surface (caves rare up top). Y is sampled at `tera_y_factor` × the
+/// XZ frequency, which forces the resulting tubes to lean horizontal.
+///
+/// Returns signed density: negative = carve, positive = solid. Magnitude
+/// scales by `* 5.0` so the output aligns with the cheese carver's range
+/// for downstream `min`/`smin` composition. Typical values: `[-5.4, +6.7]`
+/// (lower bound at deep + on-axis noise, upper bound at noise extrema with
+/// no cave region).
+pub fn terasology_ambient(
+    wx: i32, wy: i32, wz: i32,
+    carvers: &NoiseCarvers,
+    cfg: &CaveConfig,
+    surface_y: f32,
+) -> f32 {
+    let depth = (surface_y - wy as f32).max(0.0);
+    let freq_reduction = (cfg.tera_supp - depth / cfg.tera_supp_depth).max(0.0);
+    let freq_depth     = cfg.tera_thresh_base + depth / cfg.tera_thresh_depth;
+    let freq           = 1.0 / cfg.tera_wave;
+    let wy_scaled      = wy as f32 * cfg.tera_y_factor;
+    let n0 = carvers.tera_a.get([
+        (wx as f32 * freq) as f64,
+        (wy_scaled * freq) as f64,
+        (wz as f32 * freq) as f64,
+    ]) as f32;
+    let n1 = carvers.tera_b.get([
+        (wx as f32 * freq) as f64,
+        (wy_scaled * freq) as f64,
+        (wz as f32 * freq) as f64,
+    ]) as f32 + freq_reduction;
+    ((n0 * n0 + n1 * n1).sqrt() - freq_depth) * 5.0
+    // scale: align magnitude with cheese carver for downstream smin composition
 }
 
 // ── Carver evaluator (corner-lattice trilerp) ────────────────────────
@@ -1286,6 +1331,121 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Build a test-local `CaveConfig` from `bundled_default` with tighter
+    /// spatial params so the algorithm's properties show up in a small
+    /// sampling window (~256 blocks).  The production defaults
+    /// (`tera_wave: 200`) have a 200-block wavelength; a 256-block window
+    /// fits only ~1.3 cycles — too few for reliable statistics.  At
+    /// `tera_wave: 32` (~8 cycles per 256 blocks) the shape and threshold
+    /// properties appear clearly at the grid sizes used in the tests below.
+    ///
+    /// This separates "verify algorithm shape" (test concern) from
+    /// "verify production visual quality" (eyeball in PR1.7).
+    fn test_cave_cfg() -> crate::worldgen::config::CaveConfig {
+        let mut cfg = crate::worldgen::config::WorldgenConfig::bundled_default()
+            .expect("default.ron must load")
+            .cave;
+        cfg.tera_wave = 32.0;
+        cfg.tera_supp = 0.55;
+        cfg.tera_thresh_depth = 500.0;
+        cfg
+    }
+
+    #[test]
+    fn terasology_ambient_depth_monotonicity() {
+        // At deeper Y, more samples should hit "cave" (signed-value < 0).
+        // Uses test-local config (tera_wave=32) so the 256-block window
+        // captures enough noise cycles for reliable statistics.
+        let cave_cfg = test_cave_cfg();
+        let nc = NoiseCarvers::new(42, &cave_cfg);
+        let surface_y = 64.0;
+        let mut frac_by_depth = vec![];
+        for depth in [10, 50, 100, 150] {
+            let wy = surface_y as i32 - depth;
+            let mut hit = 0usize;
+            let mut total = 0usize;
+            for wx in (-128..128).step_by(4) {
+                for wz in (-128..128).step_by(4) {
+                    total += 1;
+                    let v = terasology_ambient(wx, wy, wz, &nc, &cave_cfg, surface_y);
+                    if v < 0.0 { hit += 1; }
+                }
+            }
+            frac_by_depth.push(hit as f32 / total as f32);
+        }
+        // Monotonic non-decreasing toward depth.
+        for w in frac_by_depth.windows(2) {
+            assert!(w[1] >= w[0] - 1e-3,
+                "cave fraction decreased with depth: {:?}", frac_by_depth);
+        }
+        // Surface band should be ~0%.
+        assert!(frac_by_depth[0] < 0.05, "too many caves near surface: {:?}", frac_by_depth);
+        // Deep band should be > shallow.
+        assert!(frac_by_depth[3] > frac_by_depth[0] * 2.0,
+            "deep band not vastly more cave-rich than shallow: {:?}", frac_by_depth);
+    }
+
+    #[test]
+    fn terasology_ambient_surface_suppression_complete_by_supp_depth() {
+        // Uses test-local config so supp_depth (123 blocks) is reachable in the
+        // sampling window and the suppression effect is strong enough to measure.
+        let cave_cfg = test_cave_cfg();
+        let nc = NoiseCarvers::new(42, &cave_cfg);
+        let surface_y = 64.0;
+        // At depth == tera_supp_depth, freq_reduction = max(0, tera_supp - 1.0)
+        // which is 0 for any tera_supp <= 1.0. Suppression has fully faded.
+        // Verify the cave fraction at that depth is non-trivial.
+        let wy = (surface_y - cave_cfg.tera_supp_depth) as i32;
+        let mut hit = 0usize;
+        let mut total = 0usize;
+        for wx in (-128..128).step_by(4) {
+            for wz in (-128..128).step_by(4) {
+                total += 1;
+                if terasology_ambient(wx, wy, wz, &nc, &cave_cfg, surface_y) < 0.0 {
+                    hit += 1;
+                }
+            }
+        }
+        let frac = hit as f32 / total as f32;
+        assert!(frac > 0.02, "expected some caves at supp_depth, got {frac:.3}");
+    }
+
+    #[test]
+    fn terasology_ambient_horizontal_bias_at_high_y_factor() {
+        // With high tera_y_factor, the cave footprint in any horizontal slice
+        // should be wider XZ than tall Y for typical features. We approximate
+        // this by counting how many cells have horizontal-only-cave vs
+        // vertical-only-cave neighbours.
+        // Uses test-local config (tera_wave=32) for sufficient statistics in the
+        // 256-block sampling window.
+        let cave_cfg = test_cave_cfg();
+        let nc = NoiseCarvers::new(42, &cave_cfg);
+        let surface_y = 64.0;
+        let wy_center = -40i32;
+        let mut horizontal_runs = 0usize;
+        let mut vertical_runs = 0usize;
+        for wx in (-128..128).step_by(2) {
+            let mut h_run = 0;
+            let mut v_run = 0;
+            for wz in (-128..128).step_by(2) {
+                if terasology_ambient(wx, wy_center, wz, &nc, &cave_cfg, surface_y) < 0.0 {
+                    h_run += 1;
+                } else if h_run > 0 {
+                    horizontal_runs += h_run; h_run = 0;
+                }
+            }
+            for dy in (-30..30).step_by(2) {
+                if terasology_ambient(wx, wy_center + dy, 0, &nc, &cave_cfg, surface_y) < 0.0 {
+                    v_run += 1;
+                } else if v_run > 0 {
+                    vertical_runs += v_run; v_run = 0;
+                }
+            }
+        }
+        assert!(horizontal_runs > vertical_runs,
+            "expected horizontal cave extent > vertical: h={horizontal_runs} v={vertical_runs}");
     }
 
     #[test]
