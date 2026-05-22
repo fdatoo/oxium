@@ -515,6 +515,8 @@ fn build_system(
         tunnels,
         entrances,
         style,
+        trunk: None,
+        vertical_connectors: vec![],
     }
 }
 
