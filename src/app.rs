@@ -112,6 +112,7 @@ pub struct PerfSnapshot {
     /// relight pump. Non-zero means lighting is still converging — a
     /// number that holds steady (instead of trending toward zero) is
     /// the smoking gun for a cascade that doesn't terminate.
+    #[cfg(feature = "legacy-lighting")]
     pub light_queue: usize,
     /// LOD0 mesh slots currently held by the renderer. Useful as a
     /// proxy for "is the world fully streamed in yet."
@@ -453,8 +454,8 @@ impl AppState {
             // of relight jobs; over a few seconds the world converges to
             // a fixed lighting state with correct cross-chunk propagation.
             // The return value is the *total* (not just dispatched) count
-            // of `dirty.light` chunks, which the HUD prints so we can see
-            // whether the cascade is terminating.
+            // of `dirty.light` chunks, stored in `perf.light_queue` for
+            // legacy builds; the graph-engine HUD uses `light_ops_pending`.
             #[cfg(feature = "legacy-lighting")]
             {
                 self.perf.light_queue = time(prof, "relight_pump", || {
