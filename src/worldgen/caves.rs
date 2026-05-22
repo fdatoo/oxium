@@ -129,6 +129,78 @@ pub fn build_systems_for_region(
         let sys = build_system(seed, coord, system_idx, heightmap, climate, density, cave_cfg);
         region.cave_systems.push(sys);
     }
+    build_vertical_connectors(seed, coord, cave_cfg, region);
+}
+
+/// For each pair of systems in adjacent bands within `region`, roll
+/// `vertical_connector_prob`. If passing, push a `Tunnel` from the upper
+/// system's lowest chamber to the lower system's highest chamber.
+pub fn build_vertical_connectors(
+    seed: u64,
+    coord: RegionCoord,
+    cfg: &crate::worldgen::config::CaveConfig,
+    region: &mut FineRegion,
+) {
+    if cfg.vertical_connector_prob <= 0.0 {
+        return;
+    }
+    // Snapshot which band each system belongs to (avoids borrow conflict).
+    let bands: Vec<DepthBand> = region.cave_systems.iter().map(|s| {
+        let cy = (s.bb_min.y + s.bb_max.y) / 2;
+        if cy >= CAVE_BAND_SHALLOW.0 {
+            DepthBand::Shallow
+        } else if cy >= CAVE_BAND_MIDDLE.0 {
+            DepthBand::Middle
+        } else {
+            DepthBand::Deep
+        }
+    }).collect();
+    let band_idx = |b: DepthBand| -> u8 {
+        match b {
+            DepthBand::Shallow => 0,
+            DepthBand::Middle  => 1,
+            DepthBand::Deep    => 2,
+        }
+    };
+    for i in 0..region.cave_systems.len() {
+        for j in 0..region.cave_systems.len() {
+            if i == j {
+                continue;
+            }
+            // Only Shallow→Middle or Middle→Deep (i is upper, j is lower).
+            if band_idx(bands[j]) != band_idx(bands[i]) + 1 {
+                continue;
+            }
+            let u = mix_unit(seed, &[coord.x, coord.z, i as i32, j as i32, 9500]);
+            if u > cfg.vertical_connector_prob {
+                continue;
+            }
+            // Upper system's lowest chamber (minimum center.y).
+            let upper_lowest = region.cave_systems[i]
+                .chambers
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| a.center.y.partial_cmp(&b.center.y).unwrap())
+                .map(|(idx, _)| idx);
+            // Lower system's highest chamber (maximum center.y).
+            let lower_highest = region.cave_systems[j]
+                .chambers
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.center.y.partial_cmp(&b.center.y).unwrap())
+                .map(|(idx, _)| idx);
+            let (Some(a_idx), Some(b_idx)) = (upper_lowest, lower_highest) else {
+                continue;
+            };
+            let pa = region.cave_systems[i].chambers[a_idx].center;
+            let pb = region.cave_systems[j].chambers[b_idx].center;
+            let connector = Tunnel {
+                control_points: vec![pa, pb],
+                radius: cfg.vertical_connector_r,
+            };
+            region.cave_systems[i].vertical_connectors.push(connector);
+        }
+    }
 }
 
 /// Per-style parameter set extracted from the style table.
@@ -574,6 +646,31 @@ pub fn cave_sdf(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> f32 {
                 }
             }
         }
+        // Vertical connectors between adjacent-band systems in the same
+        // region. Same capsule SDF math as tunnels.
+        for t in &sys.vertical_connectors {
+            if t.control_points.len() < 2 {
+                continue;
+            }
+            for i in 0..t.control_points.len() - 1 {
+                let a = t.control_points[i];
+                let b = t.control_points[i + 1];
+                let ab = b - a;
+                let len_sq = ab.length_squared();
+                if len_sq < 1e-6 {
+                    continue;
+                }
+                let t_param = ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+                let closest = a + ab * t_param;
+                let dist = (p - closest).length();
+                if dist <= t.radius {
+                    let sdf = (1.0 - dist / t.radius) * CAVE_SDF_INTENSITY;
+                    if sdf > max_sdf {
+                        max_sdf = sdf;
+                    }
+                }
+            }
+        }
     }
     max_sdf
 }
@@ -682,6 +779,23 @@ pub fn cave_air(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> bool {
         // control polyline as 3 straight capsules — a piecewise
         // approximation of the Catmull-Rom).
         for t in &sys.tunnels {
+            if t.control_points.len() < 2 {
+                continue;
+            }
+            for i in 0..t.control_points.len() - 1 {
+                let a = t.control_points[i];
+                let b = t.control_points[i + 1];
+                let ab = b - a;
+                let t_param = ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0);
+                let closest = a + ab * t_param;
+                if (p - closest).length() <= t.radius {
+                    return true;
+                }
+            }
+        }
+        // Vertical connectors between adjacent-band systems in the same
+        // region. Same capsule SDF math as tunnels.
+        for t in &sys.vertical_connectors {
             if t.control_points.len() < 2 {
                 continue;
             }
@@ -1190,6 +1304,47 @@ fn corner_index(cx: usize, cy: usize, cz: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vertical_connector_connects_adjacent_band_systems() {
+        // Force prob = 1.0, scan 8×8 regions, verify at least one connector emitted.
+        let mut cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        cfg.cave.vertical_connector_prob = 1.0;
+        let hm = HeightmapNoise::new(42, &cfg.climate);
+        let mut found_connector = false;
+        'outer: for rx in 0..8_i32 {
+            for rz in 0..8_i32 {
+                let coord = RegionCoord { x: rx, z: rz };
+                let mut region = FineRegion::empty(coord);
+                build_systems_for_region(42, coord, &hm, &cfg.climate, &cfg.density, &mut region, &cfg.cave);
+                let bands: Vec<DepthBand> = region.cave_systems.iter().map(|s| {
+                    infer_band_for_test(s)
+                }).collect();
+                if !pair_is_adjacent_for_test(&bands) { continue; }
+                for sys in &region.cave_systems {
+                    if !sys.vertical_connectors.is_empty() {
+                        found_connector = true;
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        assert!(found_connector, "no vertical connector emitted in any 2-band region with prob=1.0");
+    }
+
+    fn infer_band_for_test(sys: &CaveSystem) -> DepthBand {
+        let cy = (sys.bb_min.y + sys.bb_max.y) / 2;
+        if cy >= CAVE_BAND_SHALLOW.0 { DepthBand::Shallow }
+        else if cy >= CAVE_BAND_MIDDLE.0 { DepthBand::Middle }
+        else { DepthBand::Deep }
+    }
+
+    fn pair_is_adjacent_for_test(bands: &[DepthBand]) -> bool {
+        (bands.iter().any(|b| matches!(b, DepthBand::Shallow))
+            && bands.iter().any(|b| matches!(b, DepthBand::Middle)))
+        || (bands.iter().any(|b| matches!(b, DepthBand::Middle))
+            && bands.iter().any(|b| matches!(b, DepthBand::Deep)))
+    }
 
     #[test]
     fn system_count_within_bounds() {

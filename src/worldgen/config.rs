@@ -169,6 +169,11 @@ pub struct CaveConfig {
     pub systems_per_region_max: u32,
     /// Per-chamber radius jitter multiplier range. (0.7, 1.3) → ×0.7..×1.3.
     pub chamber_radius_jitter: (f32, f32),
+    /// Probability that two systems in adjacent bands of the same region
+    /// are linked by a vertical connector tunnel.
+    pub vertical_connector_prob: f32,
+    /// Vertical-connector tunnel radius.
+    pub vertical_connector_r: f32,
 }
 
 /// PR 4 biome lookup config. The 6 existing biomes (Tundra,
