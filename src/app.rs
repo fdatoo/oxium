@@ -141,6 +141,10 @@ pub struct PerfSnapshot {
     /// the renderer fed to wgpu, useful for spotting "the CPU is
     /// spending most of the frame in `wgpu::draw_indexed` overhead".
     pub draw_calls: u32,
+    /// Graph-engine op queue depth entering this frame (pre-tick snapshot).
+    /// Non-zero during initial stream-in; approaches zero as light converges.
+    /// Always 0 under `legacy-lighting` (use `light_queue` there instead).
+    pub light_ops_pending: usize,
 }
 
 /// How often the autosave system flushes modified chunks to disk.
@@ -217,7 +221,9 @@ impl AppState {
         // launch shows the same terrain. Drop this override when the
         // generator is locked in and we want fresh worlds again.
         const TEST_SEED_OVERRIDE: Option<u64> = Some(42);
-        let seed = seed_override.or(TEST_SEED_OVERRIDE).unwrap_or(manifest.seed);
+        let seed = seed_override
+            .or(TEST_SEED_OVERRIDE)
+            .unwrap_or(manifest.seed);
 
         if seed != manifest.seed {
             log::warn!(
@@ -266,10 +272,8 @@ impl AppState {
             .join("assets")
             .join("worldgen")
             .join("default.ron");
-        let watcher = crate::worldgen::config::spawn_watcher(
-            watcher_path,
-            holder.clone(),
-        ).expect("file watcher must start");
+        let watcher = crate::worldgen::config::spawn_watcher(watcher_path, holder.clone())
+            .expect("file watcher must start");
         let generator = Arc::new(Generator::with_config(seed, holder));
         let registry = Arc::new(BlockRegistry::new());
 
@@ -279,8 +283,7 @@ impl AppState {
         // out of the in-game log (alongside the `world manifest
         // loaded: seed=…` line in stdout/log file).
         let mut ui = crate::ui::Ui::new();
-        ui.log
-            .push_system(format!("World seed: {seed}"));
+        ui.log.push_system(format!("World seed: {seed}"));
 
         Self {
             window,
@@ -313,8 +316,7 @@ impl AppState {
             }),
             frame_edit_count: 0,
             ui,
-            world_stream_cache:
-                crate::ecs::systems::world_stream::WorldStreamCache::default(),
+            world_stream_cache: crate::ecs::systems::world_stream::WorldStreamCache::default(),
             fullbright: false,
         }
     }
@@ -347,9 +349,11 @@ impl AppState {
             // B toggles fullbright: all opaque geometry renders at full
             // brightness, skipping the lighting composition. Useful for
             // cave spelunking where dim block-light obscures structure.
-            if self.input_buf.key_pressed_this_frame.contains(
-                &winit::keyboard::KeyCode::KeyB,
-            ) {
+            if self
+                .input_buf
+                .key_pressed_this_frame
+                .contains(&winit::keyboard::KeyCode::KeyB)
+            {
                 self.fullbright = !self.fullbright;
             }
             time(prof, "time_of_day", || {
@@ -424,8 +428,15 @@ impl AppState {
                     &self.registry,
                 )
             });
+            let light_pending = self.world.light_engine.pending_ops_count();
+            let light_budget = if self.perf.chunks_pending > 100 || light_pending > 10_000 {
+                500_000
+            } else {
+                50_000
+            };
+            self.perf.light_ops_pending = light_pending;
             time(prof, "light_engine_tick", || {
-                self.world.light_engine_tick(50_000);
+                self.world.light_engine_tick(light_budget);
             });
             time(prof, "upload_dirty_light_volumes", || {
                 crate::ecs::systems::mesh_upload::upload_dirty_light_volumes(
@@ -579,9 +590,9 @@ impl AppState {
         registry: &crate::voxel::block::BlockRegistry,
         coord: crate::voxel::coords::ChunkCoord,
     ) {
-        use crate::voxel::chunk::{DenseChunk, Neighbors};
         #[cfg(feature = "legacy-lighting")]
         use crate::voxel::chunk::{ChunkDirty, ChunkState, PalettedChunk};
+        use crate::voxel::chunk::{DenseChunk, Neighbors};
         use crate::voxel::world::ChunkSlot;
 
         let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get(&coord) else {
