@@ -78,6 +78,33 @@ impl DepthBand {
     }
 }
 
+/// Roll a `CaveStyle` deterministically from `(seed, region_coord,
+/// system_idx, band)`. Band-weighted via `CaveStyleTable`.
+pub fn pick_style(
+    seed: u64,
+    coord: RegionCoord,
+    system_idx: i32,
+    band: DepthBand,
+    cfg: &crate::worldgen::config::CaveConfig,
+) -> CaveStyle {
+    let u = mix_unit(seed, &[coord.x, coord.z, system_idx, 7000]);
+    let weights = match band {
+        DepthBand::Shallow => &cfg.style_table.style_weights_shallow,
+        DepthBand::Middle  => &cfg.style_table.style_weights_middle,
+        DepthBand::Deep    => &cfg.style_table.style_weights_deep,
+    };
+    let mut acc = 0.0;
+    let styles = [
+        CaveStyle::Cathedral, CaveStyle::Warren, CaveStyle::Slot,
+        CaveStyle::Sump,      CaveStyle::Karst,
+    ];
+    for (i, &w) in weights.iter().enumerate() {
+        acc += w;
+        if u <= acc { return styles[i]; }
+    }
+    CaveStyle::Karst
+}
+
 /// Build all cave systems for the given fine region. Each system is
 /// deterministically derived from `(seed, coord, system_idx)`.
 pub fn build_systems_for_region(
@@ -408,6 +435,8 @@ fn build_system(
         chambers,
         tunnels,
         entrances,
+        // PR2.3 will replace this placeholder with pick_style(...).
+        style: CaveStyle::Karst,
     }
 }
 
@@ -1545,6 +1574,40 @@ mod tests {
         // the cutoff gate flips between corners.
         assert!(max_cheese < 0.5, "cheese off-corner max delta {max_cheese}");
         assert!(max_pillar < 1.0, "pillar off-corner max delta {max_pillar}");
+    }
+
+    #[test]
+    fn style_band_distribution_matches_weights() {
+        // Roll 500 systems in each band; verify distributions match weights
+        // within ±10%.
+        use crate::worldgen::region::RegionCoord;
+        let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
+        let table = &cfg.cave.style_table;
+        let bands = [
+            ("shallow", DepthBand::Shallow, &table.style_weights_shallow),
+            ("middle",  DepthBand::Middle,  &table.style_weights_middle),
+            ("deep",    DepthBand::Deep,    &table.style_weights_deep),
+        ];
+        for (name, band, weights) in &bands {
+            let mut counts = [0u32; 5];
+            for i in 0..500 {
+                let s = pick_style(42, RegionCoord { x: i, z: 0 }, 0, *band, &cfg.cave);
+                let idx = match s {
+                    CaveStyle::Cathedral => 0,
+                    CaveStyle::Warren    => 1,
+                    CaveStyle::Slot      => 2,
+                    CaveStyle::Sump      => 3,
+                    CaveStyle::Karst     => 4,
+                };
+                counts[idx] += 1;
+            }
+            for (i, &expected_weight) in weights.iter().enumerate() {
+                let actual = counts[i] as f32 / 500.0;
+                let diff = (actual - expected_weight).abs();
+                assert!(diff < 0.10,
+                    "band {name}, style index {i}: expected {expected_weight:.2}, got {actual:.2}");
+            }
+        }
     }
 
 }

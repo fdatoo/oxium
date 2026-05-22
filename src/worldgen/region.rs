@@ -198,6 +198,8 @@ pub struct CaveSystem {
     pub chambers: Vec<Chamber>,
     pub tunnels: Vec<Tunnel>,
     pub entrances: Vec<Entrance>,
+    /// Style rolled once per system, drives chamber/tunnel parameters.
+    pub style: crate::worldgen::caves::CaveStyle,
 }
 
 /// One chamber — an ellipsoid of air. Radii independent per axis.
