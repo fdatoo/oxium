@@ -22,6 +22,22 @@ use crate::worldgen::tuning::*;
 use glam::{IVec3, Vec3};
 use noise::{Fbm, NoiseFn, Simplex};
 
+/// Distinct cave-system personalities, rolled per system from the
+/// region cell id and the system's depth band.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaveStyle {
+    /// Few large chambers, wide tunnels. Deep-band-biased.
+    Cathedral,
+    /// Many small chambers, narrow tunnels. Shallow-band-biased.
+    Warren,
+    /// XZ-stretched chambers, narrow vertical sheets. Mid-band-biased.
+    Slot,
+    /// Low-clustered chambers (flooded look). Deep-band-biased.
+    Sump,
+    /// Default — medium chambers, medium tunnels.
+    Karst,
+}
+
 /// Depth band a system belongs to. Drives bounding-box Y placement
 /// and entrance-roll probability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

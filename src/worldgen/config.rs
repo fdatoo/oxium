@@ -43,6 +43,41 @@ impl ChannelParams {
     }
 }
 
+/// Per-style parameter ranges for cave-system construction. Lives in
+/// `CaveConfig` so RON hot reload can retune styles without recompile.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CaveStyleTable {
+    /// (min, max) chambers per system, per style.
+    pub cathedral_chamber_count: (u32, u32),
+    pub warren_chamber_count: (u32, u32),
+    pub slot_chamber_count: (u32, u32),
+    pub sump_chamber_count: (u32, u32),
+    pub karst_chamber_count: (u32, u32),
+    /// (min, max) chamber radii in XZ.
+    pub cathedral_r_xz: (f32, f32),
+    pub warren_r_xz: (f32, f32),
+    pub slot_r_xz: (f32, f32),
+    pub sump_r_xz: (f32, f32),
+    pub karst_r_xz: (f32, f32),
+    /// (min, max) chamber radii in Y.
+    pub cathedral_r_y: (f32, f32),
+    pub warren_r_y: (f32, f32),
+    pub slot_r_y: (f32, f32),
+    pub sump_r_y: (f32, f32),
+    pub karst_r_y: (f32, f32),
+    /// (min, max) tunnel radius.
+    pub cathedral_tunnel_r: (f32, f32),
+    pub warren_tunnel_r: (f32, f32),
+    pub slot_tunnel_r: (f32, f32),
+    pub sump_tunnel_r: (f32, f32),
+    pub karst_tunnel_r: (f32, f32),
+    /// Band-biased style weights `[Cathedral, Warren, Slot, Sump, Karst]`.
+    /// Each must sum to 1.0.
+    pub style_weights_shallow: [f32; 5],
+    pub style_weights_middle: [f32; 5],
+    pub style_weights_deep: [f32; 5],
+}
+
 /// Cave-carving tunables — applies to the noise carvers (cheese,
 /// pillars), not the graph cave systems.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -123,6 +158,17 @@ pub struct CaveConfig {
     /// values force tube iso-surfaces to bend horizontal. Default 3.56.
     pub tera_y_factor: f32,
 
+    pub style_table: CaveStyleTable,
+    /// Per-chamber depth-driven radius multiplier.
+    /// `mult(cy) = 1.0 + depth_scale * max(0, (40 - cy) / 80)`.
+    pub depth_scale: f32,
+    /// Share of cave systems rolled into the Deep band.
+    /// 0.0 = uniform thirds; 1.0 = heavily deep.
+    pub deep_band_bias: f32,
+    /// Max cave systems per region; sweep-chosen 3.
+    pub systems_per_region_max: u32,
+    /// Per-chamber radius jitter multiplier range. (0.7, 1.3) → ×0.7..×1.3.
+    pub chamber_radius_jitter: (f32, f32),
 }
 
 /// PR 4 biome lookup config. The 6 existing biomes (Tundra,
