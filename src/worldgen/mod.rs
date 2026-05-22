@@ -1991,9 +1991,9 @@ mod tests {
     /// future runs catch unintentional behavioural drift.
     #[test]
     fn golden_seed42_chunk_0_2_0() {
-        // Rebaselined 2026-05-21: cave overhaul PR1 added terasology_ambient
-        // carver to the density composition (and removed spaghetti/wormhole).
-        const GOLDEN_42_002: u64 = 0x91890CF00C08C3A1;
+        // Rebaselined 2026-05-21: final cave overhaul state (PR4.1 smin
+        // composition + PR4.3 surface block fixer changed density).
+        const GOLDEN_42_002: u64 = 0xA6F23A0676979F87;
         let g = Generator::new(42);
         let mut c = DenseChunk::empty();
         g.fill_chunk(ChunkCoord(IVec3::new(0, 2, 0)), &mut c);
