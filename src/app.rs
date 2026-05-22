@@ -411,6 +411,15 @@ impl AppState {
                     &self.registry,
                 )
             });
+            time(prof, "light_engine_tick", || {
+                self.world.light_engine_tick(50_000);
+            });
+            time(prof, "upload_dirty_light_volumes", || {
+                crate::ecs::systems::mesh_upload::upload_dirty_light_volumes(
+                    &mut self.world,
+                    &mut self.renderer,
+                );
+            });
             // Relight pump runs after the two job-drain stages so it picks
             // up the `dirty.light` flags those handlers just set on newly
             // loaded/generated chunks. Each frame queues a bounded number
