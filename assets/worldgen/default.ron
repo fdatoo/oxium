@@ -339,7 +339,7 @@
         // donut pockets the previous isotropic sampling produced.
         cheese_xz_scale: 1.0,
         cheese_y_scale: 0.6666667,
-        cheese_offset: 0.18,
+        cheese_offset: 0.40,
         cheese_suppression_offset: 1.5,
         cheese_suppression_slope: -0.64,
         cheese_suppression_min: 0.0,
@@ -398,20 +398,27 @@
         tera_y_factor: 3.56,
 
         style_table: (
-            cathedral_chamber_count: (3, 5),
-            warren_chamber_count: (9, 13),
-            slot_chamber_count: (5, 8),
-            sump_chamber_count: (4, 7),
-            karst_chamber_count: (6, 10),
-            cathedral_r_xz: (22.0, 32.0), warren_r_xz: (6.0, 12.0),
-            slot_r_xz: (10.0, 24.0),      sump_r_xz: (14.0, 24.0),
-            karst_r_xz: (10.0, 18.0),
-            cathedral_r_y: (16.0, 26.0),  warren_r_y: (5.0, 10.0),
-            slot_r_y: (4.0, 8.0),         sump_r_y: (8.0, 14.0),
-            karst_r_y: (8.0, 14.0),
-            cathedral_tunnel_r: (4.0, 6.0), warren_tunnel_r: (3.0, 4.0),
-            slot_tunnel_r: (3.0, 5.0),     sump_tunnel_r: (4.0, 6.0),
-            karst_tunnel_r: (3.0, 5.0),
+            // Chamber counts: warren reduced from 9-13 (dungeon-scale) to 3-5;
+            // others trimmed proportionally so each system feels like a
+            // pocket of rooms, not a whole dungeon floor.
+            cathedral_chamber_count: (2, 4),
+            warren_chamber_count: (3, 5),
+            slot_chamber_count: (3, 5),
+            sump_chamber_count: (3, 5),
+            karst_chamber_count: (3, 5),
+            // Chamber radii halved. Cathedral keeps the biggest ratio so it
+            // still reads as a large open space; warren shrinks the most to
+            // produce tight winding passages between small rooms.
+            cathedral_r_xz: (10.0, 16.0), warren_r_xz: (4.0,  7.0),
+            slot_r_xz: (6.0,  12.0),      sump_r_xz: (7.0,  12.0),
+            karst_r_xz: (5.0,   9.0),
+            cathedral_r_y: (8.0,  13.0),  warren_r_y: (3.0,  5.0),
+            slot_r_y: (3.0,   6.0),        sump_r_y: (4.0,   7.0),
+            karst_r_y: (4.0,   7.0),
+            // Tunnel radii halved → passages feel like tubes not rooms.
+            cathedral_tunnel_r: (2.0, 3.0), warren_tunnel_r: (1.5, 2.0),
+            slot_tunnel_r: (1.5, 2.5),      sump_tunnel_r: (2.0, 3.0),
+            karst_tunnel_r: (1.5, 2.5),
             style_weights_shallow: (0.05, 0.45, 0.20, 0.05, 0.25),
             style_weights_middle:  (0.20, 0.20, 0.20, 0.20, 0.20),
             style_weights_deep:    (0.10, 0.05, 0.05, 0.45, 0.35),
@@ -420,11 +427,15 @@
         deep_band_bias: 0.30,
         systems_per_region_max: 3,
         chamber_radius_jitter: (0.7, 1.3),
-        vertical_connector_prob: 0.87,
-        vertical_connector_r: 3.4,
-        trunk_prob: 0.38,
-        trunk_r: 3.4,
-        smin_k: 1.2,
+        // Vertical connectors and trunks: reduced probability and radius so
+        // cave systems feel more self-contained rather than one vast network.
+        vertical_connector_prob: 0.35,
+        vertical_connector_r: 1.8,
+        trunk_prob: 0.20,
+        trunk_r: 1.8,
+        // smin_k: tighter blend so chambers and tunnels stay distinct shapes
+        // instead of merging into a single cavernous void.
+        smin_k: 0.5,
     ),
 
     // ── Aquifer system (PR 7) ────────────────────────────────────────

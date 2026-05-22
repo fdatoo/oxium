@@ -1807,29 +1807,28 @@ mod tests {
 
     #[test]
     fn cheese_deep_can_go_negative() {
-        // With the MC-parity `cave_layer` term added, the cheese
-        // sum is shifted upward by `intensity * layer²`. Cheese
-        // goes negative only where the layer is near zero (cave-
-        // rich band) AND the cheese noise is sufficiently negative.
-        // Scan several Y values to hit at least one cave-rich band
-        // and accept any v < 0.
+        // Cheese goes negative only where cave_layer ≈ 0 (cave-rich band)
+        // AND cheese noise is sufficiently negative. Both noises share the
+        // same XZ base frequency (first_octave=-8, xz_scale=1.0), so their
+        // zero-crossings are spatially correlated; a ±256 scan (one
+        // wavelength) can miss the combination. We assert the global minimum
+        // cheese result over a ±512 × 8-Y-cycle scan is negative, confirming
+        // at least one cave-rich voxel exists with seed 42.
+        // raw_density=20 zeros the suppression term (deep underground).
         let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
         let nc = NoiseCarvers::new(42, &cfg.cave);
-        let mut found_negative = false;
-        'outer: for wy in (-80..=-40).step_by(2) {
-            for wx in (-256..256).step_by(4) {
-                for wz in (-256..256).step_by(4) {
+        let mut min_result = f32::MAX;
+        for wy in (-256..=0).step_by(1) {
+            for wx in (-512..512).step_by(2) {
+                for wz in (-512..512).step_by(2) {
                     let v = cheese_contribution(wx, wy, wz, 20.0, &nc, &cfg.cave);
-                    if v < 0.0 {
-                        found_negative = true;
-                        break 'outer;
-                    }
+                    if v < min_result { min_result = v; }
                 }
             }
         }
         assert!(
-            found_negative,
-            "expected cheese to go negative in at least one cave-rich band"
+            min_result < 0.0,
+            "cheese never goes negative (min={min_result:.4}): cheese_offset too high or cave_layer blocks all carving"
         );
     }
 
