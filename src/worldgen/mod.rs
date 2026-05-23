@@ -89,6 +89,7 @@ pub mod probe_impl;
 pub mod region;
 pub mod spline;
 pub mod surface;
+pub mod surface_fixer;
 pub(crate) mod terrain_ref;
 pub mod trees;
 pub mod trees_impl;
