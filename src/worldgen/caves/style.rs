@@ -36,6 +36,8 @@ pub(super) const SALT_BB_ORIGIN_Z: i32 = 11;
 pub(super) const SALT_CHAMBER_COUNT: i32 = 20;
 /// Namespaces the extra-loop-count roll (how many non-MST tunnel edges to add).
 pub(super) const SALT_EXTRA_LOOPS: i32 = 50;
+/// Namespaces the per-chamber entrance-probability gate roll.
+pub(super) const SALT_ENTRANCE_PROB: i32 = 70;
 
 /// Distinct cave-system personalities, rolled per system from the
 /// region cell id and the system's depth band.

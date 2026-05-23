@@ -4,8 +4,8 @@
 use super::connectors::build_vertical_connectors;
 use super::pools::derive_cave_pools;
 use super::style::{
-    CaveStyle, DepthBand, SALT_BB_ORIGIN_X, SALT_BB_ORIGIN_Z, SALT_CHAMBER_COUNT, SALT_EXTRA_LOOPS,
-    SALT_SYSTEM_COUNT, pick_style,
+    CaveStyle, DepthBand, SALT_BB_ORIGIN_X, SALT_BB_ORIGIN_Z, SALT_CHAMBER_COUNT,
+    SALT_ENTRANCE_PROB, SALT_EXTRA_LOOPS, SALT_SYSTEM_COUNT, pick_style,
 };
 use crate::worldgen::density::HeightmapNoise;
 use crate::worldgen::hash::{mix_range, mix_u32, mix_unit};
@@ -378,7 +378,10 @@ fn roll_entrances(
     // Entrance rolls.
     let mut entrances: Vec<Entrance> = Vec::new();
     for (ci, chamber) in chambers.iter().enumerate() {
-        let try_roll = mix_unit(seed, &[coord.x, coord.z, system_idx, 70, ci as i32]);
+        let try_roll = mix_unit(
+            seed,
+            &[coord.x, coord.z, system_idx, SALT_ENTRANCE_PROB, ci as i32],
+        );
         if try_roll >= band.entrance_prob() {
             continue;
         }
