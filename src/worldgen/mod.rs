@@ -76,11 +76,10 @@ pub mod carver;
 pub mod caves;
 pub mod climate;
 pub mod config;
-pub mod density_graph;
+pub mod density;
 pub mod flat_cache;
 pub mod fluid;
 pub mod hash;
-pub mod heightmap;
 pub mod hydrology;
 pub mod noise_channel;
 pub mod plates;
@@ -95,6 +94,33 @@ pub mod tuning;
 /// callers outside the worldgen module (renderer, persistence, tests)
 /// don't have to import `tuning::SEA_LEVEL` directly.
 pub use crate::worldgen::tuning::SEA_LEVEL;
+
+// Compatibility re-exports: external callers that import
+// `oxium::worldgen::heightmap::HeightmapNoise` (e.g. integration
+// tests) or `oxium::worldgen::density_graph::*` still compile without
+// change. Both old flat modules are aliased to their new homes inside
+// the `density/` submodule.
+//
+// Note: `heightmap` used to contain both the noise structs
+// (HeightmapNoise, DensityNoise) and standalone math helpers (slide,
+// offset_to_world_y, etc.). After the split those live in
+// `density::heightmap` and `density::math` respectively. The wrapper
+// module below re-exports both so the old flat path still resolves.
+pub mod heightmap {
+    pub use crate::worldgen::density::heightmap::{DensityNoise, HeightmapNoise};
+    pub use crate::worldgen::density::math::{
+        offset_to_world_y, peaks_and_valleys, plate_roughness_bias, signed_continentalness, slide,
+        smooth_plate_contribution,
+    };
+}
+pub mod density_graph {
+    pub use crate::worldgen::density::cell_evaluator::{
+        CELL_COUNT, CELL_SIZE, CORNER_COUNT, CellEvaluator,
+    };
+    pub use crate::worldgen::density::splines::{
+        ClimateChannel, ColumnClimate, DensityFn, MarkerKind, build_default_tree,
+    };
+}
 
 // All other tuning constants live in `worldgen::tuning`. The names
 // below are imported into this module's scope for ergonomics.
@@ -112,12 +138,12 @@ use crate::worldgen::tuning::{
 pub struct Generator {
     /// PR 2: plate-driven heightmap (continental shelf + ridges +
     /// domain-warped FBM relief). Owns the FBM/warp noise fields.
-    heightmap: heightmap::HeightmapNoise,
+    heightmap: density::heightmap::HeightmapNoise,
     /// 3D density evaluator (PR A): height-bias term combined with a
     /// 3D relief FBM. Drives the per-voxel solid/air decision in
     /// `fill_chunk` so moderate slopes don't read as clean
     /// chevron stripes.
-    density: heightmap::DensityNoise,
+    density: density::heightmap::DensityNoise,
     /// Temperature map (large-period 2D noise). Drives the cold/warm
     /// axis of the biome R-tree lookup. Negative values are colder
     /// (Tundra / SnowyForest), positive warmer (Desert / Tropical).
@@ -217,8 +243,8 @@ impl Generator {
         // values, but the noise *frequencies* baked here stay).
         let bundled =
             config::WorldgenConfig::bundled_default().expect("bundled default.ron must parse");
-        let heightmap = heightmap::HeightmapNoise::new(seed, &bundled.climate);
-        let density = heightmap::DensityNoise::new(seed, &bundled.density);
+        let heightmap = density::heightmap::HeightmapNoise::new(seed, &bundled.climate);
+        let density = density::heightmap::DensityNoise::new(seed, &bundled.density);
         // Climate maps. Large period so a
         // single climate cell covers many chunks — players walk for
         // a while between biome bands instead of crossing one every
@@ -502,8 +528,12 @@ impl Generator {
         // signed_continentalness has a step discontinuity at
         // second-rank-flip lines and is no longer authoritative.
         let plate = crate::worldgen::plates::plate_at(self.seed, wx, wz);
-        let (continentalness, _) =
-            crate::worldgen::heightmap::smooth_plate_contribution(self.seed, wx, wz, &cfg.climate);
+        let (continentalness, _) = crate::worldgen::density::math::smooth_plate_contribution(
+            self.seed,
+            wx,
+            wz,
+            &cfg.climate,
+        );
 
         // Pre-carve height.
         let h_pre =
@@ -642,7 +672,7 @@ impl Generator {
         match stage {
             Stage::Continentalness => {
                 let cfg = self.config.load();
-                let (c, _) = crate::worldgen::heightmap::smooth_plate_contribution(
+                let (c, _) = crate::worldgen::density::math::smooth_plate_contribution(
                     self.seed,
                     wx,
                     wz,
