@@ -2,7 +2,7 @@ use super::*;
 use crate::voxel::block::Block;
 use crate::voxel::chunk::{CHUNK_VOL, DenseChunk};
 use crate::voxel::coords::{CHUNK_DIM_U, LocalPos};
-use crate::worldgen::tuning::SNOW_LINE;
+use crate::worldgen::tuning::{FINE_REGION_SIZE, MAX_TERRAIN_Y, SNOW_LINE};
 use glam::{IVec3, UVec3};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
