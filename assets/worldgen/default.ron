@@ -258,6 +258,30 @@
     //   * `YAbove(110)` → alpine snow line
     //   * `IsCold AND YAbove(70)` → cold-biome snow cap floor
     surface: Sequence([
+        // 0. Underwater surface rule — applies to all submerged columns
+        //    (ocean, lake, river) regardless of biome or cliff state.
+        //    Priority: topmost bed block → Sand; 1-3 blocks below → Dirt
+        //    (with ~10% Stone deposits); deeper → Stone.
+        //    BelowWaterSurface(offset: 0) fires when water_surface_y is
+        //    set AND wy ≤ water_surface_y, i.e. the voxel is underwater.
+        //    WithinSurfaceBand(16) ensures this only fires near the actual
+        //    terrain floor — deep-underground cave voxels in ocean columns
+        //    are too far from h_target to match and fall through to Stone.
+        If(
+            condition: All([BelowWaterSurface(offset: 0), WithinSurfaceBand(16)]),
+            then: Sequence([
+                If(condition: OnFloor, then: Block(Sand)),
+                If(
+                    condition: All([
+                        UnderFloor(3),
+                        SandTransitionRoll(temp_min: -10.0, probability: 0.10),
+                    ]),
+                    then: Block(Stone),
+                ),
+                If(condition: UnderFloor(3), then: Block(Dirt)),
+                Block(Stone),
+            ]),
+        ),
         // 1. Cliff faces → Stone (regardless of depth).
         If(condition: IsCliff,             then: Block(Stone)),
         // 2. Outside the surface band → Stone. The chunk-cycle

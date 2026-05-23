@@ -16,10 +16,12 @@ fn surface_breakthrough_places_grass_on_cave_floor() {
 
     let dim = CHUNK_DIM_U as u32;
 
-    // Scan a 5x5 grid of surface-level chunks (chunk Y=0..2 covers surface).
-    for cx in -2i32..=2 {
-        for cz in -2i32..=2 {
-            for cy in 0i32..=2 {
+    // Scan an 8x8 grid of surface-level chunks across chunk Y 0..=3.
+    // Cave breakthroughs are probabilistic; a wider scan provides more
+    // chance of encountering one without becoming slow.
+    for cx in -4i32..=4 {
+        for cz in -4i32..=4 {
+            for cy in 0i32..=3 {
                 let coord = ChunkCoord(glam::IVec3::new(cx, cy, cz));
                 let mut chunk = DenseChunk::empty();
                 generator.fill_chunk(coord, &mut chunk);
@@ -39,15 +41,17 @@ fn surface_breakthrough_places_grass_on_cave_floor() {
                                 found_ceiling_grass = true;
                             }
 
-                            // Cave-floor grass: grass on top of stone with air
-                            // immediately above; AND air at +2 (so it's not just a
-                            // hillside, but actually a cave breach).
+                            // Cave-floor grass: grass on top of stone with an
+                            // open voxel immediately above; AND open at +2 (so
+                            // it's not just a hillside, but actually a cave
+                            // breach). Planned water can occupy breached floors
+                            // after surface fixing, so water counts as open.
                             if ly + 2 < dim {
                                 let above2 = LocalPos(UVec3::new(lx, ly + 2, lz));
                                 if chunk.get(cur) == Block::Grass
-                                    && chunk.get(above) == Block::Air
+                                    && matches!(chunk.get(above), Block::Air | Block::Water)
                                     && chunk.get(below) == Block::Stone
-                                    && chunk.get(above2) == Block::Air
+                                    && matches!(chunk.get(above2), Block::Air | Block::Water)
                                 {
                                     found_floor_grass = true;
                                 }
@@ -65,6 +69,6 @@ fn surface_breakthrough_places_grass_on_cave_floor() {
     );
     assert!(
         found_floor_grass,
-        "no cave-floor grass found in 5x5x3 chunk scan — possibly no cave breaches in this region (sanity check)"
+        "no cave-floor grass found in 9x9x4 chunk scan — possibly no cave breaches in this region (sanity check)"
     );
 }

@@ -1,429 +1,303 @@
-//! Connected-component flood-fill that settles aquifer-placed fluid.
+//! Static terrain-aware fluid planning for chunk generation.
 //!
-//! The aquifer system places `Water` or `Lava` blocks one voxel at a
-//! time. When a fluid voxel lands inside a carved cave with no solid
-//! beneath it (and no other supporting fluid neighbour), it would
-//! "float in midair" in our static voxel world. In Minecraft water
-//! flows downward; we don't have runtime fluid mechanics yet, so a
-//! one-shot flood-fill at chunk-build time settles the placement:
-//! unsupported fluid bodies are demoted to `Air`.
-//!
-//! The function operates on a per-chunk boolean mask
-//! (`aquifer_mask`) that records which voxels came from the aquifer
-//! path vs the ocean/lake surface flood (which is always supported by
-//! definition and must not be touched). Only masked voxels
-//! participate in flood-fill; non-masked fluid is treated as a
-//! *support source* for adjacent masked fluid (e.g. an aquifer pool
-//! touching the ocean is supported by the ocean body).
-//!
-//! ## Support rules (per-voxel, bottom-up propagation)
-//!
-//! Each masked fluid voxel is **supported** iff the voxel directly
-//! beneath it is one of:
-//!
-//! * A solid block, OR
-//! * A non-masked fluid voxel (the body below us is an external
-//!   supported body — ocean, lake, future runtime-placed source),
-//!   OR
-//! * Another masked fluid voxel that was itself determined to be
-//!   supported (the support chain propagates upward through fluid
-//!   columns), OR
-//! * Off the bottom of the chunk (`y = 0` voxels are
-//!   conservatively supported; the chunk below presumably contains
-//!   the floor).
-//!
-//! Lateral and overhead neighbours do NOT support: rock walls and
-//! ceilings can't hold water up, and laterally-adjacent fluid
-//! bodies don't either — they'd simply level out by flowing.
-//!
-//! Unsupported masked voxels are demoted to `Air`. The bottom-up
-//! traversal means every voxel's support status is known before any
-//! voxel above it is evaluated, so a single pass suffices — no
-//! iteration to convergence needed.
-//!
-//! ## Reuse for future fluid mechanics
-//!
-//! The same flood-fill primitive is intended to back runtime fluid
-//! operations (block-broken events that disturb a body, source
-//! placement that spreads outward, etc.). The signature deliberately
-//! takes a generic "membership mask" + a chunk; a future runtime
-//! wrapper can build the mask differently (e.g. "all water in this
-//! affected region") without modifying the algorithm.
-//!
-//! ## Complexity
-//!
-//! `O(chunk_volume)` — every voxel is visited at most once across
-//! all flood-fills in the chunk. Memory is one `bool` per voxel
-//! (≈ 32 KB for a 32³ chunk) plus a reused per-component stack.
+//! Runtime fluid simulation is deliberately out of scope here. This
+//! planner writes deterministic source bodies after terrain and cave
+//! carving have decided which voxels are solid or empty.
 
 use crate::voxel::block::Block;
 use crate::voxel::chunk::DenseChunk;
-use crate::voxel::coords::{CHUNK_DIM_U, LocalPos};
+use crate::voxel::coords::{CHUNK_DIM_U, ChunkCoord, LocalPos};
+use crate::worldgen::ColumnData;
+use crate::worldgen::region::CavePool;
 use glam::UVec3;
 
-/// Settle aquifer-placed fluid in `chunk`. Walks every masked
-/// `Water`/`Lava` voxel bottom-up and demotes any voxel whose
-/// support chain (recursively, through fluid columns) does not
-/// resolve to a solid block, an external fluid body, or the chunk
-/// floor. Non-masked fluid voxels are never touched.
-///
-/// Panics in debug builds if `aquifer_mask.len() != CHUNK_DIM_U³`.
-pub fn settle_fluid(chunk: &mut DenseChunk, aquifer_mask: &[bool]) {
-    let chunk_volume = (CHUNK_DIM_U as usize).pow(3);
-    debug_assert_eq!(aquifer_mask.len(), chunk_volume);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FluidBodyKind {
+    Ocean,
+    River,
+    Lake,
+    CavePool,
+    LavaPool,
+}
 
-    // Phase 1: bottom-up support propagation. Each masked fluid
-    // voxel's support depends only on the voxel directly below it,
-    // and that voxel was visited in a previous iteration of the
-    // outer Y loop — so a single pass suffices.
-    let mut supported = vec![false; chunk_volume];
-    for y in 0..CHUNK_DIM_U {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FluidReason {
+    OceanConnected,
+    RiverChannel,
+    LakeBasin,
+    CaveBasin,
+    LavaBasin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FluidCell {
+    pub kind: FluidBodyKind,
+    pub block: Block,
+    pub surface_y: i32,
+    pub bed_y: i32,
+    pub reason: FluidReason,
+}
+
+pub struct FluidPlanner {
+    pub(crate) coord: ChunkCoord,
+}
+
+impl FluidPlanner {
+    pub fn new(_seed: u64, coord: ChunkCoord) -> Self {
+        Self { coord }
+    }
+
+    /// Fill surface water bodies for all columns in the chunk.
+    ///
+    /// Uses the unified `ColumnData::water_surface_y` field (plate-driven
+    /// ocean, sink-fill lake, or river) instead of the old chunk-local BFS
+    /// ocean mask. Any column with `water_surface_y == Some(w)` gets Water
+    /// stamped into every Air voxel in `(col.height, w]`.
+    pub fn apply_surface_fluids(&self, chunk: &mut DenseChunk, columns: &[ColumnData]) {
+        debug_assert_eq!(columns.len(), (CHUNK_DIM_U as usize).pow(2));
+
+        let dim = CHUNK_DIM_U as usize;
         for z in 0..CHUNK_DIM_U {
             for x in 0..CHUNK_DIM_U {
-                let idx = chunk_idx(x, y, z);
-                if !aquifer_mask[idx] {
+                let col = columns[z as usize * dim + x as usize];
+                let Some(water_y) = col.water_surface_y else {
                     continue;
-                }
-                if !is_fluid(chunk.get(LocalPos(UVec3::new(x, y, z)))) {
-                    // Defensive: masked voxel that isn't fluid
-                    // (shouldn't normally happen).
-                    continue;
-                }
-
-                if y == 0 {
-                    // Chunk floor: conservatively assume the chunk
-                    // below provides a floor. Avoids cross-chunk
-                    // cascades when a water body straddles the seam.
-                    supported[idx] = true;
-                    continue;
-                }
-
-                let below_idx = chunk_idx(x, y - 1, z);
-                let below = chunk.get(LocalPos(UVec3::new(x, y - 1, z)));
-                supported[idx] = if matches!(below, Block::Air) {
-                    // Air below: no support.
-                    false
-                } else if is_fluid(below) {
-                    if aquifer_mask[below_idx] {
-                        // Masked fluid below: support chains
-                        // upward iff the below voxel is itself
-                        // supported.
-                        supported[below_idx]
-                    } else {
-                        // Non-masked fluid below (ocean, lake,
-                        // future runtime-placed source): always
-                        // counts as a supporting body.
-                        true
-                    }
-                } else {
-                    // Solid block below: classical floor.
-                    true
                 };
+                let cell = FluidCell {
+                    kind: FluidBodyKind::Ocean, // placeholder; kind is informational only
+                    block: Block::Water,
+                    surface_y: water_y,
+                    bed_y: col.height,
+                    reason: FluidReason::OceanConnected,
+                };
+                // Fill start: normally one above the terrain floor, but
+                // clamped to water_y so the range is never empty when
+                // 3D density has pushed terrain above the river surface.
+                // Step 6 (force-flood) will pre-clear the water column
+                // to Air so this becomes equivalent to fill_column_air_range.
+                let fill_from = (col.height + 1).min(water_y);
+                self.fill_column_replace_range(chunk, x, z, cell, fill_from, water_y);
             }
         }
     }
 
-    // Phase 2: demote unsupported masked fluid in place.
-    for y in 0..CHUNK_DIM_U {
+    /// Stamp fluid into every Air voxel inside a cave pool ellipsoid at
+    /// or below the pool's `surface_y`. Writes only to `Block::Air` so
+    /// aquifer-placed lava and terrain solids are never overwritten.
+    ///
+    /// The pool ellipsoid is defined by `(center, radii)` in world space.
+    /// For each voxel `p` inside the chunk, membership is tested as:
+    ///   `((p - center) / radii)² ≤ 1 && wy ≤ pool.surface_y`
+    pub fn apply_cave_pools(&self, chunk: &mut DenseChunk, pools: &[&CavePool]) {
+        if pools.is_empty() {
+            return;
+        }
+        let origin = self.coord.origin().0;
         for z in 0..CHUNK_DIM_U {
-            for x in 0..CHUNK_DIM_U {
-                let idx = chunk_idx(x, y, z);
-                if !aquifer_mask[idx] || supported[idx] {
-                    continue;
-                }
-                let pos = LocalPos(UVec3::new(x, y, z));
-                if is_fluid(chunk.get(pos)) {
-                    chunk.set(pos, Block::Air);
+            for y in 0..CHUNK_DIM_U {
+                for x in 0..CHUNK_DIM_U {
+                    let wy = origin.y + y as i32;
+                    let wx = origin.x + x as i32;
+                    let wz = origin.z + z as i32;
+                    let pos = LocalPos(UVec3::new(x, y, z));
+                    if chunk.get(pos) != Block::Air {
+                        continue;
+                    }
+                    for pool in pools {
+                        if wy > pool.surface_y {
+                            continue;
+                        }
+                        let d = glam::Vec3::new(
+                            (wx as f32 - pool.center.x) / pool.radii.x,
+                            (wy as f32 - pool.center.y) / pool.radii.y,
+                            (wz as f32 - pool.center.z) / pool.radii.z,
+                        );
+                        if d.length_squared() <= 1.0 {
+                            let block = match pool.kind {
+                                FluidBodyKind::LavaPool => Block::Lava,
+                                _ => Block::Water,
+                            };
+                            chunk.set(pos, block);
+                            break;
+                        }
+                    }
                 }
             }
         }
     }
-}
 
-#[inline]
-fn chunk_idx(x: u32, y: u32, z: u32) -> usize {
-    let dim = CHUNK_DIM_U as usize;
-    (x as usize) + dim * (y as usize) + dim * dim * (z as usize)
-}
-
-#[inline]
-fn is_fluid(b: Block) -> bool {
-    matches!(b, Block::Water | Block::Lava)
+    fn fill_column_replace_range(
+        &self,
+        chunk: &mut DenseChunk,
+        x: u32,
+        z: u32,
+        cell: FluidCell,
+        bed_y: i32,
+        surface_y: i32,
+    ) {
+        let origin_y = self.coord.origin().0.y;
+        for y in 0..CHUNK_DIM_U {
+            let wy = origin_y + y as i32;
+            if wy < bed_y || wy > surface_y {
+                continue;
+            }
+            let pos = LocalPos(UVec3::new(x, y, z));
+            if !matches!(chunk.get(pos), Block::Lava) {
+                chunk.set(pos, cell.block);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::worldgen::region::CavePool;
+    use glam::{IVec3, Vec3};
 
-    fn make_chunk() -> DenseChunk {
-        DenseChunk::empty()
-    }
-
-    fn set_mask(mask: &mut [bool], x: u32, y: u32, z: u32) {
-        mask[chunk_idx(x, y, z)] = true;
-    }
-
-    fn make_mask() -> Vec<bool> {
-        vec![false; (CHUNK_DIM_U as usize).pow(3)]
-    }
-
-    /// Lone water voxel suspended in air (no neighbours, no boundary).
-    /// Should be demoted.
-    #[test]
-    fn isolated_floating_voxel_is_demoted() {
-        let mut chunk = make_chunk();
-        let mut mask = make_mask();
-        let (x, y, z) = (15, 15, 15); // middle of chunk
-        chunk.set(LocalPos(UVec3::new(x, y, z)), Block::Water);
-        set_mask(&mut mask, x, y, z);
-
-        settle_fluid(&mut chunk, &mask);
-
-        assert_eq!(chunk.get(LocalPos(UVec3::new(x, y, z))), Block::Air);
-    }
-
-    /// Water voxel with solid block below — supported, kept.
-    #[test]
-    fn voxel_with_solid_below_is_kept() {
-        let mut chunk = make_chunk();
-        let mut mask = make_mask();
-        let (x, y, z) = (15, 15, 15);
-        chunk.set(LocalPos(UVec3::new(x, y, z)), Block::Water);
-        chunk.set(LocalPos(UVec3::new(x, y - 1, z)), Block::Stone);
-        set_mask(&mut mask, x, y, z);
-
-        settle_fluid(&mut chunk, &mask);
-
-        assert_eq!(chunk.get(LocalPos(UVec3::new(x, y, z))), Block::Water);
-    }
-
-    /// Horizontal slab of water — three voxels side by side in air,
-    /// no support anywhere. Entire component demoted as a group.
-    #[test]
-    fn floating_horizontal_slab_demoted_as_a_unit() {
-        let mut chunk = make_chunk();
-        let mut mask = make_mask();
-        let y = 15;
-        let z = 15;
-        for x in 14..=16 {
-            chunk.set(LocalPos(UVec3::new(x, y, z)), Block::Water);
-            set_mask(&mut mask, x, y, z);
+    /// Build a chunk of solid Stone with a spherical air cavity carved out.
+    fn stone_chunk_with_cavity(center_local: (u32, u32, u32), radius: u32) -> DenseChunk {
+        let mut chunk = DenseChunk::empty();
+        for x in 0..CHUNK_DIM_U {
+            for y in 0..CHUNK_DIM_U {
+                for z in 0..CHUNK_DIM_U {
+                    chunk.set(LocalPos(UVec3::new(x, y, z)), Block::Stone);
+                }
+            }
         }
-
-        settle_fluid(&mut chunk, &mask);
-
-        for x in 14..=16 {
-            assert_eq!(
-                chunk.get(LocalPos(UVec3::new(x, y, z))),
-                Block::Air,
-                "slab voxel x={x} should be demoted"
-            );
+        let (cx, cy, cz) = center_local;
+        let r2 = (radius * radius) as i64;
+        for x in 0..CHUNK_DIM_U {
+            for y in 0..CHUNK_DIM_U {
+                for z in 0..CHUNK_DIM_U {
+                    let dx = x as i64 - cx as i64;
+                    let dy = y as i64 - cy as i64;
+                    let dz = z as i64 - cz as i64;
+                    if dx * dx + dy * dy + dz * dz <= r2 {
+                        chunk.set(LocalPos(UVec3::new(x, y, z)), Block::Air);
+                    }
+                }
+            }
         }
+        chunk
     }
 
-    /// Slab of three voxels with a single solid only beneath the
-    /// rightmost. Per-voxel support means only the voxel directly
-    /// above the solid is kept; the two hangers drain. This is the
-    /// regression test for the "cave ceiling water" bug — previously
-    /// one rooted voxel kept the whole component.
     #[test]
-    fn slab_with_one_support_keeps_only_the_supported_voxel() {
-        let mut chunk = make_chunk();
-        let mut mask = make_mask();
-        let y = 15;
-        let z = 15;
-        for x in 14..=16 {
-            chunk.set(LocalPos(UVec3::new(x, y, z)), Block::Water);
-            set_mask(&mut mask, x, y, z);
+    fn cave_pool_fills_air_inside_ellipsoid_up_to_surface_y() {
+        // Chunk at world Y -64..-33 (chunk Y = -2).
+        let coord = ChunkCoord(IVec3::new(0, -2, 0));
+        let planner = FluidPlanner::new(42, coord);
+        let origin_y = coord.origin().0.y; // -64
+
+        // Chamber centered at local (16, 16, 16) → world (16, -48, 16).
+        let center_local = (16u32, 16u32, 16u32);
+        let radius = 8u32;
+        let mut chunk = stone_chunk_with_cavity(center_local, radius);
+
+        let world_center = Vec3::new(
+            coord.origin().0.x as f32 + center_local.0 as f32,
+            origin_y as f32 + center_local.1 as f32,
+            coord.origin().0.z as f32 + center_local.2 as f32,
+        );
+        let radii = Vec3::splat(radius as f32);
+        // Pool surface sits 30% up from the floor of the cavity.
+        let floor_y = (world_center.y - radii.y).floor() as i32;
+        let height = (radii.y * 2.0) as i32;
+        let surface_y = floor_y + (height as f32 * 0.30) as i32;
+
+        let pool = CavePool {
+            center: world_center,
+            radii,
+            surface_y,
+            bed_y: floor_y,
+            kind: FluidBodyKind::CavePool,
+        };
+
+        planner.apply_cave_pools(&mut chunk, &[&pool]);
+
+        // Every Air voxel inside the sphere at or below surface_y should be Water.
+        let mut water_count = 0u32;
+        let mut above_surface_water = 0u32;
+        for x in 0..CHUNK_DIM_U {
+            for y in 0..CHUNK_DIM_U {
+                for z in 0..CHUNK_DIM_U {
+                    let wy = origin_y + y as i32;
+                    let block = chunk.get(LocalPos(UVec3::new(x, y, z)));
+                    if block == Block::Water {
+                        water_count += 1;
+                        if wy > surface_y {
+                            above_surface_water += 1;
+                        }
+                    }
+                }
+            }
         }
-        chunk.set(LocalPos(UVec3::new(16, y - 1, z)), Block::Stone);
-
-        settle_fluid(&mut chunk, &mask);
-
-        assert_eq!(chunk.get(LocalPos(UVec3::new(14, y, z))), Block::Air);
-        assert_eq!(chunk.get(LocalPos(UVec3::new(15, y, z))), Block::Air);
-        assert_eq!(chunk.get(LocalPos(UVec3::new(16, y, z))), Block::Water);
+        assert!(water_count > 0, "no water placed in cave pool");
+        assert_eq!(above_surface_water, 0, "water placed above surface_y");
     }
 
-    /// Aquifer voxel adjacent (horizontally) to a non-masked Water
-    /// voxel but with Air below — the lateral connection does NOT
-    /// support. Physically: the aquifer water would drain into
-    /// the ocean / down through the air pocket, not hover.
     #[test]
-    fn lateral_ocean_does_not_support_aquifer_voxel() {
-        let mut chunk = make_chunk();
-        let mut mask = make_mask();
-        let (x, y, z) = (15, 15, 15);
-        chunk.set(LocalPos(UVec3::new(x, y, z)), Block::Water);
-        set_mask(&mut mask, x, y, z); // aquifer
-
-        chunk.set(LocalPos(UVec3::new(x + 1, y, z)), Block::Water);
-        // NOT masked — represents ocean / lake fluid, but only
-        // lateral; voxel below (15, 14, 15) is Air.
-
-        settle_fluid(&mut chunk, &mask);
-
-        assert_eq!(chunk.get(LocalPos(UVec3::new(x, y, z))), Block::Air);
-    }
-
-    /// Aquifer voxel directly above a non-masked Water voxel — the
-    /// below-fluid IS a supported body, so the aquifer voxel is
-    /// kept (it physically rests on the ocean's column).
-    #[test]
-    fn aquifer_voxel_above_ocean_is_kept() {
-        let mut chunk = make_chunk();
-        let mut mask = make_mask();
-        let (x, y, z) = (15, 15, 15);
-        chunk.set(LocalPos(UVec3::new(x, y, z)), Block::Water);
-        set_mask(&mut mask, x, y, z); // aquifer
-
-        chunk.set(LocalPos(UVec3::new(x, y - 1, z)), Block::Water);
-        // Below is non-masked ocean water → supports
-
-        settle_fluid(&mut chunk, &mask);
-
-        assert_eq!(chunk.get(LocalPos(UVec3::new(x, y, z))), Block::Water);
-    }
-
-    /// Voxel on chunk floor (`y = 0`) — supported via the below
-    /// boundary (we assume the chunk below provides a floor).
-    #[test]
-    fn floor_boundary_voxel_is_kept() {
-        let mut chunk = make_chunk();
-        let mut mask = make_mask();
-        let (x, y, z) = (15, 0, 15);
-        chunk.set(LocalPos(UVec3::new(x, y, z)), Block::Water);
-        set_mask(&mut mask, x, y, z);
-
-        settle_fluid(&mut chunk, &mask);
-
-        assert_eq!(chunk.get(LocalPos(UVec3::new(x, y, z))), Block::Water);
-    }
-
-    /// Voxel against a lateral chunk wall — NOT supported. Lateral
-    /// boundaries don't confer support; only the below boundary does.
-    #[test]
-    fn lateral_boundary_voxel_is_demoted() {
-        let mut chunk = make_chunk();
-        let mut mask = make_mask();
-        let (x, y, z) = (0, 15, 15); // left wall, mid-Y
-        chunk.set(LocalPos(UVec3::new(x, y, z)), Block::Water);
-        set_mask(&mut mask, x, y, z);
-
-        settle_fluid(&mut chunk, &mask);
-
-        assert_eq!(chunk.get(LocalPos(UVec3::new(x, y, z))), Block::Air);
-    }
-
-    /// Water hanging from a rock ceiling — the rock above must NOT
-    /// count as support. This is the regression: previously any
-    /// non-Air neighbour was supporting, so cave-ceiling water
-    /// bodies stayed put.
-    #[test]
-    fn water_with_only_rock_above_is_demoted() {
-        let mut chunk = make_chunk();
-        let mut mask = make_mask();
-        let (x, y, z) = (15, 15, 15);
-        chunk.set(LocalPos(UVec3::new(x, y, z)), Block::Water);
-        chunk.set(LocalPos(UVec3::new(x, y + 1, z)), Block::Stone); // ceiling
-        set_mask(&mut mask, x, y, z);
-
-        settle_fluid(&mut chunk, &mask);
-
-        assert_eq!(chunk.get(LocalPos(UVec3::new(x, y, z))), Block::Air);
-    }
-
-    /// Water with stone walls on either side but air below and no
-    /// floor anywhere — the side walls must NOT confer support.
-    #[test]
-    fn water_with_only_lateral_rock_is_demoted() {
-        let mut chunk = make_chunk();
-        let mut mask = make_mask();
-        let (x, y, z) = (15, 15, 15);
-        chunk.set(LocalPos(UVec3::new(x, y, z)), Block::Water);
-        chunk.set(LocalPos(UVec3::new(x - 1, y, z)), Block::Stone);
-        chunk.set(LocalPos(UVec3::new(x + 1, y, z)), Block::Stone);
-        set_mask(&mut mask, x, y, z);
-
-        settle_fluid(&mut chunk, &mask);
-
-        assert_eq!(chunk.get(LocalPos(UVec3::new(x, y, z))), Block::Air);
-    }
-
-    /// Non-masked floating water (e.g. ocean voxel above carved
-    /// seabed) must NOT be touched by the settle pass.
-    #[test]
-    fn non_masked_floating_water_is_preserved() {
-        let mut chunk = make_chunk();
-        let mask = make_mask(); // empty mask
-
-        let (x, y, z) = (15, 15, 15);
-        chunk.set(LocalPos(UVec3::new(x, y, z)), Block::Water);
-        // mask[idx] = false — not aquifer water
-
-        settle_fluid(&mut chunk, &mask);
-
-        assert_eq!(chunk.get(LocalPos(UVec3::new(x, y, z))), Block::Water);
-    }
-
-    /// Vertical column of 4 voxels with stone at the bottom —
-    /// supported via the stone, whole column kept.
-    #[test]
-    fn vertical_column_with_floor_kept() {
-        let mut chunk = make_chunk();
-        let mut mask = make_mask();
-        let (x, z) = (15, 15);
-        chunk.set(LocalPos(UVec3::new(x, 10, z)), Block::Stone);
-        for y in 11..=14 {
-            chunk.set(LocalPos(UVec3::new(x, y, z)), Block::Water);
-            set_mask(&mut mask, x, y, z);
+    fn cave_pool_does_not_overwrite_solid_blocks() {
+        let coord = ChunkCoord(IVec3::new(0, -2, 0));
+        let planner = FluidPlanner::new(42, coord);
+        // All-stone chunk — pool should write nothing.
+        let mut chunk = DenseChunk::empty();
+        for x in 0..CHUNK_DIM_U {
+            for y in 0..CHUNK_DIM_U {
+                for z in 0..CHUNK_DIM_U {
+                    chunk.set(LocalPos(UVec3::new(x, y, z)), Block::Stone);
+                }
+            }
         }
-
-        settle_fluid(&mut chunk, &mask);
-
-        for y in 11..=14 {
-            assert_eq!(
-                chunk.get(LocalPos(UVec3::new(x, y, z))),
-                Block::Water,
-                "column voxel y={y} kept"
-            );
+        let pool = CavePool {
+            center: Vec3::new(16.0, -48.0, 16.0),
+            radii: Vec3::splat(8.0),
+            surface_y: -46,
+            bed_y: -56,
+            kind: FluidBodyKind::CavePool,
+        };
+        planner.apply_cave_pools(&mut chunk, &[&pool]);
+        for x in 0..CHUNK_DIM_U {
+            for y in 0..CHUNK_DIM_U {
+                for z in 0..CHUNK_DIM_U {
+                    assert_eq!(
+                        chunk.get(LocalPos(UVec3::new(x, y, z))),
+                        Block::Stone,
+                        "solid block overwritten at ({x},{y},{z})"
+                    );
+                }
+            }
         }
     }
 
-    /// Vertical column of 4 voxels with NO floor — air everywhere
-    /// around. Entire column demoted.
     #[test]
-    fn vertical_column_no_floor_demoted() {
-        let mut chunk = make_chunk();
-        let mut mask = make_mask();
-        let (x, z) = (15, 15);
-        for y in 11..=14 {
-            chunk.set(LocalPos(UVec3::new(x, y, z)), Block::Water);
-            set_mask(&mut mask, x, y, z);
-        }
+    fn lava_pool_kind_places_lava_block() {
+        let coord = ChunkCoord(IVec3::new(0, -4, 0)); // deep chunk: Y -128..-97
+        let planner = FluidPlanner::new(42, coord);
+        let origin_y = coord.origin().0.y;
 
-        settle_fluid(&mut chunk, &mask);
+        let mut chunk = stone_chunk_with_cavity((16, 16, 16), 8);
+        let world_center_y = origin_y as f32 + 16.0;
+        let pool = CavePool {
+            center: Vec3::new(16.0, world_center_y, 16.0),
+            radii: Vec3::splat(8.0),
+            surface_y: world_center_y as i32 - 2,
+            bed_y: world_center_y as i32 - 8,
+            kind: FluidBodyKind::LavaPool,
+        };
+        planner.apply_cave_pools(&mut chunk, &[&pool]);
 
-        for y in 11..=14 {
-            assert_eq!(
-                chunk.get(LocalPos(UVec3::new(x, y, z))),
-                Block::Air,
-                "column voxel y={y} demoted"
-            );
+        let mut lava_count = 0u32;
+        for x in 0..CHUNK_DIM_U {
+            for y in 0..CHUNK_DIM_U {
+                for z in 0..CHUNK_DIM_U {
+                    if chunk.get(LocalPos(UVec3::new(x, y, z))) == Block::Lava {
+                        lava_count += 1;
+                    }
+                }
+            }
         }
+        assert!(lava_count > 0, "no lava placed for LavaPool kind");
     }
 
-    /// Lava behaves identically to water — same flood-fill.
-    #[test]
-    fn lava_floating_is_demoted() {
-        let mut chunk = make_chunk();
-        let mut mask = make_mask();
-        let (x, y, z) = (15, 15, 15);
-        chunk.set(LocalPos(UVec3::new(x, y, z)), Block::Lava);
-        set_mask(&mut mask, x, y, z);
-
-        settle_fluid(&mut chunk, &mask);
-
-        assert_eq!(chunk.get(LocalPos(UVec3::new(x, y, z))), Block::Air);
-    }
 }

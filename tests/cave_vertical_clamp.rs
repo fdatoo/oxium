@@ -6,9 +6,10 @@ use oxium::voxel::block::Block;
 use oxium::voxel::chunk::DenseChunk;
 use oxium::voxel::coords::{CHUNK_DIM_U, ChunkCoord, LocalPos};
 use oxium::worldgen::Generator;
+use oxium::worldgen::tuning::MAX_VERTICAL_AIR_RUN;
 
 #[test]
-fn chunk_has_no_vertical_air_run_over_six() {
+fn chunk_respects_configured_vertical_air_run_clamp() {
     // Generate a chunk known to have caves at depth.
     let generator = Generator::new(42);
     let coord = ChunkCoord(glam::IVec3::new(0, -2, 0)); // Y=-64..-32, underground
@@ -32,7 +33,7 @@ fn chunk_has_no_vertical_air_run_over_six() {
                 }
             }
             assert!(
-                longest <= 6,
+                longest <= MAX_VERTICAL_AIR_RUN,
                 "column ({x},{z}) at chunk {coord:?} has air run of {longest}"
             );
         }

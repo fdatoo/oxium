@@ -20,6 +20,9 @@ pub fn range(stage: Stage) -> Option<(f32, f32)> {
         Stage::ValleyCarve => Some((0.0, 16.0)),
         Stage::HTarget => Some((40.0, 160.0)),
         Stage::FlowAccum => Some((0.0, 4096.0)),
+        Stage::RiverWaterSurface | Stage::RiverBed | Stage::LakeRim | Stage::WaterSurfaceY => {
+            Some((40.0, 100.0))
+        }
         Stage::AquiferY => Some((-64.0, 96.0)),
         Stage::PlateId | Stage::BiomeId | Stage::AquiferSubstance => None,
     }
@@ -36,6 +39,9 @@ pub fn pixel(stage: Stage, raw: f32) -> [u8; 4] {
             }
             Stage::HPre | Stage::HTarget => colormap::terrain_ramp(t),
             Stage::ValleyCarve => colormap::hot(t),
+            Stage::RiverWaterSurface | Stage::RiverBed | Stage::LakeRim | Stage::WaterSurfaceY => {
+                colormap::viridis(t)
+            }
             Stage::FlowAccum => {
                 // log-scale flow accumulation before colormap
                 let t_log = (raw.max(1.0).ln() / 4096_f32.ln()).clamp(0.0, 1.0);
@@ -44,7 +50,9 @@ pub fn pixel(stage: Stage, raw: f32) -> [u8; 4] {
             Stage::AquiferY => colormap::divergent(t),
             // Categorical stages are handled by the outer else branch;
             // these arms are unreachable here but required for exhaustiveness.
-            Stage::PlateId | Stage::BiomeId | Stage::AquiferSubstance => [0, 0, 0, 255],
+            Stage::PlateId | Stage::BiomeId | Stage::AquiferSubstance => {
+                [0, 0, 0, 255]
+            }
         }
     } else {
         match stage {
@@ -52,6 +60,9 @@ pub fn pixel(stage: Stage, raw: f32) -> [u8; 4] {
             Stage::AquiferSubstance => {
                 colormap::binary(raw, [38, 99, 200, 255], [220, 110, 30, 255])
             }
+            // WaterSurfaceY is now scalar; handled by the `if let Some` branch above.
+            // This arm is unreachable but required for exhaustiveness.
+            Stage::WaterSurfaceY => [0, 0, 0, 255],
             // Scalar stages are handled by the outer if branch;
             // these arms are unreachable here but required for exhaustiveness.
             _ => [0, 0, 0, 255],

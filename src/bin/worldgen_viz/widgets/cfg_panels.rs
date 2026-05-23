@@ -503,6 +503,13 @@ pub fn surface_panel(ui: &mut Ui, cfg: &mut WorldgenConfig) -> bool {
                 }
                 ui.monospace("]");
             }
+            ConditionSource::BelowWaterSurface { offset } => {
+                ui.monospace("below water −");
+                *id_counter += 1;
+                changed |= ui
+                    .add(egui::DragValue::new(offset).speed(1.0).range(0..=32))
+                    .changed();
+            }
         }
         changed
     }

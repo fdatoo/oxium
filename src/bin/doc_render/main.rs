@@ -22,7 +22,8 @@ Usage:
 Stages (snapshot):
   continentalness, plate-id, temperature, humidity, desertness,
   weirdness, h-pre, valley-carve, h-target, flow-accum, biome-id,
-  aquifer-y, aquifer-substance
+  river-water, river-bed, lake-rim, ocean-mask, aquifer-y,
+  aquifer-substance
 "
     );
 }

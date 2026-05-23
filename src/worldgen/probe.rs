@@ -47,7 +47,11 @@ pub struct ColumnProbe {
     pub biome: Biome,
     // Hydrology
     pub flow_accum: u32,
-    pub lake_rim: Option<i32>,
+    pub river_water_y: Option<i32>,
+    pub river_bed_y: Option<i32>,
+    /// Unified water surface Y from the new plate-driven model.
+    /// `Some(y)` = column is submerged; topmost Water at world Y == y.
+    pub water_surface_y: Option<i32>,
     // Aquifer
     pub aquifer_y_top: i32,
     /// The fluid the aquifer cell holds (always `Block::Water` or
@@ -82,6 +86,8 @@ pub struct DensityBreakdown {
     /// The block this voxel would resolve to. Computed by re-running
     /// the same selection logic `fill_chunk` uses.
     pub block: Block,
+    /// Fluid planner explanation for generated Water/Lava at this voxel.
+    pub fluid_reason: Option<crate::worldgen::fluid::FluidReason>,
     /// Name of the cave style if the probe point is inside a graph cave
     /// chamber or tunnel, else `None`.
     pub cave_style: Option<&'static str>,
@@ -103,6 +109,10 @@ pub enum Stage {
     ValleyCarve,
     HTarget,
     FlowAccum,
+    RiverWaterSurface,
+    RiverBed,
+    LakeRim,
+    WaterSurfaceY,
     BiomeId,
     AquiferY,
     AquiferSubstance,
@@ -120,6 +130,10 @@ impl Stage {
         Stage::ValleyCarve,
         Stage::HTarget,
         Stage::FlowAccum,
+        Stage::RiverWaterSurface,
+        Stage::RiverBed,
+        Stage::LakeRim,
+        Stage::WaterSurfaceY,
         Stage::BiomeId,
         Stage::AquiferY,
         Stage::AquiferSubstance,
@@ -137,6 +151,10 @@ impl Stage {
             Stage::ValleyCarve => "Valley carve",
             Stage::HTarget => "h_target",
             Stage::FlowAccum => "Flow accumulation",
+            Stage::RiverWaterSurface => "River water",
+            Stage::RiverBed => "River bed",
+            Stage::LakeRim => "Lake rim",
+            Stage::WaterSurfaceY => "Water surface Y",
             Stage::BiomeId => "Biome",
             Stage::AquiferY => "Aquifer Y",
             Stage::AquiferSubstance => "Aquifer substance",
@@ -186,14 +204,26 @@ impl Stage {
             Stage::FlowAccum => {
                 "Hydrology flow accumulation (log-scaled). High values are trunk rivers; low values are headwaters."
             }
+            Stage::RiverWaterSurface => {
+                "Resolved generated river water-surface Y. Dry rapids and non-river cells are zero."
+            }
+            Stage::RiverBed => {
+                "Resolved generated river bed Y below the water surface. Non-river cells are zero."
+            }
+            Stage::LakeRim => {
+                "Filtered sink-fill lake rim Y. Tiny one-cell wet scratches are zero."
+            }
+            Stage::WaterSurfaceY => {
+                "Unified water surface Y (plate-driven). Ocean/lake/river columns show their water level; dry land shows zero."
+            }
             Stage::BiomeId => {
                 "Discrete biome label (categorical): Tundra, SnowyForest, Plains, Forest, Desert, Tropical."
             }
             Stage::AquiferY => {
-                "Per-cell aquifer water-table Y. Cells below this Y get fluid; cells above stay dry."
+                "Legacy aquifer water-table Y retained for comparison; not used by default fluid generation."
             }
             Stage::AquiferSubstance => {
-                "Aquifer cell fluid: blue = Water, orange = Lava. Cells are 16×16×16 blocks."
+                "Legacy aquifer cell fluid: blue = Water, orange = Lava. Not used by default fluid generation."
             }
         }
     }

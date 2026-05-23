@@ -27,7 +27,8 @@ pub struct SurfaceContext<'a> {
     pub is_cliff: bool,
     pub desertness: f32,
     pub depth_below_surface: i32,
-    pub lake_rim: Option<i32>,
+    /// Unified water surface Y for this column (see `ColumnData::water_surface_y`).
+    pub water_surface_y: Option<i32>,
     pub seed: u64,
     pub cfg: &'a WorldgenConfig,
     pub sea_level: i32,
@@ -51,6 +52,11 @@ pub enum ConditionSource {
     Any(Vec<ConditionSource>),
     BeachBand { below_sea: i32, above_sea: i32 },
     SandTransitionRoll { temp_min: f32, probability: f32 },
+    /// True when `ctx.water_surface_y` is set and `ctx.wy ≤ water_surface_y
+    /// - offset`. Use `offset: 0` to match any submerged voxel, or a
+    /// positive offset to match voxels that are at least `offset` blocks
+    /// below the water surface (useful for transition layers).
+    BelowWaterSurface { offset: i32 },
 }
 
 impl ConditionSource {
@@ -83,6 +89,9 @@ impl ConditionSource {
                 let roll = hash::mix_unit(ctx.seed, &[ctx.wx, ctx.wz, 71]);
                 roll < *probability
             }
+            ConditionSource::BelowWaterSurface { offset } => ctx
+                .water_surface_y
+                .map_or(false, |w| ctx.wy <= w - offset),
         }
     }
 }
@@ -170,7 +179,7 @@ mod tests {
             is_cliff,
             desertness: 0.0,
             depth_below_surface: depth,
-            lake_rim: None,
+            water_surface_y: None,
             seed: 42,
             cfg,
             sea_level: 62,

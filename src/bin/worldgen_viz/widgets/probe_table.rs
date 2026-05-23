@@ -36,15 +36,29 @@ pub fn show(
         kv(ui, "flow_accum", snapshot.flow_accum.to_string());
         kv(
             ui,
-            "lake_rim",
-            match snapshot.lake_rim {
+            "river_water_y",
+            snapshot
+                .river_water_y
+                .map_or_else(|| "—".to_string(), |y| y.to_string()),
+        );
+        kv(
+            ui,
+            "river_bed_y",
+            snapshot
+                .river_bed_y
+                .map_or_else(|| "—".to_string(), |y| y.to_string()),
+        );
+        kv(
+            ui,
+            "water_surf_y",
+            match snapshot.water_surface_y {
                 Some(y) => y.to_string(),
                 None => "—".to_string(),
             },
         );
     });
 
-    ui.collapsing("Aquifer", |ui| {
+    ui.collapsing("Legacy aquifer", |ui| {
         kv(ui, "y_top", snapshot.aquifer_y_top.to_string());
         kv(
             ui,
@@ -77,6 +91,7 @@ pub fn show(
             kv(ui, "pillar", fmt(b.pillar));
             kv(ui, "final_density", fmt(b.final_density));
             kv(ui, "block", format!("{:?}", b.block));
+            kv(ui, "fluid_reason", format!("{:?}", b.fluid_reason));
         });
     }
 }

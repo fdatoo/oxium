@@ -16,6 +16,7 @@
 //! the heightmap samples, PR 3 the river network, PR 4 the cave
 //! systems.
 
+use crate::worldgen::fluid::FluidBodyKind;
 use crate::worldgen::tuning::*;
 use lru::LruCache;
 use std::collections::HashMap;
@@ -100,6 +101,10 @@ pub struct FineRegion {
     /// Lake rim elevation per fine cell (only meaningful where
     /// `is_lake` is true). Populated by PR 3.
     pub lake_rim: Box<[i16]>,
+    /// How many blocks the lake bed has been carved below the natural
+    /// terrain height. Guaranteed ≥ `MIN_LAKE_BED_DROP` where
+    /// `is_lake` is true; zero elsewhere. Populated by PR 3.
+    pub lake_bed_depth: Box<[i16]>,
     /// River segments derived from the fine flow field. Populated by
     /// PR 3.
     pub segments: Vec<RiverSegment>,
@@ -107,6 +112,9 @@ pub struct FineRegion {
     /// bounding boxes can spill into neighbours; chunk fill consults
     /// the 3×3 region neighborhood. Populated by PR 4.
     pub cave_systems: Vec<CaveSystem>,
+    /// Cave pools derived from qualifying chambers in this region.
+    /// Populated alongside `cave_systems` in PR 5.
+    pub cave_pools: Vec<CavePool>,
 }
 
 impl FineRegion {
@@ -125,8 +133,10 @@ impl FineRegion {
             is_lake: vec![0u8; bitset_bytes].into_boxed_slice(),
             width: vec![0.0f32; n].into_boxed_slice(),
             lake_rim: vec![0i16; n].into_boxed_slice(),
+            lake_bed_depth: vec![0i16; n].into_boxed_slice(),
             segments: Vec::new(),
             cave_systems: Vec::new(),
+            cave_pools: Vec::new(),
         }
     }
 
@@ -186,8 +196,38 @@ pub struct RiverSegment {
     pub from: (i32, i32),
     pub to: (i32, i32),
     pub width: f32,
+    /// Voxel Y of the static generated river surface.
+    pub water_y: i32,
+    /// Voxel Y of the carved bed below the water surface.
+    pub bed_y: i32,
+    /// Surface-water classification for this segment.
+    pub kind: RiverSegmentKind,
     /// True for an ocean-mouth segment (flared by `MOUTH_FLARE_MULT`).
     pub mouth: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RiverSegmentKind {
+    Channel,
+    Rapid,
+    Waterfall,
+}
+
+/// A water or lava pool inside a cave chamber. Derived from a `Chamber`
+/// ellipsoid during region build; read by the fluid planner at chunk fill
+/// time via `cave_pools_intersecting`. Stored per-region in the `FineCache`.
+#[derive(Debug, Clone)]
+pub struct CavePool {
+    /// World-space center of the originating ellipsoid chamber.
+    pub center: glam::Vec3,
+    /// Semi-axis lengths (x, y, z) of the chamber.
+    pub radii: glam::Vec3,
+    /// Y of the static fluid surface (air above, fluid below).
+    pub surface_y: i32,
+    /// Y of the lowest solid voxel below the fluid column.
+    pub bed_y: i32,
+    /// Water or lava.
+    pub kind: FluidBodyKind,
 }
 
 /// Pre-built cave system. Stored in the region cache; carving happens

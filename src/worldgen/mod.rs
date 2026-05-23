@@ -95,8 +95,8 @@ pub use crate::worldgen::tuning::SEA_LEVEL;
 // below are imported into this module's scope for ergonomics.
 use crate::worldgen::tuning::{
     CAVE_BAND_MIDDLE, CAVE_BAND_SHALLOW, CAVE_FLOOR_Y, CAVE_SDF_INTENSITY, CAVE_SURFACE_BUFFER,
-    MAX_VERTICAL_AIR_RUN, SNOW_LINE, SURFACE_BAND, SURFACE_SPREAD, TREE_CELL_SIZE, TREE_MARGIN,
-    TREE_RATE_FOREST, TREE_RATE_PLAINS,
+    MAX_VERTICAL_AIR_RUN, MOUTH_FLARE_MULT, SNOW_LINE, SURFACE_BAND, SURFACE_SPREAD,
+    TREE_CELL_SIZE, TREE_MARGIN, TREE_RATE_FOREST, TREE_RATE_PLAINS,
 };
 
 /// Pre-built noise fields for one world seed.
@@ -136,9 +136,9 @@ pub struct Generator {
     // file watcher take effect on the next regen. There used to be a
     // cached `surface_system` field here, but it baked the rules at
     // construction and silently ignored every config swap.
-    /// PR 7: MC-style aquifer. 16×12×16 jittered cell grid with
-    /// per-cell `y_top` + fluid kind (Water/Lava). Floods caves
-    /// and replaces the primitive ocean/lake-rim filler.
+    /// Legacy aquifer sampler retained for visualizer compatibility.
+    /// Chunk fill now uses `fluid::FluidPlanner` instead of per-voxel
+    /// aquifer pressure placement.
     aquifer: aquifer::AquiferSystem,
     /// PR 8: cheese / pillar noise channels. Built once per Generator
     /// from `WorldgenConfig::cave`. Read per-voxel in `fill_chunk`
@@ -238,10 +238,8 @@ impl Generator {
         // Build the biome R-tree once from the bundled entries.
         let biome_list =
             std::sync::Arc::new(climate::ParameterList::new(bundled.biomes.entries.clone()));
-        // PR 7: aquifer system built from the bundled aquifer
-        // config. Hot-reloading the aquifer config (cell sizes,
-        // probabilities) requires a Generator restart; only the
-        // pressure tunables in `AquiferConfig` re-read live.
+        // Legacy aquifer diagnostics. Fluid generation itself is handled
+        // by `fluid::FluidPlanner` after terrain and caves are resolved.
         let aquifer = aquifer::AquiferSystem::new(seed, bundled.aquifer.clone());
         // PR 8: noise carvers (cheese / pillar Fbm channels) built
         // from the bundled cave config. Channel topology is fixed in
@@ -457,14 +455,32 @@ impl Generator {
         // temperature × low humidity == high desertness.
         let desertness = (temperature * 0.5) - humidity * 0.5;
 
-        let lake_rim = regions.lake_rim_at(wx, wz);
+        // Plate-driven ocean predicate. Uses continentalness `c` from
+        // the climate call above (biome-jitter offset is a few blocks —
+        // negligible at the 1024-block plate scale). Any oceanic-plate
+        // column whose terrain is at or below sea level is classified as
+        // ocean; inland sub-sea depressions on continental plates are
+        // classified as lake or dry pit, never ocean.
+        let is_ocean = c < 0.0 && height <= SEA_LEVEL;
+        // Unified water surface Y. Lake rim is filtered to ≥ height+1
+        // so shore columns that sit exactly one block below the lake surface
+        // are correctly submerged (≥ height+2 left a 1-voxel exposed water
+        // face at the waterline). Step 5 guarantees all interior lake columns
+        // have height ≤ rim−3 (MIN_LAKE_BED_DROP), so they still pass; the
+        // looser threshold only newly admits the one-block rim zone.
+        // River priority is patched in by `fill_chunk` after the river_grid
+        // is built.
+        let water_surface_y = regions
+            .lake_rim_at(wx, wz)
+            .filter(|&rim| rim > height)
+            .or_else(|| is_ocean.then_some(SEA_LEVEL));
         ColumnData {
             height,
             h_pre,
             is_cliff,
             desertness,
             biome,
-            lake_rim,
+            water_surface_y,
         }
     }
 
@@ -527,6 +543,7 @@ impl Generator {
             let idx = region::FineRegion::cell_index(ix, iz);
             fine_region.flow_acc[idx]
         };
+        let river_cell = regions.river_cell_at(wx, wz, self.seed);
 
         // Aquifer: the nearest cell at sea-level for this column. The
         // cell's `fluid` is always `Block::Water` or `Block::Lava` —
@@ -556,6 +573,12 @@ impl Generator {
             n
         };
 
+        // Derive unified water_surface_y for the probe, applying the same
+        // river-wins-over-lake/ocean priority as fill_chunk.
+        let probe_water_surface_y = river_cell
+            .filter(|r| r.surface_y > col.height)
+            .map(|r| r.surface_y)
+            .or(col.water_surface_y);
         probe::ColumnProbe {
             wx,
             wz,
@@ -572,7 +595,9 @@ impl Generator {
             weirdness,
             biome: col.biome,
             flow_accum,
-            lake_rim: col.lake_rim,
+            river_water_y: river_cell.map(|cell| cell.surface_y),
+            river_bed_y: river_cell.map(|cell| cell.bed_y),
+            water_surface_y: probe_water_surface_y,
             aquifer_y_top: acell.y_top,
             aquifer_fluid: acell.fluid,
             cave_systems_count,
@@ -671,6 +696,38 @@ impl Generator {
                 let idx = region::FineRegion::cell_index(ix, iz);
                 fine_region.flow_acc[idx] as f32
             }
+            Stage::RiverWaterSurface => {
+                let coord = region::RegionCoord::containing(wx, wz);
+                let chunk_origin = ChunkCoord(glam::IVec3::new(
+                    coord.x * (FINE_REGION_SIZE / 32),
+                    0,
+                    coord.z * (FINE_REGION_SIZE / 32),
+                ));
+                let regions = self.gather_chunk_regions(chunk_origin);
+                regions
+                    .river_cell_at(wx, wz, self.seed)
+                    .map_or(0.0, |cell| cell.surface_y as f32)
+            }
+            Stage::RiverBed => {
+                let coord = region::RegionCoord::containing(wx, wz);
+                let chunk_origin = ChunkCoord(glam::IVec3::new(
+                    coord.x * (FINE_REGION_SIZE / 32),
+                    0,
+                    coord.z * (FINE_REGION_SIZE / 32),
+                ));
+                let regions = self.gather_chunk_regions(chunk_origin);
+                regions
+                    .river_cell_at(wx, wz, self.seed)
+                    .map_or(0.0, |cell| cell.bed_y as f32)
+            }
+            Stage::LakeRim => self
+                .column_data(wx, wz)
+                .water_surface_y
+                .map_or(0.0, |y| y as f32),
+            Stage::WaterSurfaceY => self
+                .column_data(wx, wz)
+                .water_surface_y
+                .map_or(0.0, |y| y as f32),
             Stage::BiomeId => {
                 let biome = self.column_data(wx, wz).biome;
                 // Biome has no #[repr], so we use a hand-written mapping that
@@ -728,7 +785,6 @@ impl Generator {
         // --- Column geometry ---
         let col = self.column_data(wx, wz);
         let height = col.height;
-        let lake_rim = col.lake_rim;
 
         // --- Gather regions and cave systems ---
         let coord = region::RegionCoord::containing(wx, wz);
@@ -865,17 +921,25 @@ impl Generator {
         let solid = final_density > 0.0;
 
         // --- Block resolution ---
-        // Aquifer density input matches fill_chunk exactly.
-        let aquifer_density = final_density;
-        let aq_substance = self.aquifer.substance(wx, wy, wz, aquifer_density);
-
-        let block = if let aquifer::Substance::Block(b) = aq_substance {
-            b
-        } else if !solid {
-            let in_lake = lake_rim.map_or(false, |rim| wy <= rim);
-            let in_ocean = height <= SEA_LEVEL && wy <= SEA_LEVEL;
-            if in_lake || in_ocean {
-                Block::Water
+        let mut fluid_reason = None;
+        let block = if !solid {
+            let river = regions.river_cell_at(wx, wz, self.seed);
+            if let Some(cell) = river {
+                if wy >= cell.bed_y && wy <= cell.surface_y {
+                    fluid_reason = Some(cell.reason);
+                    Block::Water
+                } else {
+                    Block::Air
+                }
+            } else if let Some(wsurf) = col.water_surface_y {
+                // Unified water surface covers ocean, lake, and river-
+                // flooded columns in order of priority.
+                if wy >= height && wy <= wsurf {
+                    fluid_reason = Some(fluid::FluidReason::OceanConnected);
+                    Block::Water
+                } else {
+                    Block::Air
+                }
             } else {
                 Block::Air
             }
@@ -951,14 +1015,7 @@ impl Generator {
                     scan_density
                 };
                 let scan_solid = (scan_dfc - scan_cave + scan_pillar) > 0.0;
-                let scan_aq = self.aquifer.substance(wx, scan_y, wz, scan_dfc - scan_cave);
-                let scan_is_solid = if let aquifer::Substance::Block(_) = scan_aq {
-                    // Aquifer placed fluid — treat as air for depth tracking.
-                    false
-                } else {
-                    scan_solid
-                };
-                if scan_is_solid {
+                if scan_solid {
                     depth_below_surface = Some(depth_below_surface.map(|d| d + 1).unwrap_or(0));
                 } else {
                     depth_below_surface = None;
@@ -974,7 +1031,7 @@ impl Generator {
                 is_cliff: col.is_cliff,
                 desertness: col.desertness,
                 depth_below_surface: depth,
-                lake_rim,
+                water_surface_y: col.water_surface_y,
                 seed: self.seed,
                 cfg: &cfg,
                 sea_level: SEA_LEVEL,
@@ -994,6 +1051,7 @@ impl Generator {
             pillar,
             final_density,
             block,
+            fluid_reason,
             cave_style: probe_cave_style,
             cave_band: probe_cave_band,
         }
@@ -1022,6 +1080,7 @@ impl Generator {
         // list rather than walking the full region's system list.
         let chunk_max = origin + glam::IVec3::splat(CHUNK_DIM_U as i32);
         let cave_systems = regions.cave_systems_intersecting(origin, chunk_max);
+        let cave_pools = regions.cave_pools_intersecting(origin, chunk_max);
         // Snapshot the hot-reloadable config once at the top of this
         // chunk and reuse for every voxel — keeps each chunk
         // deterministic even if a file watcher swaps mid-generation.
@@ -1032,14 +1091,6 @@ impl Generator {
         // mask lookup. See `carver.rs`.
         let carver_mask = self.build_carver_mask(coord);
         let dim = CHUNK_DIM_U as usize;
-
-        // Aquifer-placed-fluid mask. Tracks which voxels got their
-        // Water/Lava from the aquifer system (vs the ocean / lake
-        // surface flood). The `fluid::settle_fluid` pass after the
-        // y-loop ONLY processes masked voxels — ocean and lake
-        // water are preserved as-is, even when a carver punches
-        // through the seabed.
-        let mut aquifer_mask = vec![false; dim * dim * dim];
 
         // PR 5: cell-grid evaluator. Builds a 9x9x9 corner lattice
         // of pre-slide density values for this chunk; per-voxel
@@ -1069,24 +1120,13 @@ impl Generator {
         // Simplex calls inside the inner loop.
         let carver_eval = caves::CarverEvaluator::new(&self.noise_carvers, &cfg.cave, origin);
 
-        // Aquifer cell cache: `three_nearest` scans 27 cells per call,
-        // but its result depends only on which aquifer cell `(wx, wy, wz)`
-        // falls into (derived via `div_euclid`). A 32³ chunk spans at
-        // most ~27 distinct cell triples, so caching eliminates ~32,741
-        // redundant 27-cell scans per chunk.
-        //
-        // Key is `(cx, cy, cz) = (wx.div_euclid(CELL_X), wy.div_euclid(CELL_Y),
-        // wz.div_euclid(CELL_Z))` — the same computation `three_nearest`
-        // performs internally — so the cache is always coherent.
-        let mut nearest_cache: ahash::AHashMap<(i32, i32, i32), [aquifer::AquiferCell; 3]> =
-            ahash::AHashMap::new();
-
         // Precompute valley-carve depths for all 32×32 columns in one
         // segment-first pass. AABB culling means only columns actually
         // within a river valley pay the perpendicular_distance cost.
         // This eliminates the O(1024 × N_segments) per-column call to
         // valley_carve, replacing it with O(N_segments × affected_columns).
         let valley_depth_grid = regions.valley_grid(origin.x, origin.z, self.seed);
+        let river_grid = regions.river_grid(origin.x, origin.z, self.seed);
         let mut columns = Vec::with_capacity(dim * dim);
         for z in 0..CHUNK_DIM_U {
             for x in 0..CHUNK_DIM_U {
@@ -1100,6 +1140,18 @@ impl Generator {
                 ));
             }
         }
+        // Patch river water_surface_y. Rivers are authoritative: they override
+        // lake/ocean regardless of terrain height. The river grid is only
+        // available after `valley_depth_grid` is built, so this runs after the
+        // columns loop rather than inside `column_data_with`.
+        for z in 0..CHUNK_DIM_U as usize {
+            for x in 0..CHUNK_DIM_U as usize {
+                let idx = z * dim + x;
+                if let Some(river) = river_grid[idx] {
+                    columns[idx].water_surface_y = Some(river.surface_y);
+                }
+            }
+        }
 
         for z in 0..CHUNK_DIM_U {
             for x in 0..CHUNK_DIM_U {
@@ -1107,7 +1159,6 @@ impl Generator {
                 let wz = origin.z + z as i32;
                 let col = columns[z as usize * dim + x as usize];
                 let height = col.height;
-                let lake_rim = col.lake_rim;
                 // h_pre is the pre-carve surface Y, used by the tera
                 // surface-suppression depth term. Computed once per
                 // XZ column so the inner y-loop pays no noise cost.
@@ -1271,76 +1322,23 @@ impl Generator {
 
                     let solid = composed > 0.0;
 
-                    // Aquifer override. Receives the final composed
-                    // density so its solid/air decisions agree with
-                    // the cave composition above.
-                    //
-                    // The `three_nearest` result only changes when the
-                    // aquifer cell coordinate changes, so we cache it
-                    // keyed on `(cx, cy, cz)`. This brings per-chunk
-                    // 27-cell scans from 32,768 down to ≤27.
-                    let aq_substance = {
-                        let cell_key = (
-                            wx.div_euclid(aquifer::AQUIFER_CELL_X),
-                            wy.div_euclid(aquifer::AQUIFER_CELL_Y),
-                            wz.div_euclid(aquifer::AQUIFER_CELL_Z),
-                        );
-                        let nearest = nearest_cache
-                            .entry(cell_key)
-                            .or_insert_with(|| self.aquifer.three_nearest(wx, wy, wz));
-                        self.aquifer
-                            .substance_with_nearest(wx, wy, wz, composed, nearest)
-                    };
-
-                    // Yield to the ocean / lake surface flood for
-                    // voxels above the column's heightmap in a
-                    // water-surface column. The aquifer's pressure
-                    // model can otherwise claim these voxels with
-                    // `aquifer_mask` set, putting them through the
-                    // settle pass for no benefit and risking
-                    // settle-decision edge cases that disturb a
-                    // body the surface flood would have kept pristine.
-                    let above_terrain_now = wy > height;
-                    let in_ocean_column = height <= SEA_LEVEL;
-                    let in_lake_column = lake_rim.map_or(false, |rim| wy <= rim);
-                    let yield_to_surface_flood =
-                        above_terrain_now && (in_ocean_column || in_lake_column);
-                    let aq_substance = if yield_to_surface_flood {
-                        aquifer::Substance::Density
-                    } else {
-                        aq_substance
-                    };
-
-                    let block = if let aquifer::Substance::Block(b) = aq_substance {
-                        // Aquifer placed a fluid (Water or Lava).
-                        depth_below_surface = None;
-                        let lx = (wx - origin.x) as usize;
-                        let ly = (wy - origin.y) as usize;
-                        let lz = (wz - origin.z) as usize;
-                        aquifer_mask[lx + dim * ly + dim * dim * lz] = true;
-                        b
-                    } else if !solid {
-                        depth_below_surface = None;
-                        // Surface water flood. `wy >= height` (not
-                        // strict) so that when a carver opens the
-                        // heightmap voxel of an ocean column the
-                        // resulting carved-air voxel becomes Water,
-                        // not Air — otherwise you'd see a sealed
-                        // air bubble directly below the ocean
-                        // surface where a tunnel punches through.
-                        // Static approximation of "water flows down
-                        // through the seabed mouth"; proper runtime
-                        // fluid mechanics will replace it.
-                        let at_or_above_terrain = wy >= height;
-                        let in_lake =
-                            at_or_above_terrain && lake_rim.map_or(false, |rim| wy <= rim);
-                        let in_ocean =
-                            at_or_above_terrain && height <= SEA_LEVEL && wy <= SEA_LEVEL;
-                        if in_lake || in_ocean {
-                            Block::Water
-                        } else {
-                            Block::Air
+                    // Force-flood: voxels above the terrain floor and at or
+                    // below water_surface_y must be Air so apply_surface_fluids
+                    // can stamp Water into them. This eliminates "3D bumps
+                    // through water" and "covered rivers / lakes" by removing
+                    // any solid density that density evaluation placed inside
+                    // the intended water column.
+                    if let Some(wsurf) = col.water_surface_y {
+                        if wy > col.height && wy <= wsurf {
+                            depth_below_surface = None;
+                            out.set(local, Block::Air);
+                            continue;
                         }
+                    }
+
+                    let block = if !solid {
+                        depth_below_surface = None;
+                        Block::Air
                     } else {
                         // Solid — `depth` counts blocks below the most
                         // recent air→solid transition. PR 6 delegates
@@ -1360,7 +1358,7 @@ impl Generator {
                             is_cliff: col.is_cliff,
                             desertness: col.desertness,
                             depth_below_surface: depth,
-                            lake_rim,
+                            water_surface_y: col.water_surface_y,
                             seed: self.seed,
                             cfg: &cfg,
                             sea_level: SEA_LEVEL,
@@ -1369,19 +1367,12 @@ impl Generator {
                     };
                     out.set(local, block);
                 }
-                // Bind `lake_rim` so the compiler sees it used in
-                // both branches above.
-                let _ = lake_rim;
             }
         }
 
-        // Settle aquifer-placed fluid via per-voxel bottom-up
-        // support propagation (see `fluid::settle_fluid`). Demotes
-        // any masked Water/Lava voxel whose support chain (through
-        // fluid columns) does not resolve to a solid block, an
-        // external fluid body, or the chunk floor. Ocean and lake
-        // water are not masked → preserved.
-        fluid::settle_fluid(out, &aquifer_mask);
+        let fluid_planner = fluid::FluidPlanner::new(self.seed, coord);
+        fluid_planner.apply_surface_fluids(out, &columns);
+        fluid_planner.apply_cave_pools(out, &cave_pools);
 
         // Vertical-run clamp: cap any continuous vertical air column at
         // MAX_VERTICAL_AIR_RUN voxels to eliminate fall hazards. Cheap
@@ -1444,6 +1435,9 @@ impl Generator {
             fn is_surface_block(b: Block) -> bool {
                 matches!(b, Block::Grass | Block::Sand | Block::Snow | Block::Dirt)
             }
+            fn is_surface_open(b: Block) -> bool {
+                matches!(b, Block::Air | Block::Water | Block::Lava)
+            }
             for x in 0..dim {
                 for z in 0..dim {
                     for y in 1..(dim - 1) {
@@ -1467,11 +1461,20 @@ impl Generator {
             // solid voxel below and give it the appropriate surface
             // block. Then spread the displaced surface laterally by
             // SURFACE_SPREAD.
+            //
+            // Skipped for wet columns (water_surface_y.is_some()): the
+            // force-flood pass filled the water column with Air above
+            // col.height; apply_surface_fluids will stamp Water there.
+            // Stamping a surface block into a flooded column would produce
+            // grass underwater which is exactly what we're fixing.
             for x in 0..dim {
                 for z in 0..dim {
                     let wx = chunk_origin.x + x as i32;
                     let wz = chunk_origin.z + z as i32;
                     let col = columns[z as usize * dim as usize + x as usize];
+                    if col.water_surface_y.is_some() {
+                        continue;
+                    }
                     let h_target = col.height;
 
                     // Is h_target inside this chunk's Y range?
@@ -1479,9 +1482,9 @@ impl Generator {
                     if ly_at_h < 0 || ly_at_h >= dim as i32 {
                         continue;
                     }
-                    // Is the voxel at h_target Air? (cave breached the surface)
+                    // Is the voxel at h_target open? (cave breached the surface)
                     let at_surface = LocalPos(UVec3::new(x, ly_at_h as u32, z));
-                    if out.get(at_surface) != Block::Air {
+                    if !is_surface_open(out.get(at_surface)) {
                         continue;
                     }
 
@@ -1493,7 +1496,7 @@ impl Generator {
                     let mut floor_ly = ly_at_h - 1;
                     let mut steps = 0;
                     while floor_ly >= 0
-                        && out.get(LocalPos(UVec3::new(x, floor_ly as u32, z))) == Block::Air
+                        && is_surface_open(out.get(LocalPos(UVec3::new(x, floor_ly as u32, z))))
                         && steps < MAX_BREACH_SEARCH_DEPTH
                     {
                         floor_ly -= 1;
@@ -1518,7 +1521,7 @@ impl Generator {
                         is_cliff: col.is_cliff,
                         desertness: col.desertness,
                         depth_below_surface: 0,
-                        lake_rim: col.lake_rim,
+                        water_surface_y: col.water_surface_y,
                         seed: self.seed,
                         cfg: &cfg,
                         sea_level: SEA_LEVEL,
@@ -1560,8 +1563,9 @@ impl Generator {
                             let mut nly = ly_at_h - 1;
                             let mut nsteps = 0;
                             while nly >= 0
-                                && out.get(LocalPos(UVec3::new(nx as u32, nly as u32, nz as u32)))
-                                    == Block::Air
+                                && is_surface_open(
+                                    out.get(LocalPos(UVec3::new(nx as u32, nly as u32, nz as u32))),
+                                )
                                 && nsteps < MAX_BREACH_SEARCH_DEPTH
                             {
                                 nly -= 1;
@@ -1582,7 +1586,7 @@ impl Generator {
                                     (nly - 1) as u32,
                                     nz as u32,
                                 ))) != Block::Air;
-                            if out.get(n_above_pos) == Block::Air
+                            if is_surface_open(out.get(n_above_pos))
                                 && out.get(n_floor_pos) == Block::Stone
                                 && n_below_is_solid
                             {
@@ -1681,10 +1685,9 @@ impl Generator {
         }
         // Lake veto: if this column sits below a lake's water surface,
         // no tree (even palms can't grow underwater).
-        if let Some(rim) = col.lake_rim {
-            if col.height < rim {
-                return None;
-            }
+        // Water veto: no trees in submerged columns (ocean, lake, river).
+        if col.water_surface_y.is_some() {
+            return None;
         }
 
         // Sand-surface veto. The beach band runs `[SEA_LEVEL - 1,
@@ -1831,11 +1834,12 @@ pub struct ColumnData {
     /// Discrete biome label derived from temperature, humidity, and
     /// the desert mask, with threshold perturbation applied.
     pub biome: Biome,
-    /// Lake water surface elevation at this column, if it sits inside
-    /// (or adjacent to) a sink-filled basin. `None` outside lakes.
-    /// Used by both the chunk-fill water flood and the tree placer
-    /// (trees veto if the column is submerged in lake water).
-    pub lake_rim: Option<i32>,
+    /// Unified water-surface Y: `Some(y)` means this column is submerged
+    /// and the topmost Water voxel sits at world Y == y. Priority:
+    /// river > lake > ocean > `None`. River priority is patched in by
+    /// `fill_chunk` after the river grid is built; other callers receive
+    /// only the lake/ocean classification computed here.
+    pub water_surface_y: Option<i32>,
 }
 
 /// Discrete biome label assigned to each column. The set is small on
@@ -1976,6 +1980,43 @@ impl ChunkRegions {
         out
     }
 
+    /// Collect every cave pool in the pre-fetched 3 × 3 region grid whose
+    /// ellipsoid AABB intersects the chunk AABB `[chunk_min, chunk_max]`.
+    /// Called once per `fill_chunk` alongside `cave_systems_intersecting`.
+    fn cave_pools_intersecting(
+        &self,
+        chunk_min: glam::IVec3,
+        chunk_max: glam::IVec3,
+    ) -> Vec<&region::CavePool> {
+        let mut out = Vec::new();
+        for row in &self.grid {
+            for slot in row {
+                if let Some(r) = slot {
+                    for pool in &r.cave_pools {
+                        // AABB from ellipsoid extents.
+                        let px = pool.center.x as i32;
+                        let py = pool.center.y as i32;
+                        let pz = pool.center.z as i32;
+                        let rx = pool.radii.x.ceil() as i32;
+                        let ry = pool.radii.y.ceil() as i32;
+                        let rz = pool.radii.z.ceil() as i32;
+                        if px + rx < chunk_min.x
+                            || px - rx > chunk_max.x
+                            || py + ry < chunk_min.y
+                            || py - ry > chunk_max.y
+                            || pz + rz < chunk_min.z
+                            || pz - rz > chunk_max.z
+                        {
+                            continue;
+                        }
+                        out.push(pool);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Valley carve at this column: iterate over the river segments
     /// in the column's region plus its 8 neighbours (clipped to the
     /// pre-fetched 3 × 3 grid). Per-column cost is O(total segments
@@ -2057,6 +2098,85 @@ impl ChunkRegions {
             neighbour_regions[i] = self.grid[nz as usize][nx as usize].as_deref();
         }
         hydrology::valley_grid(origin_wx, origin_wz, primary, &neighbour_regions, seed)
+    }
+
+    fn river_grid(
+        &self,
+        origin_wx: i32,
+        origin_wz: i32,
+        seed: u64,
+    ) -> [Option<fluid::FluidCell>; 32 * 32] {
+        let mut out = [None; 32 * 32];
+        for z in 0..32 {
+            for x in 0..32 {
+                out[z * 32 + x] =
+                    self.river_cell_at(origin_wx + x as i32, origin_wz + z as i32, seed);
+            }
+        }
+        out
+    }
+
+    fn river_cell_at(&self, wx: i32, wz: i32, seed: u64) -> Option<fluid::FluidCell> {
+        let c = region::RegionCoord::containing(wx, wz);
+        let center_dx = c.x - self.center.x + 1;
+        let center_dz = c.z - self.center.z + 1;
+        if center_dx < 0 || center_dz < 0 || center_dx >= 3 || center_dz >= 3 {
+            return None;
+        }
+        let primary = self.grid[center_dz as usize][center_dx as usize]
+            .as_deref()
+            .expect("3x3 grid is always populated");
+        let mut neighbour_regions: [Option<&region::FineRegion>; 8] = [None; 8];
+        let nbr_offsets: [(i32, i32); 8] = [
+            (0, -1),
+            (1, -1),
+            (1, 0),
+            (1, 1),
+            (0, 1),
+            (-1, 1),
+            (-1, 0),
+            (-1, -1),
+        ];
+        for i in 0..8 {
+            let (ox, oz) = nbr_offsets[i];
+            let nx = center_dx + ox;
+            let nz = center_dz + oz;
+            if nx < 0 || nz < 0 || nx >= 3 || nz >= 3 {
+                continue;
+            }
+            neighbour_regions[i] = self.grid[nz as usize][nx as usize].as_deref();
+        }
+
+        let mut best: Option<(f32, fluid::FluidCell)> = None;
+        const MIN_VISIBLE_RIVER_WIDTH: f32 = 7.0;
+
+        hydrology::for_each_segment(primary, &neighbour_regions, |seg| {
+            if seg.kind == region::RiverSegmentKind::Waterfall {
+                return;
+            }
+            let width = if seg.mouth {
+                seg.width * MOUTH_FLARE_MULT
+            } else {
+                seg.width
+            }
+            .max(MIN_VISIBLE_RIVER_WIDTH);
+            let d = hydrology::perpendicular_distance(wx, wz, seg, seed);
+            let half_w = width * 0.5;
+            if d > half_w {
+                return;
+            }
+            let cell = fluid::FluidCell {
+                kind: fluid::FluidBodyKind::River,
+                block: Block::Water,
+                surface_y: seg.water_y,
+                bed_y: seg.bed_y,
+                reason: fluid::FluidReason::RiverChannel,
+            };
+            if best.is_none_or(|(best_d, _)| d < best_d) {
+                best = Some((d, cell));
+            }
+        });
+        best.map(|(_, cell)| cell)
     }
 }
 
@@ -2208,10 +2328,7 @@ mod tests {
 
     /// Above-sea cave fills under a land column should never come
     /// from the ocean's surface flood — sea-level water only belongs
-    /// in ocean columns; lake water only belongs under lakes. The
-    /// PR 7 aquifer can still place water in deep caves, so the
-    /// post-PR-7 invariant is narrower: *above sea level*, a
-    /// land chunk with no lake above never floods with surface water.
+    /// in ocean columns; lake water only belongs under lakes.
     #[test]
     fn above_sea_air_under_land_is_dry() {
         let g = Generator::new(42);
@@ -2228,7 +2345,7 @@ mod tests {
                         let wx = cx * CHUNK_DIM_U as i32 + lx as i32;
                         let wz = cz * CHUNK_DIM_U as i32 + lz as i32;
                         let col = g.column_data(wx, wz);
-                        if col.height <= SEA_LEVEL + 5 || col.lake_rim.is_some() {
+                        if col.height <= SEA_LEVEL + 5 || col.water_surface_y.is_some() {
                             ok = false;
                             break 'cols;
                         }
@@ -2345,11 +2462,8 @@ mod tests {
         );
     }
 
-    /// PR 7 aquifer: deep caves under land should contain *some*
-    /// fluid (water/lava), reflecting the new MC-style behavior
-    /// where the water table extends underground regardless of
-    /// surface ocean position. This is the inverse of the prior
-    /// `deep_caves_under_land_are_dry` invariant.
+    /// Deep caves under land should contain some planned cave-pool
+    /// fluid, independent of surface ocean columns.
     /// Confirms the procedural carver actually carves voxels in
     /// underground chunks (not just runs and does nothing). A 16×16
     /// grid of chunks at chunk-Y=-1 (world Y -32..-1) should have
@@ -2374,11 +2488,11 @@ mod tests {
     }
 
     #[test]
-    fn pr7_aquifer_floods_some_underground_caves() {
+    fn fluid_planner_fills_some_underground_cave_basins() {
         let g = Generator::new(42);
         // Scan a wide grid of deep chunks (Y=-3 ≈ blocks -96..-65)
-        // and confirm *at least one* of them has aquifer fluid.
-        // Sparse aquifer + small cave fraction means many chunks
+        // and confirm *at least one* of them has planned fluid.
+        // Sparse contained basins + small cave fraction means many chunks
         // can be dry — but across 16x16 chunks we should see at
         // least one fluid pocket.
         let mut total_fluid = 0;
@@ -2395,8 +2509,7 @@ mod tests {
         }
         assert!(
             total_fluid > 0,
-            "deep aquifer band produced no fluid across 256 chunks — \
-             aquifer disabled?"
+            "deep cave scan produced no fluid across 256 chunks"
         );
     }
 
@@ -2592,6 +2705,134 @@ mod tests {
             inland_water_columns > 0,
             "expected at least one inland water column from river/lake carving, found none"
         );
+    }
+
+    #[test]
+    fn above_sea_river_segment_generates_water_blocks() {
+        let g = Generator::new(42);
+        let mut found = None;
+        'outer: for wz in (-2048..2048).step_by(4) {
+            for wx in (-2048..2048).step_by(4) {
+                let coord = region::RegionCoord::containing(wx, wz);
+                let chunk_origin = ChunkCoord(IVec3::new(
+                    coord.x * (FINE_REGION_SIZE / 32),
+                    0,
+                    coord.z * (FINE_REGION_SIZE / 32),
+                ));
+                let regions = g.gather_chunk_regions(chunk_origin);
+                if let Some(cell) = regions.river_cell_at(wx, wz, g.seed()) {
+                    if cell.surface_y > SEA_LEVEL + 2 {
+                        found = Some((wx, wz, cell.surface_y));
+                        break 'outer;
+                    }
+                }
+            }
+        }
+
+        let (wx, wz, wy) = found.expect("expected an above-sea river in the scan");
+        let coord = ChunkCoord(IVec3::new(
+            wx.div_euclid(CHUNK_DIM_U as i32),
+            wy.div_euclid(CHUNK_DIM_U as i32),
+            wz.div_euclid(CHUNK_DIM_U as i32),
+        ));
+        let mut chunk = DenseChunk::empty();
+        g.fill_chunk(coord, &mut chunk);
+        let local = LocalPos(UVec3::new(
+            wx.rem_euclid(CHUNK_DIM_U as i32) as u32,
+            wy.rem_euclid(CHUNK_DIM_U as i32) as u32,
+            wz.rem_euclid(CHUNK_DIM_U as i32) as u32,
+        ));
+        assert_eq!(chunk.get(local), Block::Water);
+    }
+
+    #[test]
+    fn seed42_region_has_visible_surface_rivers_and_lakes() {
+        let g = Generator::new(42);
+        let mut river_water = 0usize;
+        // surface_water counts ocean + lake voxels: any Water block where
+        // the column's unified water_surface_y says this column is wet and
+        // the voxel is within the expected water depth.
+        let mut surface_water = 0usize;
+
+        for cz in -4..4 {
+            for cx in -4..4 {
+                for cy in 1..4 {
+                    let coord = ChunkCoord(IVec3::new(cx, cy, cz));
+                    let origin = coord.origin().0;
+                    let regions = g.gather_chunk_regions(coord);
+                    let mut chunk = DenseChunk::empty();
+                    g.fill_chunk(coord, &mut chunk);
+
+                    for z in 0..CHUNK_DIM_U {
+                        for x in 0..CHUNK_DIM_U {
+                            let wx = origin.x + x as i32;
+                            let wz = origin.z + z as i32;
+                            let col = g.column_data(wx, wz);
+                            let river = regions.river_cell_at(wx, wz, g.seed());
+
+                            for y in 0..CHUNK_DIM_U {
+                                let wy = origin.y + y as i32;
+                                if chunk.get(LocalPos(UVec3::new(x, y, z))) != Block::Water {
+                                    continue;
+                                }
+                                if let Some(cell) = river {
+                                    if cell.surface_y > SEA_LEVEL
+                                        && wy >= cell.bed_y
+                                        && wy <= cell.surface_y
+                                    {
+                                        river_water += 1;
+                                    }
+                                }
+                                // Count lake + ocean water via the unified water_surface_y.
+                                if let Some(wsurf) = col.water_surface_y {
+                                    if wy >= col.height && wy <= wsurf {
+                                        surface_water += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            river_water > 2_000,
+            "expected visible above-sea river water, found {river_water} voxels"
+        );
+        assert!(
+            surface_water > 5_000,
+            "expected visible surface water (ocean + lake), found {surface_water} voxels"
+        );
+    }
+
+    #[test]
+    fn generated_lava_never_appears_above_lava_band() {
+        let g = Generator::new(42);
+        for cx in -4..4 {
+            for cz in -4..4 {
+                for cy in -1..4 {
+                    let coord = ChunkCoord(IVec3::new(cx, cy, cz));
+                    let origin = coord.origin().0;
+                    let mut chunk = DenseChunk::empty();
+                    g.fill_chunk(coord, &mut chunk);
+                    for z in 0..CHUNK_DIM_U {
+                        for y in 0..CHUNK_DIM_U {
+                            for x in 0..CHUNK_DIM_U {
+                                let block = chunk.get(LocalPos(UVec3::new(x, y, z)));
+                                if block == Block::Lava {
+                                    let wy = origin.y + y as i32;
+                                    assert!(
+                                        wy <= aquifer::LAVA_BAND_TOP_Y,
+                                        "lava generated above band at y={wy}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// The plate-driven heightmap caps final heights at

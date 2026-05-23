@@ -48,8 +48,8 @@
 
 use crate::worldgen::heightmap::HeightmapNoise;
 use crate::worldgen::region::{
-    FineRegion, MacroCache, MacroRegion, MacroRegionCoord, RegionCoord, RiverSegment, bitset_get,
-    bitset_set,
+    FineRegion, MacroCache, MacroRegion, MacroRegionCoord, RegionCoord, RiverSegment,
+    RiverSegmentKind, bitset_get, bitset_set,
 };
 use crate::worldgen::tuning::*;
 use std::collections::BinaryHeap;
@@ -637,9 +637,29 @@ pub fn build_fine_hydro(
                     .clamp(MIN_RIVER_WIDTH, MAX_RIVER_WIDTH);
                 region.width[dst] = w;
             }
-            if grid.h_fill[src] > grid.h[src] {
+            // Tag as lake only when the sink-fill raised the cell by at
+            // least LAKE_MIN_NATURAL_DEPTH blocks AND the cell's natural
+            // height is not deep ocean.
+            //
+            // The ≥ LAKE_MIN_NATURAL_DEPTH guard suppresses 1-block-deep
+            // "scratch" basins that sink-fill creates at every slight
+            // terrain depression. Without it, Step-5 carving
+            // (MIN_LAKE_BED_DROP = 3) deepens those scratches into visible
+            // ponds even though the basin is topographically insignificant.
+            //
+            // The ≥ SEA_LEVEL-6 guard prevents ocean cells from being
+            // tagged as lakes; ocean is handled by the plate-driven
+            // predicate in column_data_with, and tagging it here would
+            // produce a non-flat "tilted ocean" rim.
+            let natural_depth = grid.h_fill[src] - grid.h[src];
+            if natural_depth >= LAKE_MIN_NATURAL_DEPTH as i16
+                && grid.h[src] >= SEA_LEVEL as i16 - 6
+            {
                 bitset_set(&mut region.is_lake, dst, true);
                 region.lake_rim[dst] = grid.h_fill[src];
+                // Guarantee at least MIN_LAKE_BED_DROP blocks of open water
+                // above the terrain floor so lakes have visible depth.
+                region.lake_bed_depth[dst] = natural_depth.max(MIN_LAKE_BED_DROP as i16);
             }
         }
     }
@@ -671,13 +691,46 @@ pub fn build_fine_hydro(
             let nz = iz as i32 + dz;
             let mouth = nx >= 0
                 && nz >= 0
-                && nx < inner as i32
-                && nz < inner as i32
+                && nx < inner
+                && nz < inner
                 && region.h_pre[(nz as usize) * inner_u + (nx as usize)] <= SEA_LEVEL as i16;
+            let src = (iz + halo_cells) * n + (ix + halo_cells);
+            let here_h = grid.h[src] as i32;
+            let (downstream_h, downstream_h_fill) =
+                if nx >= 0 && nz >= 0 && nx < inner && nz < inner {
+                    let ds = (nz as usize + halo_cells) * n + (nx as usize + halo_cells);
+                    (grid.h[ds] as i32, grid.h_fill[ds] as i32)
+                } else {
+                    (here_h, grid.h_fill[src] as i32)
+                };
+            let drop = here_h - downstream_h;
+            let kind = if drop >= 12 {
+                RiverSegmentKind::Waterfall
+            } else if drop >= 5 {
+                RiverSegmentKind::Rapid
+            } else {
+                RiverSegmentKind::Channel
+            };
+            let water_y = if mouth {
+                SEA_LEVEL
+            } else {
+                // Use sink-fill heights rather than raw terrain heights so
+                // adjacent segments share a coherent, monotone water surface.
+                // h_fill is non-decreasing along the upstream direction by
+                // the Planchon-Darboux guarantee, eliminating the per-segment
+                // stepping that produced visible water walls.
+                (grid.h_fill[src] as i32)
+                    .min(downstream_h_fill)
+                    .max(SEA_LEVEL + 1)
+            };
+            let bed_y = water_y - RIVER_BED_DEPTH;
             region.segments.push(RiverSegment {
                 from,
                 to,
                 width,
+                water_y,
+                bed_y,
+                kind,
                 mouth,
             });
         }
@@ -796,6 +849,38 @@ pub fn valley_grid(
         }
     });
 
+    // Second pass: lake bed carve. For every column already inside a lake
+    // fine cell, apply its lake_bed_depth (guaranteed ≥ MIN_LAKE_BED_DROP).
+    // This runs after the river pass so rivers inside lake basins keep their
+    // bed depth where it exceeds the lake bed depth.
+    let all_regions = std::iter::once(Some(region))
+        .chain(neighbours.iter().map(|o| o.map(|r| r as &FineRegion)));
+    for reg in all_regions.flatten() {
+        let (rx, rz) = reg.coord.origin();
+        for lz in 0..DIM as usize {
+            for lx in 0..DIM as usize {
+                let wx = origin_wx + lx as i32;
+                let wz = origin_wz + lz as i32;
+                let ix = (wx - rx).div_euclid(FINE_CELL);
+                let iz = (wz - rz).div_euclid(FINE_CELL);
+                if ix < 0
+                    || iz < 0
+                    || ix >= FINE_CELLS_PER_REGION
+                    || iz >= FINE_CELLS_PER_REGION
+                {
+                    continue;
+                }
+                let i = (iz * FINE_CELLS_PER_REGION + ix) as usize;
+                if bitset_get(&reg.is_lake, i) {
+                    let depth = reg.lake_bed_depth[i] as f32;
+                    if depth > grid[lz][lx] {
+                        grid[lz][lx] = depth;
+                    }
+                }
+            }
+        }
+    }
+
     grid
 }
 
@@ -821,7 +906,7 @@ pub(crate) fn for_each_segment<F: FnMut(&RiverSegment)>(
 /// segment's perturbed centerline. Adds a domain-warped offset
 /// scaled by width so trunk rivers meander hard while small streams
 /// stay nearly straight.
-fn perpendicular_distance(wx: i32, wz: i32, seg: &RiverSegment, seed: u64) -> f32 {
+pub(crate) fn perpendicular_distance(wx: i32, wz: i32, seg: &RiverSegment, seed: u64) -> f32 {
     let p = (wx as f32, wz as f32);
     let a = (seg.from.0 as f32, seg.from.1 as f32);
     let b = (seg.to.0 as f32, seg.to.1 as f32);

@@ -63,11 +63,11 @@ pub const FINE_REGION_SIZE: i32 = 512;
 /// of 2560 blocks → ~2.5 km sink-fill horizon.
 pub const FINE_HALO_REGIONS: i32 = 2;
 /// Flow-accumulation threshold for a fine cell to be tagged as a river.
-pub const RIVER_THRESH: u32 = 50;
+pub const RIVER_THRESH: u32 = 24;
 /// Width-law scale: `width = clamp(sqrt(acc) * scale, min, max)`.
 pub const RIVER_WIDTH_SCALE: f32 = 0.30;
 /// Minimum river width at threshold drainage.
-pub const MIN_RIVER_WIDTH: f32 = 1.5;
+pub const MIN_RIVER_WIDTH: f32 = 3.0;
 /// Maximum river width near major mouths.
 pub const MAX_RIVER_WIDTH: f32 = 32.0;
 /// Depth (blocks below the natural heightmap) of the river bed at the
@@ -82,6 +82,31 @@ pub const MEANDER_AMP_PER_WIDTH: f32 = 0.4;
 pub const MAX_MEANDER_AMP: f32 = 16.0;
 /// Width multiplier applied at ocean mouths so deltas flare out.
 pub const MOUTH_FLARE_MULT: f32 = 1.6;
+/// Minimum guaranteed carve depth below water surface for lake beds.
+/// Ensures at least this many blocks of open water above the terrain floor.
+pub const MIN_LAKE_BED_DROP: i32 = 3;
+/// Minimum natural basin depth (h_fill − h, in fine-cell samples) required
+/// to classify a sink-fill cell as a lake. 1-block-deep "scratch" basins
+/// from sink-fill are excluded; they look like unnatural flat puddles and
+/// the Step-5 carving would make them visibly deep even though the basin
+/// is topographically insignificant.
+pub const LAKE_MIN_NATURAL_DEPTH: i32 = 2;
+
+// ── Cave pools ────────────────────────────────────────────────────────
+
+/// Minimum XZ semi-axis (blocks) for a chamber to qualify for a pool.
+/// Chambers smaller than this are too tight to look like a real pool.
+pub const POOL_MIN_RADIUS_XZ: f32 = 5.0;
+/// Fraction of the chamber's vertical span filled by the pool. 0.30
+/// means the pool surface sits 30% of the way up from the chamber floor,
+/// leaving headroom above.
+pub const POOL_SURFACE_FRACTION: f32 = 0.30;
+/// Minimum gap (blocks) between the pool surface and the surface of the
+/// world above. Pools must be fully underground.
+pub const POOL_TOP_CLEARANCE: i32 = 4;
+/// Probability a qualifying deep chamber becomes a lava pool rather than
+/// a water pool.
+pub const POOL_LAVA_PROB: f32 = 0.35;
 
 // ── Rivers (macro / trunk pass) ──────────────────────────────────────
 
