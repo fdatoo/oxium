@@ -1,9 +1,17 @@
 //! Fine-resolution hydrology pass (8 m / cell).
 //!
-//! `build_fine_hydro` runs the 8-step pipeline from the module header:
-//! sample h_pre → sink fill → macro trunk injection → D8 flow direction →
-//! flow accumulation → river/lake classification → segment extraction →
-//! write into `region`.
+//! `build_fine_hydro` is the public entry point. It is a thin orchestrator
+//! that calls five private helpers in sequence:
+//!
+//! 1. `sample_halo_heights` — allocate Grid, sample h_pre, run sink_fill.
+//! 2. `stamp_macro_into_fine` — inject macro trunk-river drainage and lake
+//!    rims into the fine grid.
+//! 3. `stitch_neighbour_inbounds` — copy neighbour inbound flow hints to
+//!    the assembled grid (PR 1 seam stitching).
+//! 4. `extract_and_tag_interior` — run flow+acc, copy interior cells into
+//!    the region, tag river/lake cells.
+//! 5. `build_segments_from_fine` (in `rivers`) — convert tagged river cells
+//!    to `RiverSegment` structs.
 //!
 //! `NeighbourEdges` and `gather_neighbour_edges` provide read-only snapshots
 //! of adjacent fine regions for seam stitching (PR 1).
@@ -11,12 +19,12 @@
 //! See `docs/book/content/part-3-region-build/3.4-hydrology.mdx` and
 //! `docs/book/content/part-3-region-build/3.5-rivers-lakes.mdx`.
 
-use super::grid::{DIR_NONE, DIR_OFFSETS, Grid};
+use super::grid::{DIR_NONE, Grid};
 use super::macro_pass::build_macro_region;
+use super::rivers::build_segments_from_fine;
 use crate::worldgen::heightmap::HeightmapNoise;
 use crate::worldgen::region::{
-    FineRegion, MacroCache, MacroRegionCoord, RegionCoord, RiverSegment, RiverSegmentKind,
-    bitset_get, bitset_set,
+    FineRegion, MacroCache, MacroRegionCoord, RegionCoord, bitset_get, bitset_set,
 };
 use crate::worldgen::tuning::*;
 
@@ -98,12 +106,9 @@ pub fn gather_neighbour_edges(
 
 /// Build the hydrology layer of a fine region.
 ///
-/// Runs the 8-step pipeline described in the module header: sample
-/// h_pre → sink fill → macro trunk injection → D8 flow direction →
-/// flow accumulation → river/lake classification → segment extraction
-/// → write into `region`. After this call, `region.flow_acc`,
-/// `region.is_river`, `region.is_lake`, `region.lake_rim`,
-/// `region.segments`, and `region.h_pre` are all populated.
+/// Thin orchestrator — calls the five helper functions in pipeline order.
+/// After this call, `region.flow_acc`, `region.is_river`, `region.is_lake`,
+/// `region.lake_rim`, `region.segments`, and `region.h_pre` are populated.
 ///
 /// Requires `macro_cache` so trunk drainage injected from outside the
 /// fine window is properly accounted for. Requires `fine_cache` (read-only
@@ -128,6 +133,47 @@ pub fn build_fine_hydro(
     let origin_x = (coord.x - halo) * FINE_REGION_SIZE;
     let origin_z = (coord.z - halo) * FINE_REGION_SIZE;
 
+    let mut grid = sample_halo_heights(seed, n, origin_x, origin_z, heightmap, climate, density);
+
+    stamp_macro_into_fine(
+        &mut grid,
+        seed,
+        n,
+        origin_x,
+        origin_z,
+        heightmap,
+        climate,
+        density,
+        macro_cache,
+    );
+
+    stitch_neighbour_inbounds(&mut grid, &neighbours, halo, inner, n);
+
+    grid.compute_flow();
+    grid.compute_acc();
+
+    extract_and_tag_interior(&grid, region, halo, inner, n);
+
+    build_segments_from_fine(&grid, coord, region, halo, inner, n);
+}
+
+// ── Pipeline helpers ──────────────────────────────────────────────────
+
+/// Allocate the halo grid, sample h_pre at every fine cell center, and
+/// run Planchon-Darboux sink fill.
+///
+/// The sink fill must precede macro injection (the injector stamps into
+/// `h_fill`), so this helper performs both sampling and the initial fill
+/// before returning the `Grid`.
+fn sample_halo_heights(
+    seed: u64,
+    n: usize,
+    origin_x: i32,
+    origin_z: i32,
+    heightmap: &HeightmapNoise,
+    climate: &crate::worldgen::config::ClimateConfig,
+    density: &crate::worldgen::config::DensityConfig,
+) -> Grid {
     let mut grid = Grid {
         n,
         h: vec![0i16; n * n],
@@ -150,14 +196,33 @@ pub fn build_fine_hydro(
     }
 
     grid.sink_fill();
+    grid
+}
 
-    // Trunk injection: for each macro cell inside the window flagged
-    // as trunk, find the fine cell at its center and add
-    // `macro_acc * (FINE_PER_MACRO * FINE_PER_MACRO)` to the
-    // injection (rescaling macro-cell-area units to fine-cell-area).
-    //
-    // The macro window only needs to cover what our fine window can
-    // see. Compute which macro cells our window touches.
+/// Inject macro trunk-river drainage and macro lake rims into the fine grid.
+///
+/// For each macro cell inside the fine window flagged as trunk, adds
+/// `macro_acc * (FINE_PER_MACRO²)` units to `grid.trunk_injection` at the
+/// corresponding fine cell. This rescales macro-cell-area drainage into
+/// fine-cell-area units so rivers entering from off-screen have the correct
+/// width.
+///
+/// For each macro lake cell, raises `grid.h_fill` for the 8×8 block of
+/// fine cells it covers to at least the macro lake's rim elevation. Both
+/// trunk and lake operations are combined in a single traversal over the
+/// overlapping macro regions to avoid re-fetching the same cached tiles.
+#[allow(clippy::too_many_arguments)]
+fn stamp_macro_into_fine(
+    grid: &mut Grid,
+    seed: u64,
+    n: usize,
+    origin_x: i32,
+    origin_z: i32,
+    heightmap: &HeightmapNoise,
+    climate: &crate::worldgen::config::ClimateConfig,
+    density: &crate::worldgen::config::DensityConfig,
+    macro_cache: &MacroCache,
+) {
     let macro_unit = MACRO_CELL;
     let fine_per_macro_axis = FINE_PER_MACRO; // 8
     // Determine which macro regions overlap our fine window.
@@ -218,78 +283,95 @@ pub fn build_fine_hydro(
             }
         }
     }
+}
 
-    // PR 1: stitch neighbour-edge inbound hints into this region's
-    // interior-boundary cells. Window-grid layout: this region's
-    // interior occupies indices in `[halo_cells, halo_cells + inner)`
-    // on both axes, where `halo_cells = halo * inner`. The neighbour
-    // regions' INTERIOR cells (size = inner * inner) are what we read.
-    {
-        let halo_cells = (halo * inner) as usize;
-        let inner_u = inner as usize;
+/// Copy neighbour-edge inbound flow hints into the assembled grid (PR 1).
+///
+/// Window-grid layout: this region's interior occupies indices in
+/// `[halo_cells, halo_cells + inner)` on both axes. For each cardinal
+/// neighbour that is present in the cache, the edge row of that
+/// neighbour's interior flow field is read and injected as
+/// `inbound_dir` / `inbound_acc` on the corresponding edge of the new
+/// grid. This breaks 2-cycles across the seam and prevents large rivers
+/// from shrinking at region boundaries.
+fn stitch_neighbour_inbounds(
+    grid: &mut Grid,
+    neighbours: &NeighbourEdges,
+    halo: i32,
+    inner: i32,
+    n: usize,
+) {
+    let halo_cells = (halo * inner) as usize;
+    let inner_u = inner as usize;
 
-        // West neighbour: its east-most interior column flows into our
-        // west-most interior column when its flow_dir == 2 (east).
-        if let Some(west) = neighbours.west.as_ref() {
-            for iz in 0..inner_u {
-                let neigh_idx = iz * inner_u + (inner_u - 1);
-                if west.flow_dir[neigh_idx] != 2 {
-                    continue;
-                }
-                let grid_idx = (halo_cells + iz) * n + halo_cells;
-                grid.inbound_dir[grid_idx] = 2;
-                grid.inbound_acc[grid_idx] =
-                    grid.inbound_acc[grid_idx].saturating_add(west.flow_acc[neigh_idx]);
+    // West neighbour: its east-most interior column flows into our
+    // west-most interior column when its flow_dir == 2 (east).
+    if let Some(west) = neighbours.west.as_ref() {
+        for iz in 0..inner_u {
+            let neigh_idx = iz * inner_u + (inner_u - 1);
+            if west.flow_dir[neigh_idx] != 2 {
+                continue;
             }
-        }
-        // East neighbour: its west-most interior column flows into our
-        // east-most interior column when its flow_dir == 6 (west).
-        if let Some(east) = neighbours.east.as_ref() {
-            for iz in 0..inner_u {
-                let neigh_idx = iz * inner_u;
-                if east.flow_dir[neigh_idx] != 6 {
-                    continue;
-                }
-                let grid_idx = (halo_cells + iz) * n + (halo_cells + inner_u - 1);
-                grid.inbound_dir[grid_idx] = 6;
-                grid.inbound_acc[grid_idx] =
-                    grid.inbound_acc[grid_idx].saturating_add(east.flow_acc[neigh_idx]);
-            }
-        }
-        // North neighbour: its south-most interior row flows into our
-        // north-most interior row when its flow_dir == 4 (south).
-        if let Some(north) = neighbours.north.as_ref() {
-            for ix in 0..inner_u {
-                let neigh_idx = (inner_u - 1) * inner_u + ix;
-                if north.flow_dir[neigh_idx] != 4 {
-                    continue;
-                }
-                let grid_idx = halo_cells * n + (halo_cells + ix);
-                grid.inbound_dir[grid_idx] = 4;
-                grid.inbound_acc[grid_idx] =
-                    grid.inbound_acc[grid_idx].saturating_add(north.flow_acc[neigh_idx]);
-            }
-        }
-        // South neighbour: its north-most interior row flows into our
-        // south-most interior row when its flow_dir == 0 (north).
-        if let Some(south) = neighbours.south.as_ref() {
-            for ix in 0..inner_u {
-                let neigh_idx = ix;
-                if south.flow_dir[neigh_idx] != 0 {
-                    continue;
-                }
-                let grid_idx = (halo_cells + inner_u - 1) * n + (halo_cells + ix);
-                grid.inbound_dir[grid_idx] = 0;
-                grid.inbound_acc[grid_idx] =
-                    grid.inbound_acc[grid_idx].saturating_add(south.flow_acc[neigh_idx]);
-            }
+            let grid_idx = (halo_cells + iz) * n + halo_cells;
+            grid.inbound_dir[grid_idx] = 2;
+            grid.inbound_acc[grid_idx] =
+                grid.inbound_acc[grid_idx].saturating_add(west.flow_acc[neigh_idx]);
         }
     }
+    // East neighbour: its west-most interior column flows into our
+    // east-most interior column when its flow_dir == 6 (west).
+    if let Some(east) = neighbours.east.as_ref() {
+        for iz in 0..inner_u {
+            let neigh_idx = iz * inner_u;
+            if east.flow_dir[neigh_idx] != 6 {
+                continue;
+            }
+            let grid_idx = (halo_cells + iz) * n + (halo_cells + inner_u - 1);
+            grid.inbound_dir[grid_idx] = 6;
+            grid.inbound_acc[grid_idx] =
+                grid.inbound_acc[grid_idx].saturating_add(east.flow_acc[neigh_idx]);
+        }
+    }
+    // North neighbour: its south-most interior row flows into our
+    // north-most interior row when its flow_dir == 4 (south).
+    if let Some(north) = neighbours.north.as_ref() {
+        for ix in 0..inner_u {
+            let neigh_idx = (inner_u - 1) * inner_u + ix;
+            if north.flow_dir[neigh_idx] != 4 {
+                continue;
+            }
+            let grid_idx = halo_cells * n + (halo_cells + ix);
+            grid.inbound_dir[grid_idx] = 4;
+            grid.inbound_acc[grid_idx] =
+                grid.inbound_acc[grid_idx].saturating_add(north.flow_acc[neigh_idx]);
+        }
+    }
+    // South neighbour: its north-most interior row flows into our
+    // south-most interior row when its flow_dir == 0 (north).
+    if let Some(south) = neighbours.south.as_ref() {
+        for ix in 0..inner_u {
+            let neigh_idx = ix;
+            if south.flow_dir[neigh_idx] != 0 {
+                continue;
+            }
+            let grid_idx = (halo_cells + inner_u - 1) * n + (halo_cells + ix);
+            grid.inbound_dir[grid_idx] = 0;
+            grid.inbound_acc[grid_idx] =
+                grid.inbound_acc[grid_idx].saturating_add(south.flow_acc[neigh_idx]);
+        }
+    }
+}
 
-    grid.compute_flow();
-    grid.compute_acc();
-
-    // Extract the region's interior.
+/// Copy the interior cells of the assembled grid into `region`, tagging
+/// river and lake cells.
+///
+/// River cells are those whose `flow_acc >= RIVER_THRESH`; their width
+/// follows a power-law `clamp(sqrt(acc) * RIVER_WIDTH_SCALE, MIN, MAX)`.
+///
+/// Lake cells are those where sink-fill raised the elevation by at least
+/// `LAKE_MIN_NATURAL_DEPTH` AND the natural height is above deep-ocean
+/// level (see the inline comments for the two guard rationale).
+fn extract_and_tag_interior(grid: &Grid, region: &mut FineRegion, halo: i32, inner: i32, n: usize) {
     let halo_cells = (halo * inner) as usize;
     let inner_u = inner as usize;
     region.flow_dir.fill(DIR_NONE);
@@ -339,78 +421,6 @@ pub fn build_fine_hydro(
                 // above the terrain floor so lakes have visible depth.
                 region.lake_bed_depth[dst] = natural_depth.max(MIN_LAKE_BED_DROP as i16);
             }
-        }
-    }
-
-    // Build river segments inside the region.
-    region.segments.clear();
-    let region_origin_x = coord.x * FINE_REGION_SIZE;
-    let region_origin_z = coord.z * FINE_REGION_SIZE;
-    for iz in 0..inner_u {
-        for ix in 0..inner_u {
-            let dst = iz * inner_u + ix;
-            if !bitset_get(&region.is_river, dst) {
-                continue;
-            }
-            let dir = region.flow_dir[dst];
-            if dir == DIR_NONE {
-                continue;
-            }
-            let (dx, dz) = DIR_OFFSETS[dir as usize];
-            let from = (
-                region_origin_x + (ix as i32) * FINE_CELL + FINE_CELL / 2,
-                region_origin_z + (iz as i32) * FINE_CELL + FINE_CELL / 2,
-            );
-            let to = (from.0 + dx * FINE_CELL, from.1 + dz * FINE_CELL);
-            let width = region.width[dst];
-            // Mouth: segment is at the downstream side of land — if
-            // the downstream cell's h_pre is ≤ SEA_LEVEL.
-            let nx = ix as i32 + dx;
-            let nz = iz as i32 + dz;
-            let mouth = nx >= 0
-                && nz >= 0
-                && nx < inner
-                && nz < inner
-                && region.h_pre[(nz as usize) * inner_u + (nx as usize)] <= SEA_LEVEL as i16;
-            let src = (iz + halo_cells) * n + (ix + halo_cells);
-            let here_h = grid.h[src] as i32;
-            let (downstream_h, downstream_h_fill) =
-                if nx >= 0 && nz >= 0 && nx < inner && nz < inner {
-                    let ds = (nz as usize + halo_cells) * n + (nx as usize + halo_cells);
-                    (grid.h[ds] as i32, grid.h_fill[ds] as i32)
-                } else {
-                    (here_h, grid.h_fill[src] as i32)
-                };
-            let drop = here_h - downstream_h;
-            let kind = if drop >= 12 {
-                RiverSegmentKind::Waterfall
-            } else if drop >= 5 {
-                RiverSegmentKind::Rapid
-            } else {
-                RiverSegmentKind::Channel
-            };
-            let water_y = if mouth {
-                SEA_LEVEL
-            } else {
-                // Use sink-fill heights rather than raw terrain heights so
-                // adjacent segments share a coherent, monotone water surface.
-                // h_fill is non-decreasing along the upstream direction by
-                // the Planchon-Darboux guarantee, eliminating the per-segment
-                // stepping that produced visible water walls.
-                (grid.h_fill[src] as i32)
-                    .min(downstream_h_fill)
-                    .max(SEA_LEVEL + 1)
-            };
-            let bed_y = water_y - RIVER_BED_DEPTH;
-            region.segments.push(RiverSegment {
-                from,
-                to,
-                width,
-                water_y,
-                bed_y,
-                kind,
-                mouth,
-            });
         }
     }
 }
