@@ -1,5 +1,5 @@
 use super::*;
-use crate::worldgen::region::CavePool;
+use crate::worldgen::region::{CavePool, ChamberRadius};
 use glam::{IVec3, Vec3};
 
 /// Build a chunk of solid Stone with a spherical air cavity carved out.
@@ -46,10 +46,10 @@ fn cave_pool_fills_air_inside_ellipsoid_up_to_surface_y() {
         origin_y as f32 + center_local.1 as f32,
         coord.origin().0.z as f32 + center_local.2 as f32,
     );
-    let radii = Vec3::splat(radius as f32);
+    let radii = ChamberRadius(Vec3::splat(radius as f32));
     // Pool surface sits 30% up from the floor of the cavity.
-    let floor_y = (world_center.y - radii.y).floor() as i32;
-    let height = (radii.y * 2.0) as i32;
+    let floor_y = (world_center.y - radii.0.y).floor() as i32;
+    let height = (radii.0.y * 2.0) as i32;
     let surface_y = floor_y + (height as f32 * 0.30) as i32;
 
     let pool = CavePool {
@@ -98,7 +98,7 @@ fn cave_pool_does_not_overwrite_solid_blocks() {
     }
     let pool = CavePool {
         center: Vec3::new(16.0, -48.0, 16.0),
-        radii: Vec3::splat(8.0),
+        radii: ChamberRadius(Vec3::splat(8.0)),
         surface_y: -46,
         bed_y: -56,
         kind: FluidBodyKind::CavePool,
@@ -127,7 +127,7 @@ fn lava_pool_kind_places_lava_block() {
     let world_center_y = origin_y as f32 + 16.0;
     let pool = CavePool {
         center: Vec3::new(16.0, world_center_y, 16.0),
-        radii: Vec3::splat(8.0),
+        radii: ChamberRadius(Vec3::splat(8.0)),
         surface_y: world_center_y as i32 - 2,
         bed_y: world_center_y as i32 - 8,
         kind: FluidBodyKind::LavaPool,

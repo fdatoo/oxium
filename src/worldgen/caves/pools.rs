@@ -25,16 +25,16 @@ pub(super) fn derive_cave_pools(seed: u64, region: &mut FineRegion) {
         let chamber_count = region.cave_systems[si].chambers.len();
         for ci in 0..chamber_count {
             let ch = region.cave_systems[si].chambers[ci];
-            let min_xz = ch.radii.x.min(ch.radii.z);
+            let min_xz = ch.radii.0.x.min(ch.radii.0.z);
             if min_xz < POOL_MIN_RADIUS_XZ {
                 continue;
             }
-            let ceiling = (ch.center.y + ch.radii.y).ceil() as i32;
+            let ceiling = (ch.center.y + ch.radii.0.y).ceil() as i32;
             if ceiling > SEA_LEVEL - POOL_TOP_CLEARANCE {
                 continue;
             }
-            let floor = (ch.center.y - ch.radii.y).floor() as i32;
-            let height = ((ch.radii.y * 2.0) as i32).max(1);
+            let floor = (ch.center.y - ch.radii.0.y).floor() as i32;
+            let height = ((ch.radii.0.y * 2.0) as i32).max(1);
             let surface_y_raw = floor + (height as f32 * POOL_SURFACE_FRACTION) as i32;
             // Clamp: must have at least 1 block of fluid and POOL_TOP_CLEARANCE air above.
             let surface_y = surface_y_raw

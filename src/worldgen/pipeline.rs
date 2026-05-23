@@ -128,9 +128,9 @@ impl ChunkRegions {
                 let px = pool.center.x as i32;
                 let py = pool.center.y as i32;
                 let pz = pool.center.z as i32;
-                let rx = pool.radii.x.ceil() as i32;
-                let ry = pool.radii.y.ceil() as i32;
-                let rz = pool.radii.z.ceil() as i32;
+                let rx = pool.radii.0.x.ceil() as i32;
+                let ry = pool.radii.0.y.ceil() as i32;
+                let rz = pool.radii.0.z.ceil() as i32;
                 px + rx >= chunk_min.x
                     && px - rx <= chunk_max.x
                     && py + ry >= chunk_min.y

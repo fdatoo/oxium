@@ -27,8 +27,9 @@ pub fn cave_sdf(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> f32 {
         // > 1 outside. Soft falloff over the [0, 1] range.
         for c in &sys.chambers {
             let d = p - c.center;
-            let ratio =
-                (d.x / c.radii.x).powi(2) + (d.y / c.radii.y).powi(2) + (d.z / c.radii.z).powi(2);
+            let ratio = (d.x / c.radii.0.x).powi(2)
+                + (d.y / c.radii.0.y).powi(2)
+                + (d.z / c.radii.0.z).powi(2);
             if ratio <= 1.0 {
                 // 1.0 at center → 0.0 at boundary.
                 let sdf = (1.0 - ratio) * CAVE_SDF_INTENSITY;
@@ -53,8 +54,8 @@ pub fn cave_sdf(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> f32 {
                 let t_param = ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0);
                 let closest = a + ab * t_param;
                 let dist = (p - closest).length();
-                if dist <= t.radius {
-                    let sdf = (1.0 - dist / t.radius) * CAVE_SDF_INTENSITY;
+                if dist <= t.radius.0 {
+                    let sdf = (1.0 - dist / t.radius.0) * CAVE_SDF_INTENSITY;
                     if sdf > max_sdf {
                         max_sdf = sdf;
                     }
@@ -78,8 +79,8 @@ pub fn cave_sdf(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> f32 {
                 let t_param = ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0);
                 let closest = a + ab * t_param;
                 let dist = (p - closest).length();
-                if dist <= t.radius {
-                    let sdf = (1.0 - dist / t.radius) * CAVE_SDF_INTENSITY;
+                if dist <= t.radius.0 {
+                    let sdf = (1.0 - dist / t.radius.0) * CAVE_SDF_INTENSITY;
                     if sdf > max_sdf {
                         max_sdf = sdf;
                     }
@@ -100,8 +101,8 @@ pub fn cave_sdf(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> f32 {
                 let t_param = ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0);
                 let closest = a + ab * t_param;
                 let dist = (p - closest).length();
-                if dist <= trunk.radius {
-                    let sdf = (1.0 - dist / trunk.radius) * CAVE_SDF_INTENSITY;
+                if dist <= trunk.radius.0 {
+                    let sdf = (1.0 - dist / trunk.radius.0) * CAVE_SDF_INTENSITY;
                     if sdf > max_sdf {
                         max_sdf = sdf;
                     }
@@ -272,7 +273,7 @@ pub fn entrance_sdf(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> f32 {
             let intensity = CAVE_SDF_INTENSITY * 2.0;
             match e.kind {
                 EntranceKind::Sinkhole => {
-                    let chamber_top_y = ch.center.y + ch.radii.y;
+                    let chamber_top_y = ch.center.y + ch.radii.0.y;
                     if wy as f32 >= chamber_top_y - 1.0 && wy as f32 <= e.surface.y as f32 {
                         let dx = p.x - e.surface.x as f32;
                         let dz = p.z - e.surface.z as f32;
@@ -289,7 +290,7 @@ pub fn entrance_sdf(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> f32 {
                     }
                 }
                 EntranceKind::Skylight => {
-                    let chamber_top_y = ch.center.y + ch.radii.y;
+                    let chamber_top_y = ch.center.y + ch.radii.0.y;
                     if wy as f32 >= chamber_top_y - 1.0 && wy as f32 <= e.surface.y as f32 {
                         let dx = p.x - e.surface.x as f32;
                         let dz = p.z - e.surface.z as f32;
@@ -339,8 +340,9 @@ pub fn cave_air(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> bool {
         // Ellipsoid SDF: (dx/rx)² + (dy/ry)² + (dz/rz)² <= 1.
         for c in &sys.chambers {
             let d = p - c.center;
-            let ratio =
-                (d.x / c.radii.x).powi(2) + (d.y / c.radii.y).powi(2) + (d.z / c.radii.z).powi(2);
+            let ratio = (d.x / c.radii.0.x).powi(2)
+                + (d.y / c.radii.0.y).powi(2)
+                + (d.z / c.radii.0.z).powi(2);
             if ratio <= 1.0 {
                 return true;
             }
@@ -358,7 +360,7 @@ pub fn cave_air(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> bool {
                 let ab = b - a;
                 let t_param = ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0);
                 let closest = a + ab * t_param;
-                if (p - closest).length() <= t.radius {
+                if (p - closest).length() <= t.radius.0 {
                     return true;
                 }
             }
@@ -375,7 +377,7 @@ pub fn cave_air(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> bool {
                 let ab = b - a;
                 let t_param = ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0);
                 let closest = a + ab * t_param;
-                if (p - closest).length() <= t.radius {
+                if (p - closest).length() <= t.radius.0 {
                     return true;
                 }
             }
@@ -389,7 +391,7 @@ pub fn cave_air(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> bool {
                 let ab = b - a;
                 let t_param = ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0);
                 let closest = a + ab * t_param;
-                if (p - closest).length() <= trunk.radius {
+                if (p - closest).length() <= trunk.radius.0 {
                     return true;
                 }
             }
@@ -416,7 +418,7 @@ pub fn entrance_air(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> bool 
                 EntranceKind::Sinkhole => {
                     // Vertical shaft from chamber top up to surface,
                     // radius 2.5, slightly funnel-shaped at top.
-                    let chamber_top_y = ch.center.y + ch.radii.y;
+                    let chamber_top_y = ch.center.y + ch.radii.0.y;
                     if wy as f32 >= chamber_top_y - 1.0 && wy as f32 <= e.surface.y as f32 {
                         let dx = p.x - e.surface.x as f32;
                         let dz = p.z - e.surface.z as f32;
@@ -433,7 +435,7 @@ pub fn entrance_air(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> bool 
                 EntranceKind::Skylight => {
                     // Narrow 1.5-block radius shaft from chamber top
                     // to surface.
-                    let chamber_top_y = ch.center.y + ch.radii.y;
+                    let chamber_top_y = ch.center.y + ch.radii.0.y;
                     if wy as f32 >= chamber_top_y - 1.0 && wy as f32 <= e.surface.y as f32 {
                         let dx = p.x - e.surface.x as f32;
                         let dz = p.z - e.surface.z as f32;

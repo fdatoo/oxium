@@ -2,7 +2,7 @@
 //! cross-region trunk tunnels linking neighbouring region systems.
 use super::style::{DepthBand, SALT_TRUNK_MID_OFFSET, SALT_TRUNK_PROB, SALT_VERTICAL_CONNECTOR};
 use crate::worldgen::hash::mix_unit;
-use crate::worldgen::region::{FineRegion, RegionCoord, Tunnel};
+use crate::worldgen::region::{FineRegion, RegionCoord, Tunnel, TunnelRadius};
 use crate::worldgen::tuning::CAVE_BAND_MIDDLE;
 use crate::worldgen::tuning::CAVE_BAND_SHALLOW;
 
@@ -83,7 +83,7 @@ pub fn build_vertical_connectors(
             let pb = region.cave_systems[j].chambers[b_idx].center;
             let connector = Tunnel {
                 control_points: vec![pa, pb],
-                radius: cfg.vertical_connector_r,
+                radius: TunnelRadius(cfg.vertical_connector_r),
             };
             region.cave_systems[i].vertical_connectors.push(connector);
         }
@@ -190,7 +190,7 @@ pub fn build_trunks(
         );
         regions[ri].1.cave_systems[si].trunk = Some(Tunnel {
             control_points: vec![my_center, mid, other_center],
-            radius: cfg.trunk_r,
+            radius: TunnelRadius(cfg.trunk_r),
         });
     }
 }

@@ -121,9 +121,9 @@ impl FluidPlanner {
                             continue;
                         }
                         let d = glam::Vec3::new(
-                            (wx as f32 - pool.center.x) / pool.radii.x,
-                            (wy as f32 - pool.center.y) / pool.radii.y,
-                            (wz as f32 - pool.center.z) / pool.radii.z,
+                            (wx as f32 - pool.center.x) / pool.radii.0.x,
+                            (wy as f32 - pool.center.y) / pool.radii.0.y,
+                            (wz as f32 - pool.center.z) / pool.radii.0.z,
                         );
                         if d.length_squared() <= 1.0 {
                             let block = match pool.kind {

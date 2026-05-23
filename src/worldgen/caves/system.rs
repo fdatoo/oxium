@@ -9,7 +9,8 @@ use super::style::{
 };
 use crate::worldgen::hash::{mix_range, mix_u32, mix_unit};
 use crate::worldgen::region::{
-    CaveSystem, Chamber, Entrance, EntranceKind, FineRegion, RegionCoord, SystemBoundingBox, Tunnel,
+    CaveSystem, Chamber, ChamberRadius, Entrance, EntranceKind, FineRegion, RegionCoord,
+    SystemBoundingBox, Tunnel, TunnelRadius,
 };
 use crate::worldgen::terrain_ref::TerrainRef;
 use crate::worldgen::tuning::*;
@@ -237,7 +238,7 @@ fn sample_chambers(
         };
 
         let center = Vec3::new(bb.min.x as f32 + sx, cy_final, bb.min.z as f32 + sz);
-        let radii = Vec3::new(rx_final, ry, rz_final);
+        let radii = ChamberRadius(Vec3::new(rx_final, ry, rz_final));
         let mean_r = (rx_final + ry + rz_final) / 3.0;
         let min_spacing = mean_r * POISSON_MIN_SPACING_MULT;
         // Reject if too close to any existing chamber.
@@ -367,7 +368,7 @@ fn connect_chambers_mst(ctx: CaveCtx, chambers: &[Chamber], sp: &StyleParams) ->
             let p2 = pa.lerp(pb, 0.66) + perp1 * off2_u + perp2 * off2_v;
             tunnels.push(Tunnel {
                 control_points: vec![pa, p1, p2, pb],
-                radius,
+                radius: TunnelRadius(radius),
             });
         }
     }
@@ -405,7 +406,7 @@ fn roll_entrances(
             continue;
         }
         let cwx = chamber.center.x as i32;
-        let cwy_top = (chamber.center.y + chamber.radii.y) as i32;
+        let cwy_top = (chamber.center.y + chamber.radii.0.y) as i32;
         let cwz = chamber.center.z as i32;
         let surface_h = terrain.heightmap.h_pre(
             seed,
@@ -487,8 +488,8 @@ fn finalize_aabb(
     let mut min = initial.min;
     let mut max = initial.max;
     for c in chambers {
-        let cmin = (c.center - c.radii - Vec3::splat(1.0)).floor();
-        let cmax = (c.center + c.radii + Vec3::splat(1.0)).ceil();
+        let cmin = (c.center - c.radii.0 - Vec3::splat(1.0)).floor();
+        let cmax = (c.center + c.radii.0 + Vec3::splat(1.0)).ceil();
         min.x = min.x.min(cmin.x as i32);
         min.y = min.y.min(cmin.y as i32);
         min.z = min.z.min(cmin.z as i32);
@@ -498,12 +499,12 @@ fn finalize_aabb(
     }
     for t in tunnels {
         for p in &t.control_points {
-            min.x = min.x.min((p.x - t.radius - 1.0) as i32);
-            min.y = min.y.min((p.y - t.radius - 1.0) as i32);
-            min.z = min.z.min((p.z - t.radius - 1.0) as i32);
-            max.x = max.x.max((p.x + t.radius + 1.0) as i32);
-            max.y = max.y.max((p.y + t.radius + 1.0) as i32);
-            max.z = max.z.max((p.z + t.radius + 1.0) as i32);
+            min.x = min.x.min((p.x - t.radius.0 - 1.0) as i32);
+            min.y = min.y.min((p.y - t.radius.0 - 1.0) as i32);
+            min.z = min.z.min((p.z - t.radius.0 - 1.0) as i32);
+            max.x = max.x.max((p.x + t.radius.0 + 1.0) as i32);
+            max.y = max.y.max((p.y + t.radius.0 + 1.0) as i32);
+            max.z = max.z.max((p.z + t.radius.0 + 1.0) as i32);
         }
     }
     for e in entrances {

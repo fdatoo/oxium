@@ -256,6 +256,28 @@ pub enum RiverSegmentKind {
     Waterfall,
 }
 
+// ── ChamberRadius / TunnelRadius ─────────────────────────────────────
+
+/// Semi-axis lengths `(rx, ry, rz)` of an ellipsoidal cave chamber or pool.
+///
+/// Carried as a newtype so signatures read "this Vec3 is an ellipsoid
+/// half-extent" rather than "some arbitrary Vec3". Access the components
+/// via `.0.x`, `.0.y`, `.0.z`, or pass `.0` wherever a plain `Vec3` is
+/// needed (e.g. arithmetic with `center`).
+///
+/// No clamp invariant — purely a semantic tag.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChamberRadius(pub glam::Vec3);
+
+/// Radius of a tunnel capsule in voxels.
+///
+/// Carried as a newtype so it reads "this f32 is a capsule half-width"
+/// rather than "some bare float". Access the inner value via `.0`.
+///
+/// No clamp invariant — purely a semantic tag.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct TunnelRadius(pub f32);
+
 // ── Cave payload ──────────────────────────────────────────────────────
 
 /// A static fluid pool inside a cave chamber.
@@ -269,8 +291,9 @@ pub enum RiverSegmentKind {
 pub struct CavePool {
     /// World-space center of the originating ellipsoid chamber.
     pub center: glam::Vec3,
-    /// Semi-axis lengths (x, y, z) of the chamber.
-    pub radii: glam::Vec3,
+    /// Semi-axis lengths of the chamber ellipsoid. `.0.x`/`.0.y`/`.0.z`
+    /// are the half-extents; `.0` gives the Vec3 for arithmetic.
+    pub radii: ChamberRadius,
     /// Y of the static fluid surface (air above, fluid below).
     pub surface_y: i32,
     /// Y of the lowest solid voxel below the fluid column.
@@ -331,7 +354,9 @@ impl CaveSystem {
 #[derive(Debug, Clone, Copy)]
 pub struct Chamber {
     pub center: glam::Vec3,
-    pub radii: glam::Vec3,
+    /// Semi-axis lengths of the ellipsoid. `.0.x`/`.0.y`/`.0.z` are the
+    /// half-extents in world voxels; `.0` gives the Vec3 for arithmetic.
+    pub radii: ChamberRadius,
 }
 
 /// A tunnel corridor connecting two chambers.
@@ -343,7 +368,9 @@ pub struct Chamber {
 #[derive(Debug, Clone)]
 pub struct Tunnel {
     pub control_points: Vec<glam::Vec3>,
-    pub radius: f32,
+    /// Capsule half-width in voxels. Any point within this distance of the
+    /// nearest control-point segment is inside the tunnel. Access via `.0`.
+    pub radius: TunnelRadius,
 }
 
 /// A surface entrance feature carved above a chamber to connect it to the
