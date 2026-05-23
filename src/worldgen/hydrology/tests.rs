@@ -81,7 +81,7 @@ fn flow_acc_concentrates_on_lowest_path() {
 #[test]
 fn build_macro_region_is_deterministic() {
     use super::macro_pass::build_macro_region;
-    use crate::worldgen::heightmap::HeightmapNoise;
+    use crate::worldgen::density::HeightmapNoise;
     use crate::worldgen::region::MacroRegionCoord;
     let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
     let hm = HeightmapNoise::new(42, &cfg.climate);
@@ -100,7 +100,7 @@ fn fine_hydro_produces_some_river_cells() {
     // should produce river cells. Some regions are pure ocean and
     // won't have any; we just need one with land + drainage.
     use super::fine_pass::build_fine_hydro;
-    use crate::worldgen::heightmap::HeightmapNoise;
+    use crate::worldgen::density::HeightmapNoise;
     use crate::worldgen::region::{RegionCoord, bitset_get};
     use crate::worldgen::tuning::FINE_CELLS_PER_REGION;
     let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
@@ -141,7 +141,7 @@ fn river_width_monotonic_downstream() {
     // non-decreasing.
     use super::fine_pass::build_fine_hydro;
     use super::grid::{DIR_NONE, DIR_OFFSETS};
-    use crate::worldgen::heightmap::HeightmapNoise;
+    use crate::worldgen::density::HeightmapNoise;
     use crate::worldgen::region::{RegionCoord, bitset_get};
     use crate::worldgen::tuning::FINE_CELLS_PER_REGION;
     let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();

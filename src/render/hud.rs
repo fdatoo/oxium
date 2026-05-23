@@ -213,7 +213,8 @@ impl HudFrame {
             let u1 = u0 + cw / aw;
             let v0 = 0.0_f32;
             let v1 = gh / ah; // = 1.0 since atlas_h == glyph_h
-            self.text.push_quad(x, y, cw_px, gh_px, [u0, v0], [u1, v1], color);
+            self.text
+                .push_quad(x, y, cw_px, gh_px, [u0, v0], [u1, v1], color);
             x += cw_px;
         }
         x

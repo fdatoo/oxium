@@ -8,7 +8,7 @@
 //! See `docs/book/content/part-3-region-build/3.4-hydrology.mdx`.
 
 use super::grid::{DIR_NONE, Grid};
-use crate::worldgen::heightmap::HeightmapNoise;
+use crate::worldgen::density::HeightmapNoise;
 use crate::worldgen::region::{MacroRegion, MacroRegionCoord, bitset_set};
 use crate::worldgen::tuning::*;
 

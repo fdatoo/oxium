@@ -2,7 +2,7 @@
 //! graph, entrance rolling, and the public `build_systems_for_region` entry
 //! point.
 use crate::worldgen::hash::{mix_range, mix_u32, mix_unit};
-use crate::worldgen::heightmap::HeightmapNoise;
+use crate::worldgen::density::HeightmapNoise;
 use crate::worldgen::region::{CaveSystem, Chamber, Entrance, EntranceKind, FineRegion, RegionCoord, Tunnel};
 use crate::worldgen::tuning::*;
 use glam::{IVec3, Vec3};

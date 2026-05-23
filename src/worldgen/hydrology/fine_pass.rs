@@ -22,7 +22,7 @@
 use super::grid::{DIR_NONE, Grid};
 use super::macro_pass::build_macro_region;
 use super::rivers::build_segments_from_fine;
-use crate::worldgen::heightmap::HeightmapNoise;
+use crate::worldgen::density::HeightmapNoise;
 use crate::worldgen::region::{
     FineRegion, MacroCache, MacroRegionCoord, RegionCoord, bitset_get, bitset_set,
 };

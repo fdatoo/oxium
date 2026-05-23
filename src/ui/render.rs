@@ -117,9 +117,13 @@ fn draw_chat_open(
         let gh = crate::render::font::glyph_h() as f32;
         let caret_x = pad + prefix_chars as f32 * cw * text_scale;
         // Draw the caret as a one-cell-wide rectangle the height of a glyph.
-        frame
-            .icons
-            .push_rect(caret_x, input_y, cw * text_scale, gh * text_scale, [255, 255, 255, 180]);
+        frame.icons.push_rect(
+            caret_x,
+            input_y,
+            cw * text_scale,
+            gh * text_scale,
+            [255, 255, 255, 180],
+        );
     }
 }
 
@@ -214,7 +218,8 @@ fn draw_pause(menu: &MenuNav, screen_px: (u32, u32), frame: &mut HudFrame) {
 
 fn draw_top_menu(hovered: usize, l: &PauseLayout, frame: &mut HudFrame) {
     let title = "PAUSED";
-    let title_w = title.chars().count() as f32 * crate::render::font::cell_w() as f32 * l.title_scale;
+    let title_w =
+        title.chars().count() as f32 * crate::render::font::cell_w() as f32 * l.title_scale;
     let title_x = l.panel_x + (l.panel_w - title_w) * 0.5;
     frame.push_text(
         title_x,
@@ -242,7 +247,8 @@ fn draw_top_menu(hovered: usize, l: &PauseLayout, frame: &mut HudFrame) {
 
 fn draw_settings(l: &PauseLayout, frame: &mut HudFrame) {
     let title = "SETTINGS";
-    let title_w = title.chars().count() as f32 * crate::render::font::cell_w() as f32 * l.title_scale;
+    let title_w =
+        title.chars().count() as f32 * crate::render::font::cell_w() as f32 * l.title_scale;
     let title_x = l.panel_x + (l.panel_w - title_w) * 0.5;
     frame.push_text(
         title_x,

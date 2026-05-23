@@ -248,7 +248,11 @@ mod tests {
             (w * h * 4) as usize,
             "atlas byte count must match w × h × 4"
         );
-        assert_eq!(w, SLOT_COUNT * cell_w(), "atlas_w must equal SLOT_COUNT × cell_w");
+        assert_eq!(
+            w,
+            SLOT_COUNT * cell_w(),
+            "atlas_w must equal SLOT_COUNT × cell_w"
+        );
         assert_eq!(h, glyph_h(), "atlas_h must equal glyph_h");
     }
 

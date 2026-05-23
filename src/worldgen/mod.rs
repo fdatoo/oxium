@@ -103,30 +103,15 @@ pub use columns::ColumnData;
 use biome::TreeKind;
 use trees::{Tree, tree_hash, try_set_air};
 
-// Compatibility re-exports: external callers that import
-// `oxium::worldgen::heightmap::HeightmapNoise` (e.g. integration
-// tests) or `oxium::worldgen::density_graph::*` still compile without
-// change. Both old flat modules are aliased to their new homes inside
-// the `density/` submodule.
-//
-// Note: `heightmap` used to contain both the noise structs
-// (HeightmapNoise, DensityNoise) and standalone math helpers (slide,
-// offset_to_world_y, etc.). After the split those live in
-// `density::heightmap` and `density::math` respectively. The wrapper
-// module below re-exports both so the old flat path still resolves.
+// Compatibility shim: `oxium::worldgen::heightmap::HeightmapNoise` is
+// used by `tests/worldgen_fingerprint.rs`. Keep this alias until
+// the fingerprint test is updated to use `worldgen::density::HeightmapNoise`.
+// Internal callers (hydrology, caves) now use `crate::worldgen::density::*` directly.
 pub mod heightmap {
     pub use crate::worldgen::density::heightmap::{DensityNoise, HeightmapNoise};
     pub use crate::worldgen::density::math::{
         offset_to_world_y, peaks_and_valleys, plate_roughness_bias, signed_continentalness, slide,
         smooth_plate_contribution,
-    };
-}
-pub mod density_graph {
-    pub use crate::worldgen::density::cell_evaluator::{
-        CELL_COUNT, CELL_SIZE, CORNER_COUNT, CellEvaluator,
-    };
-    pub use crate::worldgen::density::splines::{
-        ClimateChannel, ColumnClimate, DensityFn, MarkerKind, build_default_tree,
     };
 }
 
@@ -845,11 +830,11 @@ impl Generator {
         let cave_systems = regions.cave_systems_intersecting(probe_min, probe_max);
 
         // --- Density graph: exact evaluation (no trilerp) ---
-        let graph = density_graph::build_default_tree(&cfg.climate, &cfg.density);
+        let graph = density::build_default_tree(&cfg.climate, &cfg.density);
         let (cc, sc, rc, _) = self
             .heightmap
             .climate(self.seed, wx as f32, wz as f32, &cfg.climate);
-        let climate = density_graph::ColumnClimate {
+        let climate = density::ColumnClimate {
             continentalness: cc,
             terrain_shape: sc,
             ridges_pv: rc,
@@ -1140,8 +1125,8 @@ impl Generator {
         // density is the trilerp of the 8 surrounding corners. ~730
         // expensive density evaluations per chunk instead of 32768
         // (≈45× speedup on the per-voxel hot path).
-        let graph = density_graph::build_default_tree(&cfg.climate, &cfg.density);
-        let evaluator = density_graph::CellEvaluator::new(
+        let graph = density::build_default_tree(&cfg.climate, &cfg.density);
+        let evaluator = density::CellEvaluator::new(
             &graph,
             &self.density,
             &cfg.density,
@@ -1150,7 +1135,7 @@ impl Generator {
                 let (c, s, pv, _) =
                     self.heightmap
                         .climate(self.seed, wx as f32, wz as f32, &cfg.climate);
-                density_graph::ColumnClimate {
+                density::ColumnClimate {
                     continentalness: c,
                     terrain_shape: s,
                     ridges_pv: pv,
@@ -1227,7 +1212,7 @@ impl Generator {
                     let (c, s, pv, _) =
                         self.heightmap
                             .climate(self.seed, wx as f32, wz as f32, &cfg.climate);
-                    density_graph::ColumnClimate {
+                    density::ColumnClimate {
                         continentalness: c,
                         terrain_shape: s,
                         ridges_pv: pv,
