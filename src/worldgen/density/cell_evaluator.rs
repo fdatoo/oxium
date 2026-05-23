@@ -23,6 +23,112 @@ use super::splines::{ColumnClimate, DensityFn};
 use crate::voxel::coords::CHUNK_DIM_U;
 use crate::worldgen::config::DensityConfig;
 
+// ── Shared corner-lattice convention ─────────────────────────────────
+
+/// Canonical Y→X→Z trilinear interpolation formula for corner-lattice evaluators.
+///
+/// This is the single source of truth for the lerp order. Both [`CellEvaluator`]
+/// and [`crate::worldgen::caves::noise_carvers::CarverEvaluator`] reach it via
+/// [`CornerLatticeEvaluator::trilerp_at`]'s default implementation, so neither
+/// can silently diverge.
+///
+/// **Why Y→X→Z?** Matches Minecraft's `NoiseInterpolator`: interpolating the
+/// high-variation Y axis first minimises visible iso-surface stepping within a
+/// cell when height gradients are steep.
+///
+/// Corners are named `c{x}{y}{z}` where each digit is 0 (low corner) or 1 (high
+/// corner). `(tx, ty, tz)` are fractional positions within the cell, each in `[0, 1]`.
+// 11 args is the natural decomposition for a trilerp: 8 named corners + 3 fractions.
+// Wrapping them in a struct would obscure the correspondence to the formula below.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub(crate) fn trilerp_y_x_z(
+    c000: f32,
+    c100: f32,
+    c010: f32,
+    c110: f32,
+    c001: f32,
+    c101: f32,
+    c011: f32,
+    c111: f32,
+    tx: f32,
+    ty: f32,
+    tz: f32,
+) -> f32 {
+    // Step 1: interpolate along Y (the highest-variation axis).
+    let xz00 = c000 + (c010 - c000) * ty;
+    let xz10 = c100 + (c110 - c100) * ty;
+    let xz01 = c001 + (c011 - c001) * ty;
+    let xz11 = c101 + (c111 - c101) * ty;
+    // Step 2: interpolate along X.
+    let z0 = xz00 + (xz10 - xz00) * tx;
+    let z1 = xz01 + (xz11 - xz01) * tx;
+    // Step 3: interpolate along Z.
+    z0 + (z1 - z0) * tz
+}
+
+/// Trait for per-chunk corner-lattice evaluators that use the canonical
+/// Y→X→Z trilinear interpolation order established by [`trilerp_y_x_z`].
+///
+/// # Contract
+///
+/// Implementors expose their pre-sampled corner storage through [`corner`] and
+/// inherit the [`trilerp_at`] default method, which samples 8 surrounding
+/// corners and delegates to [`trilerp_y_x_z`]. Both [`CellEvaluator`] and
+/// [`crate::worldgen::caves::noise_carvers::CarverEvaluator`] implement this
+/// trait, guaranteeing they use identical lerp ordering. The `get` closure
+/// extracts one `f32` channel from each corner, which handles both the
+/// single-channel (`f32`) and multi-channel (`CarverCorner`) corner types.
+///
+/// # Hot-path note
+///
+/// `trilerp_at` is called once per voxel in the chunk-fill inner loop. It is
+/// `#[inline]` and the trait must be used via **generics** (`<E: CornerLatticeEvaluator>`),
+/// never `dyn` — the vtable indirection costs ~10% per-voxel throughput.
+pub(crate) trait CornerLatticeEvaluator {
+    /// The per-lattice-point corner type. `f32` for single-channel evaluators;
+    /// a multi-field struct (e.g. `CarverCorner`) for multi-channel ones.
+    type Corner;
+
+    /// Return a reference to the corner at lattice position `(cx, cy, cz)`.
+    fn corner(&self, cx: usize, cy: usize, cz: usize) -> &Self::Corner;
+
+    /// Sample the 8 surrounding corners and Y→X→Z trilerp the channel selected
+    /// by `get`. `(cx, cy, cz)` is the low corner of the cell; `(tx, ty, tz)` are
+    /// fractional positions in `[0, 1]`.
+    ///
+    /// The default implementation delegates to [`trilerp_y_x_z`] — do not override.
+    // 8 args (including &self): &self + 3 cell coords + 3 fractions + get closure.
+    // This is the irreducible decomposition of a trilerp; a wrapper struct would
+    // obscure the correspondence to the math.
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    fn trilerp_at<F: Fn(&Self::Corner) -> f32>(
+        &self,
+        cx: usize,
+        cy: usize,
+        cz: usize,
+        tx: f32,
+        ty: f32,
+        tz: f32,
+        get: F,
+    ) -> f32 {
+        trilerp_y_x_z(
+            get(self.corner(cx, cy, cz)),
+            get(self.corner(cx + 1, cy, cz)),
+            get(self.corner(cx, cy + 1, cz)),
+            get(self.corner(cx + 1, cy + 1, cz)),
+            get(self.corner(cx, cy, cz + 1)),
+            get(self.corner(cx + 1, cy, cz + 1)),
+            get(self.corner(cx, cy + 1, cz + 1)),
+            get(self.corner(cx + 1, cy + 1, cz + 1)),
+            tx,
+            ty,
+            tz,
+        )
+    }
+}
+
 /// Edge length of a cell (in blocks). Each chunk dimension (32)
 /// divides into 8 cells.
 pub const CELL_SIZE: i32 = 4;
@@ -123,28 +229,20 @@ impl CellEvaluator {
         let tx = (lx - cx as i32 * CELL_SIZE) as f32 / CELL_SIZE as f32;
         let ty = (ly - cy as i32 * CELL_SIZE) as f32 / CELL_SIZE as f32;
         let tz = (lz - cz as i32 * CELL_SIZE) as f32 / CELL_SIZE as f32;
-        // 8 corners of the cell.
-        let c000 = self.sample_corner(cx, cy, cz);
-        let c100 = self.sample_corner(cx + 1, cy, cz);
-        let c010 = self.sample_corner(cx, cy + 1, cz);
-        let c110 = self.sample_corner(cx + 1, cy + 1, cz);
-        let c001 = self.sample_corner(cx, cy, cz + 1);
-        let c101 = self.sample_corner(cx + 1, cy, cz + 1);
-        let c011 = self.sample_corner(cx, cy + 1, cz + 1);
-        let c111 = self.sample_corner(cx + 1, cy + 1, cz + 1);
-        // Hierarchical Y → X → Z lerp (matches MC's NoiseInterpolator).
-        let xz00 = c000 + (c010 - c000) * ty;
-        let xz10 = c100 + (c110 - c100) * ty;
-        let xz01 = c001 + (c011 - c001) * ty;
-        let xz11 = c101 + (c111 - c101) * ty;
-        let z0 = xz00 + (xz10 - xz00) * tx;
-        let z1 = xz01 + (xz11 - xz01) * tx;
-        z0 + (z1 - z0) * tz
+        // Delegate to the canonical Y→X→Z trilerp via the CornerLatticeEvaluator
+        // impl below. The `|&v| v` closure dereferences the `&f32` corner.
+        self.trilerp_at(cx, cy, cz, tx, ty, tz, |&v| v)
     }
+}
 
+impl CornerLatticeEvaluator for CellEvaluator {
+    type Corner = f32;
+
+    /// Return the pre-sampled density value at lattice corner `(cx, cy, cz)`.
+    /// Storage is linearised as `cx + cy*CORNER_COUNT + cz*CORNER_COUNT²`.
     #[inline]
-    fn sample_corner(&self, cx: usize, cy: usize, cz: usize) -> f32 {
-        self.corners[cx + cy * CORNER_COUNT + cz * CORNER_COUNT * CORNER_COUNT]
+    fn corner(&self, cx: usize, cy: usize, cz: usize) -> &f32 {
+        &self.corners[cx + cy * CORNER_COUNT + cz * CORNER_COUNT * CORNER_COUNT]
     }
 }
 

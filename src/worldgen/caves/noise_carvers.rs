@@ -4,6 +4,7 @@
 //! systems. They use a `CarverEvaluator` corner-lattice trilerp (9³ corners,
 //! 4-block spacing) to avoid per-voxel FBM cost.
 use crate::worldgen::config::CaveConfig;
+use crate::worldgen::density::cell_evaluator::CornerLatticeEvaluator;
 use crate::worldgen::noise_channel::build_channel;
 use crate::worldgen::tuning::*;
 use glam::IVec3;
@@ -224,8 +225,13 @@ const CARVER_CORNER_CUBE: usize = CARVER_CORNER_COUNT * CARVER_CORNER_COUNT * CA
 /// AoS means each voxel touches 8 contiguous corner structs instead
 /// of striding separate `Vec<f32>` arenas — better cache behavior
 /// in the per-voxel inner loop.
+///
+/// `pub(crate)` because it appears as the `Corner` associated type of the
+/// [`CornerLatticeEvaluator`] impl for [`CarverEvaluator`], and the trait
+/// is `pub(crate)` — the compiler requires the associated type to be at
+/// least as visible as the trait.
 #[derive(Default, Clone, Copy)]
-struct CarverCorner {
+pub(crate) struct CarverCorner {
     cheese: f32,
     cave_layer: f32,
     pillar: f32,
@@ -332,26 +338,11 @@ impl CarverEvaluator {
     }
 
     /// Trilinear interp of one channel — `get` picks the channel from a
-    /// `CarverCorner`. The Y→X→Z lerp order matches
-    /// `density_graph::CellEvaluator::evaluate`.
+    /// `CarverCorner`. Delegates to [`CornerLatticeEvaluator::trilerp_at`]
+    /// so this evaluator uses the same Y→X→Z lerp order as [`CellEvaluator`].
     #[inline]
     fn trilerp<F: Fn(&CarverCorner) -> f32>(&self, c: &LerpCoords, get: F) -> f32 {
-        let i = |x: usize, y: usize, z: usize| &self.corners[corner_index(x, y, z)];
-        let c000 = get(i(c.cx, c.cy, c.cz));
-        let c100 = get(i(c.cx + 1, c.cy, c.cz));
-        let c010 = get(i(c.cx, c.cy + 1, c.cz));
-        let c110 = get(i(c.cx + 1, c.cy + 1, c.cz));
-        let c001 = get(i(c.cx, c.cy, c.cz + 1));
-        let c101 = get(i(c.cx + 1, c.cy, c.cz + 1));
-        let c011 = get(i(c.cx, c.cy + 1, c.cz + 1));
-        let c111 = get(i(c.cx + 1, c.cy + 1, c.cz + 1));
-        let xz00 = c000 + (c010 - c000) * c.ty;
-        let xz10 = c100 + (c110 - c100) * c.ty;
-        let xz01 = c001 + (c011 - c001) * c.ty;
-        let xz11 = c101 + (c111 - c101) * c.ty;
-        let z0 = xz00 + (xz10 - xz00) * c.tx;
-        let z1 = xz01 + (xz11 - xz01) * c.tx;
-        z0 + (z1 - z0) * c.tz
+        self.trilerp_at(c.cx, c.cy, c.cz, c.tx, c.ty, c.tz, get)
     }
 
     /// Same shape as `cheese_contribution`: `term1 + supp + layerized`.
@@ -404,6 +395,19 @@ impl CarverEvaluator {
         let freq_depth = cfg.tera_thresh_base + depth / cfg.tera_thresh_depth;
         let n1 = n1_raw + freq_reduction;
         ((n0_raw * n0_raw + n1 * n1).sqrt() - freq_depth) * TERA_OUTPUT_SCALE
+    }
+}
+
+impl CornerLatticeEvaluator for CarverEvaluator {
+    type Corner = CarverCorner;
+
+    /// Return the pre-sampled multi-channel corner at lattice position
+    /// `(cx, cy, cz)`. Storage uses [`corner_index`] (same X/Y/Z order as
+    /// the build loop) so lerp coordinates computed in [`lerp_coords`] match
+    /// exactly.
+    #[inline]
+    fn corner(&self, cx: usize, cy: usize, cz: usize) -> &CarverCorner {
+        &self.corners[corner_index(cx, cy, cz)]
     }
 }
 
