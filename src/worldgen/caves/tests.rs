@@ -1,4 +1,10 @@
 use super::*;
+use crate::worldgen::heightmap::HeightmapNoise;
+use crate::worldgen::region::{CaveSystem, FineRegion, RegionCoord};
+use crate::worldgen::tuning::{CAVE_BAND_MIDDLE, CAVE_BAND_SHALLOW, CAVE_SYSTEMS_PER_REGION, CARVER_CELL_SIZE};
+use super::noise_carvers::CARVER_CELL_COUNT;
+use glam::IVec3;
+use noise::NoiseFn;
 
 #[test]
 fn smin_extremes() {
