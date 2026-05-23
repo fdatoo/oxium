@@ -284,16 +284,16 @@ impl BlockRegistry {
         };
         infos[Lava as usize] = BlockInfo {
             // Lava is non-solid (entities sink/burn) and non-opaque
-            // (the glow leaks through). Emits maximum block-light so
-            // pools and aquifer rooms light themselves.
+            // (the glow leaks through). It emits warm block-light, not
+            // neutral white light, so deep aquifers do not masquerade as
+            // skylit caves.
             solid: false,
             opaque: false,
-            emission: [15, 15, 15],
+            emission: [15, 8, 2],
             // Neutral white tint — the lava_still.png is already
-            // pre-coloured fiery orange. Alpha < 1 keeps it in the
-            // translucent pipeline like water (so the shader can pick
-            // up the emission/shimmer path).
-            color: [1.0, 0.95, 0.85, 0.95],
+            // pre-coloured fiery orange. Alpha 1 keeps lava out of the
+            // water-shimmer pass, which is water-specific.
+            color: [1.0, 1.0, 1.0, 1.0],
             top_color: None,
             tile_side: Some(Tile::LavaStill),
             tile_top: None,
@@ -367,6 +367,17 @@ mod tests {
         assert!(!w.opaque);
         assert!(!w.solid);
         assert!(w.color[3] < 1.0, "water alpha should be < 1");
+    }
+
+    #[test]
+    fn lava_emits_warm_light_and_is_not_water_shaded() {
+        let r = BlockRegistry::new();
+        let l = r.info(Block::Lava);
+        assert!(!l.opaque);
+        assert!(!l.solid);
+        assert!(l.emission[0] > l.emission[1]);
+        assert!(l.emission[1] > l.emission[2]);
+        assert_eq!(l.color[3], 1.0);
     }
 
     #[test]

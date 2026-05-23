@@ -12,12 +12,16 @@
 //! own a chunk during a job without paying any borrow cost on the world.
 
 use crate::voxel::block::Block;
-use crate::voxel::coords::LocalPos;
+use crate::voxel::block::BlockRegistry;
+use crate::voxel::coords::{ChunkCoord, LocalPos};
 use crate::voxel::packed::Packed4Bit;
 use serde::{Deserialize, Serialize};
 
 /// Number of voxels in one chunk: 32 × 32 × 32 = 32 768.
 pub const CHUNK_VOL: usize = 32 * 32 * 32;
+pub const CHUNK_AREA: usize = 32 * 32;
+
+pub const LIGHT_INPUT_UNKNOWN_Y: i16 = i16::MIN;
 
 /// Pack `(R, G, B)` channels (each 0..=15) into the u16 layout used
 /// by `DenseChunk::block_rgb`. Out-of-range inputs are masked to 4 bits.
@@ -45,6 +49,105 @@ pub fn unpack_rgb(cell: u16) -> (u8, u8, u8) {
 pub fn rgb_brightness(cell: u16) -> u8 {
     let (r, g, b) = unpack_rgb(cell);
     r.max(g).max(b)
+}
+
+/// Worldgen/block-derived lighting metadata for one chunk.
+///
+/// This is the contract between chunk generation and lighting. The light
+/// worker still computes per-voxel light, but it no longer has to guess
+/// whether a missing +Y chunk means "open sky" or "unknown vertical context".
+#[derive(Debug, Clone)]
+pub struct ChunkLightInputs {
+    /// First opaque voxel encountered scanning the local column top-down,
+    /// as world Y. [`LIGHT_INPUT_UNKNOWN_Y`] means no opaque voxel inside
+    /// this chunk column.
+    pub first_opaque_y: Box<[i16; CHUNK_AREA]>,
+    /// Highest generated terrain/surface Y known for this world column.
+    /// Missing for disk-only chunks when no generator metadata was supplied.
+    pub surface_y: Box<[i16; CHUNK_AREA]>,
+    /// Sky level entering this chunk's top face when no +Y lit neighbor is
+    /// available. `0` means the top context is unknown or blocked.
+    pub top_sky: Box<[u8; CHUNK_AREA]>,
+    /// Number of emissive voxels in this chunk, useful for diagnostics and
+    /// future queue seeding.
+    pub emissive_count: u16,
+}
+
+impl Default for ChunkLightInputs {
+    fn default() -> Self {
+        Self {
+            first_opaque_y: Box::new([LIGHT_INPUT_UNKNOWN_Y; CHUNK_AREA]),
+            surface_y: Box::new([LIGHT_INPUT_UNKNOWN_Y; CHUNK_AREA]),
+            top_sky: Box::new([0; CHUNK_AREA]),
+            emissive_count: 0,
+        }
+    }
+}
+
+impl ChunkLightInputs {
+    pub fn from_dense(dense: &DenseChunk, coord: ChunkCoord, registry: &BlockRegistry) -> Self {
+        Self::from_dense_with_surface(dense, coord, registry, |_, _| None)
+    }
+
+    pub fn from_dense_with_surface<F>(
+        dense: &DenseChunk,
+        coord: ChunkCoord,
+        registry: &BlockRegistry,
+        mut surface_y: F,
+    ) -> Self
+    where
+        F: FnMut(u32, u32) -> Option<i32>,
+    {
+        let mut out = Self::default();
+        let origin_y = coord.origin().0.y;
+        let top_y = origin_y + 32;
+        let mut emissive_count: u32 = 0;
+
+        for z in 0..32u32 {
+            for x in 0..32u32 {
+                let column = (z * 32 + x) as usize;
+                if let Some(surface) = surface_y(x, z) {
+                    out.surface_y[column] = surface.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                    if surface < top_y {
+                        out.top_sky[column] = 15;
+                    }
+                }
+
+                for y in (0..32u32).rev() {
+                    let idx = crate::voxel::coords::LocalPos(glam::UVec3::new(x, y, z)).to_index();
+                    let info = registry.info(dense.blocks[idx]);
+                    if info.emission != [0, 0, 0] {
+                        emissive_count += 1;
+                    }
+                    if info.opaque && out.first_opaque_y[column] == LIGHT_INPUT_UNKNOWN_Y {
+                        out.first_opaque_y[column] =
+                            (origin_y + y as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                    }
+                }
+            }
+        }
+
+        out.emissive_count = emissive_count.min(u16::MAX as u32) as u16;
+        out
+    }
+
+    pub fn rebuild_preserving_surface(
+        &self,
+        dense: &DenseChunk,
+        coord: ChunkCoord,
+        registry: &BlockRegistry,
+    ) -> Self {
+        Self::from_dense_with_surface(dense, coord, registry, |x, z| {
+            let idx = (z * 32 + x) as usize;
+            let y = self.surface_y[idx];
+            (y != LIGHT_INPUT_UNKNOWN_Y).then_some(y as i32)
+        })
+    }
+
+    #[inline]
+    pub fn top_sky_at(&self, x: u32, z: u32) -> u8 {
+        self.top_sky[(z * 32 + x) as usize] & 0x0F
+    }
 }
 
 /// Build the 33³ Rgba8Unorm blob for a chunk's GPU light volume. Each
@@ -128,12 +231,16 @@ fn sample_for_blob(
             let nx = x as isize + dx;
             let ny = y as isize + dy;
             let nz = z as isize + dz;
-            // Bounds: 0..=32 inclusive. Out-of-bounds → skip.
-            if nx < 0 || nx > 32 || ny < 0 || ny > 32 || nz < 0 || nz > 32 {
+            // Bounds: -1..=32 inclusive. Index -1 reads the negative
+            // face neighbour when available so chunk-edge negative faces
+            // get the same air-side halo as +X/+Y/+Z faces.
+            if nx < -1 || nx > 32 || ny < -1 || ny > 32 || nz < -1 || nz > 32 {
                 continue;
             }
-            let (ns, nlx, nly, nlz) =
-                resolve_cell(dense, neighbors, nx as usize, ny as usize, nz as usize);
+            let Some((ns, nlx, nly, nlz)) = resolve_cell_signed(dense, neighbors, nx, ny, nz)
+            else {
+                continue;
+            };
             let nidx = crate::voxel::coords::LocalPos(glam::UVec3::new(
                 nlx as u32, nly as u32, nlz as u32,
             ))
@@ -147,6 +254,41 @@ fn sample_for_blob(
         }
     }
     (r, g, b, a)
+}
+
+fn resolve_cell_signed<'a>(
+    dense: &'a DenseChunk,
+    neighbors: &'a Neighbors,
+    x: isize,
+    y: isize,
+    z: isize,
+) -> Option<(&'a DenseChunk, usize, usize, usize)> {
+    use crate::mesher::Face;
+    let negative_axes = (x < 0) as u8 + (y < 0) as u8 + (z < 0) as u8;
+    if negative_axes > 1 {
+        return None;
+    }
+    if x < 0 {
+        return Some(match neighbors.chunks[Face::NegX as usize] {
+            Some(n) => (n, 31, y.clamp(0, 31) as usize, z.clamp(0, 31) as usize),
+            None => (dense, 0, y.clamp(0, 31) as usize, z.clamp(0, 31) as usize),
+        });
+    }
+    if y < 0 {
+        return Some(match neighbors.chunks[Face::NegY as usize] {
+            Some(n) => (n, x.clamp(0, 31) as usize, 31, z.clamp(0, 31) as usize),
+            None => (dense, x.clamp(0, 31) as usize, 0, z.clamp(0, 31) as usize),
+        });
+    }
+    if z < 0 {
+        return Some(match neighbors.chunks[Face::NegZ as usize] {
+            Some(n) => (n, x.clamp(0, 31) as usize, y.clamp(0, 31) as usize, 31),
+            None => (dense, x.clamp(0, 31) as usize, y.clamp(0, 31) as usize, 0),
+        });
+    }
+    Some(resolve_cell(
+        dense, neighbors, x as usize, y as usize, z as usize,
+    ))
 }
 
 /// Resolve a 0..=32 query coord into the appropriate `DenseChunk` and
@@ -392,7 +534,7 @@ impl PalettedChunk {
     }
 }
 
-/// Lifecycle marker for a chunk slot. The state machine is the engine's
+/// Lifecycle marker for a chunk slot. The state machine is the world's
 /// rule for *what can happen next* to a chunk:
 ///
 /// `Empty` → `Generating` → `Generated` → `Meshing` → `Ready`
@@ -414,8 +556,52 @@ pub enum ChunkState {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ChunkDirty {
     pub mesh: bool,
-    #[cfg(feature = "legacy-lighting")]
     pub light: bool,
+}
+
+/// Six-bit mask keyed by [`crate::mesher::Face`] discriminants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FaceMask(u8);
+
+impl FaceMask {
+    pub const NONE: Self = Self(0);
+
+    #[inline]
+    pub fn set(&mut self, face: crate::mesher::Face) {
+        self.0 |= 1 << face as u8;
+    }
+
+    #[inline]
+    pub fn contains(self, face: crate::mesher::Face) -> bool {
+        self.0 & (1 << face as u8) != 0
+    }
+}
+
+impl From<[bool; 6]> for FaceMask {
+    fn from(value: [bool; 6]) -> Self {
+        let mut mask = Self::NONE;
+        for (i, changed) in value.iter().enumerate() {
+            if *changed {
+                mask.0 |= 1 << i;
+            }
+        }
+        mask
+    }
+}
+
+/// Chunk-owned lighting lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LightState {
+    #[default]
+    Unlit,
+    Queued,
+    Lighting {
+        version: u64,
+    },
+    Lit {
+        version: u64,
+    },
+    NeedsBorderReconcile,
 }
 
 /// Read-only references to (up to) the six neighbouring chunks in
@@ -450,21 +636,26 @@ pub struct ChunkMeta {
     /// mesh that completed first (the visible "block flickers back
     /// for a moment" artefact).
     pub mesh_version: u64,
+    /// Monotonic version of block data relevant to lighting. Relight
+    /// jobs snapshot this at dispatch and stale results are dropped.
+    pub light_version: u64,
+    pub light_state: LightState,
+    pub unresolved_borders: FaceMask,
     /// Per-column world-Y of the lowest sky-source cell. Built by
     /// `crate::lighting::ChunkSkyLightSources::build_from_dense` at
     /// `World::insert` time and rebuilt whenever the chunk's blocks
-    /// change. Consumed by the graph-engine sky channel (PR3).
+    /// change. Kept as cheap metadata for future sky-source optimizations.
     ///
     /// Defaults to a heightmap full of `NO_SOURCE_FLOOR`, which is
     /// the safe value for a freshly-defaulted `ChunkMeta` — no
     /// floor means "treat every cell as a potential source"
     /// (matches today's BFS column-drop default of `light = 15`).
     pub sky_sources: crate::lighting::ChunkSkyLightSources,
-    /// True when the engine has written to this chunk's `sky_light` or
-    /// `block_rgb` since the last GPU upload of the light volume. The
-    /// `upload_dirty_light_volumes` pass in `mesh_upload` scans this
-    /// flag each frame and re-uploads + clears for any chunk that's
-    /// flagged.
+    /// Generator/block manifest consumed by the relight worker.
+    pub light_inputs: ChunkLightInputs,
+    /// True when a relight commit wrote new voxel light. The current
+    /// commit path uploads the returned light blob immediately; this flag
+    /// remains useful for diagnostics and future deferred upload paths.
     pub light_gpu_dirty: bool,
 }
 
@@ -585,6 +776,28 @@ mod tests {
         assert_eq!(blob[1], 0);
         assert_eq!(blob[2], 0);
         assert!(blob[3] >= 240, "A channel scaled wrong: {}", blob[3]);
+    }
+
+    #[test]
+    fn light_volume_halo_reads_negative_face_neighbor() {
+        let mut d = DenseChunk::empty();
+        let edge = LocalPos(UVec3::new(0, 10, 10));
+        d.set(edge, Block::Stone);
+
+        let mut neg_x = DenseChunk::empty();
+        let neighbor_air = LocalPos(UVec3::new(31, 10, 10));
+        neg_x.sky_light[neighbor_air.to_index()] = 15;
+
+        let n = Neighbors {
+            chunks: [None, Some(&neg_x), None, None, None, None],
+        };
+        let blob = build_light_volume_blob(&d, &n);
+        let blob_idx = (10 * 33 * 33 + 10 * 33) * 4;
+        assert!(
+            blob[blob_idx + 3] >= 240,
+            "negative boundary halo did not import sky light: {}",
+            blob[blob_idx + 3]
+        );
     }
 
     #[test]

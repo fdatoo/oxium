@@ -5,8 +5,11 @@
 //! touched by worker threads. Keeping it in a plain `HashMap` here lets us
 //! pass it to systems by mutable reference without fighting `hecs`.
 
+use crate::mesher::Face;
 use crate::voxel::block::{Block, BlockRegistry};
-use crate::voxel::chunk::{ChunkDirty, ChunkMeta, ChunkState, PalettedChunk};
+use crate::voxel::chunk::{
+    ChunkDirty, ChunkLightInputs, ChunkMeta, ChunkState, FaceMask, LightState, PalettedChunk,
+};
 use crate::voxel::coords::{BlockPos, CHUNK_DIM_U, ChunkCoord};
 use glam::IVec3;
 use std::collections::HashMap;
@@ -40,11 +43,6 @@ pub struct World {
     pub chunks: HashMap<ChunkCoord, ChunkSlot>,
     pub registry: BlockRegistry,
     pub seed: u64,
-    /// Per-voxel graph light propagator. PR2 ships this as an idle
-    /// skeleton; nothing calls `light_engine.tick` yet. PR3 wires
-    /// `set_block` and chunk-load to enqueue work here, and the
-    /// frame loop ticks the engine each frame.
-    pub light_engine: crate::lighting::LightEngine,
 }
 
 impl World {
@@ -55,7 +53,6 @@ impl World {
             chunks: HashMap::new(),
             registry: BlockRegistry::new(),
             seed,
-            light_engine: crate::lighting::LightEngine::default(),
         }
     }
 
@@ -78,6 +75,17 @@ impl World {
     /// `Generated` + `mesh-dirty` so the next pass through the schedule
     /// will spawn a mesh job.
     pub fn insert(&mut self, c: ChunkCoord, data: PalettedChunk) {
+        let dense = data.decompress();
+        let light_inputs = ChunkLightInputs::from_dense(&dense, c, &self.registry);
+        self.insert_with_light_inputs(c, data, light_inputs);
+    }
+
+    pub fn insert_with_light_inputs(
+        &mut self,
+        c: ChunkCoord,
+        data: PalettedChunk,
+        light_inputs: ChunkLightInputs,
+    ) {
         // Build the sky-source heightmap once at install time. Decompressing
         // the chunk is ~50 µs (palette + 4-bit unpack) and the scan is
         // 32×32×32 opacity lookups (~50 µs more) — small enough to do
@@ -90,9 +98,11 @@ impl World {
             state: ChunkState::Generated,
             dirty: ChunkDirty {
                 mesh: true,
-                ..Default::default()
+                light: true,
             },
+            light_state: LightState::Unlit,
             sky_sources,
+            light_inputs,
             ..Default::default()
         };
         self.chunks.insert(
@@ -104,187 +114,48 @@ impl World {
         );
     }
 
-    /// Engine entry point for "this block just changed". Called from
-    /// `set_block`. Records the (old, new) tuple in the engine's
-    /// pending-changes side-table and queues the position on every
-    /// channel; the next `light_engine_tick` consumes it.
-    pub fn on_block_changed(
-        &mut self,
-        pos: crate::voxel::coords::BlockPos,
-        old_block: crate::voxel::block::Block,
-        new_block: crate::voxel::block::Block,
-    ) {
-        self.light_engine
-            .enqueue_block_change(pos, old_block, new_block);
-    }
-
-    /// Engine entry point for "a chunk just installed". Called from
-    /// `mesh_upload::drain_jobs` (`JobResult::Generated`,
-    /// `JobResult::LoadedFromDisk`) and
-    /// `mesh_upload::drain_persistence` (`PersistResult::Loaded`).
-    /// Enqueues every sky-source cell and
-    /// every emissive block in the chunk as increase ops, plus each
-    /// neighbour's boundary cells (so the engine can spread our
-    /// freshly-loaded chunk's light across the seam without a
-    /// special seed pass).
-    pub fn on_chunk_loaded(&mut self, coord: crate::voxel::coords::ChunkCoord) {
-        use crate::voxel::block::Block;
-        use crate::voxel::coords::{BlockPos, CHUNK_DIM, CHUNK_DIM_U, LocalPos};
-        use glam::{IVec3, UVec3};
-
-        // Destructure to split the borrow: chunks + registry are read,
-        // light_engine is written, and Rust can't prove they don't alias
-        // through &mut self if we use method calls.
-        let Self {
-            chunks,
-            registry,
-            light_engine,
-            ..
-        } = self;
-
-        // Snapshot the chunk's blocks + heightmap for enqueuing.
-        let Some(ChunkSlot::Stored { data, meta }) = chunks.get(&coord) else {
+    pub fn mark_chunk_unlit(&mut self, coord: ChunkCoord, _reason: &'static str) {
+        let Some(ChunkSlot::Stored { meta, .. }) = self.chunks.get_mut(&coord) else {
             return;
         };
-        let dense = data.decompress();
-        let sky_sources = meta.sky_sources.clone();
-        let chunk_bottom_y = coord.0.y * CHUNK_DIM;
-
-        // Enqueue every sky-source cell at level 15.
-        for lz in 0..CHUNK_DIM_U {
-            for lx in 0..CHUNK_DIM_U {
-                let lsy = sky_sources.lowest_source_y(lx, lz);
-                let start_ly: i32 = if lsy == crate::lighting::NO_SOURCE_FLOOR {
-                    0
-                } else {
-                    (lsy - chunk_bottom_y).max(0)
-                };
-                for ly in (start_ly as u32)..CHUNK_DIM_U {
-                    let pos = BlockPos(IVec3::new(
-                        coord.0.x * CHUNK_DIM + lx as i32,
-                        chunk_bottom_y + ly as i32,
-                        coord.0.z * CHUNK_DIM + lz as i32,
-                    ));
-                    light_engine
-                        .sky
-                        .increase
-                        .push(crate::lighting::queue::QueueEntry {
-                            pos,
-                            from_level: 15,
-                            propagation_mask: 0,
-                        });
-                }
-            }
-        }
-
-        // Enqueue every emissive cell at its emission level.
-        for lz in 0..CHUNK_DIM_U {
-            for ly in 0..CHUNK_DIM_U {
-                for lx in 0..CHUNK_DIM_U {
-                    let idx = LocalPos(UVec3::new(lx, ly, lz)).to_index();
-                    let info = registry.info(dense.blocks[idx]);
-                    if info.emission[0] > 0 || info.emission[1] > 0 || info.emission[2] > 0 {
-                        let pos = BlockPos(IVec3::new(
-                            coord.0.x * CHUNK_DIM + lx as i32,
-                            chunk_bottom_y + ly as i32,
-                            coord.0.z * CHUNK_DIM + lz as i32,
-                        ));
-                        for ch_i in 0..3 {
-                            if info.emission[ch_i] > 0 {
-                                light_engine.block_rgb[ch_i].increase.push(
-                                    crate::lighting::queue::QueueEntry {
-                                        pos,
-                                        from_level: info.emission[ch_i],
-                                        propagation_mask: 0,
-                                    },
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Re-enqueue face-adjacent neighbour boundary cells so the engine
-        // spreads their existing light across the new seam. For each face,
-        // walk the 32×32 boundary slice on the neighbour's side and push
-        // its current sky_light + block_rgb levels as increase ops.
-        let face_offsets: [IVec3; 6] = [
-            IVec3::new(1, 0, 0),
-            IVec3::new(-1, 0, 0),
-            IVec3::new(0, 1, 0),
-            IVec3::new(0, -1, 0),
-            IVec3::new(0, 0, 1),
-            IVec3::new(0, 0, -1),
-        ];
-        for face_off in face_offsets {
-            let nc = crate::voxel::coords::ChunkCoord(coord.0 + face_off);
-            let Some(ChunkSlot::Stored { data: ndata, .. }) = chunks.get(&nc) else {
-                continue;
-            };
-            let ndense = ndata.decompress();
-            // Walk the slice of the neighbour adjacent to the seam.
-            // For face = +X, neighbour's slice is at lx=0; for -X, lx=31; etc.
-            // We push EVERY cell in the neighbour's slice — the queue's
-            // bucket sort ensures redundant pushes coalesce in the right order.
-            for u in 0..CHUNK_DIM_U {
-                for v in 0..CHUNK_DIM_U {
-                    let (nlx, nly, nlz) = match (face_off.x, face_off.y, face_off.z) {
-                        (1, 0, 0) => (0, v, u),
-                        (-1, 0, 0) => (CHUNK_DIM_U - 1, v, u),
-                        (0, 1, 0) => (u, 0, v),
-                        (0, -1, 0) => (u, CHUNK_DIM_U - 1, v),
-                        (0, 0, 1) => (u, v, 0),
-                        (0, 0, -1) => (u, v, CHUNK_DIM_U - 1),
-                        _ => unreachable!(),
-                    };
-                    let nidx = LocalPos(UVec3::new(nlx, nly, nlz)).to_index();
-                    let sky = ndense.sky_light[nidx];
-                    let (r, g, b) = crate::voxel::chunk::unpack_rgb(ndense.block_rgb[nidx]);
-                    let npos = BlockPos(IVec3::new(
-                        nc.0.x * CHUNK_DIM + nlx as i32,
-                        nc.0.y * CHUNK_DIM + nly as i32,
-                        nc.0.z * CHUNK_DIM + nlz as i32,
-                    ));
-                    if sky > 0 {
-                        light_engine
-                            .sky
-                            .increase
-                            .push(crate::lighting::queue::QueueEntry {
-                                pos: npos,
-                                from_level: sky,
-                                propagation_mask: 0,
-                            });
-                    }
-                    for (ch_i, level) in [r, g, b].iter().enumerate() {
-                        if *level > 0 {
-                            light_engine.block_rgb[ch_i].increase.push(
-                                crate::lighting::queue::QueueEntry {
-                                    pos: npos,
-                                    from_level: *level,
-                                    propagation_mask: 0,
-                                },
-                            );
-                        }
-                    }
-                }
-            }
-            let _ = Block::Air; // silence unused warning
-        }
+        let had_committed_light = matches!(
+            meta.light_state,
+            LightState::Lit { .. } | LightState::NeedsBorderReconcile
+        );
+        meta.light_version = meta.light_version.wrapping_add(1);
+        meta.light_state = if had_committed_light {
+            LightState::NeedsBorderReconcile
+        } else {
+            LightState::Unlit
+        };
+        meta.dirty.light = true;
     }
 
-    /// Engine entry point for "drain up to `budget` ops this frame".
-    /// Called from `App::update` once per frame. Destructures `&mut self`
-    /// to split the field-aliasing problem (`light_engine` is a field
-    /// of `World`, so a method on `LightEngine` can't take `&mut World`).
-    pub fn light_engine_tick(&mut self, budget: usize) {
-        let Self {
-            chunks,
-            registry,
-            light_engine,
-            ..
-        } = self;
-        light_engine.tick_with(chunks, registry, budget);
+    pub fn queue_relight(&mut self, coord: ChunkCoord) -> Option<u64> {
+        let Some(ChunkSlot::Stored { meta, .. }) = self.chunks.get_mut(&coord) else {
+            return None;
+        };
+        if matches!(
+            meta.light_state,
+            LightState::Lighting { .. } | LightState::Queued
+        ) {
+            return None;
+        }
+        meta.light_state = LightState::Lighting {
+            version: meta.light_version,
+        };
+        meta.dirty.light = false;
+        Some(meta.light_version)
+    }
+
+    pub fn on_chunk_neighbor_available(&mut self, coord: ChunkCoord, face: Face) {
+        let neighbor = ChunkCoord(coord.0 + IVec3::from(face.normal()));
+        if self.is_loaded(coord) {
+            self.mark_chunk_unlit(coord, "neighbor available");
+        }
+        if self.is_loaded(neighbor) {
+            self.mark_chunk_unlit(neighbor, "neighbor available");
+        }
     }
 
     /// Overwrite the block at `pos` with `new_block` and mark every chunk
@@ -321,12 +192,20 @@ impl World {
         *data = std::sync::Arc::new(PalettedChunk::compress(&dense));
 
         meta.dirty.mesh = true;
-        #[cfg(feature = "legacy-lighting")]
-        {
-            meta.dirty.light = true;
-        }
+        meta.dirty.light = true;
         meta.modified = true;
         meta.state = ChunkState::Generated;
+        meta.light_version = meta.light_version.wrapping_add(1);
+        meta.light_state = LightState::Unlit;
+        meta.unresolved_borders = FaceMask::NONE;
+        meta.sky_sources = crate::lighting::ChunkSkyLightSources::build_from_dense(
+            &dense,
+            chunk_coord,
+            &self.registry,
+        );
+        meta.light_inputs =
+            meta.light_inputs
+                .rebuild_preserving_surface(&dense, chunk_coord, &self.registry);
         // Bump version so any in-flight mesh job using the pre-edit
         // data gets discarded when it eventually completes (the
         // "block flickers back after editing" bug). The newly-spawned
@@ -335,64 +214,86 @@ impl World {
         meta.mesh_version = meta.mesh_version.wrapping_add(1);
         dirty.push(chunk_coord);
 
-        // Notify the graph engine. Engine tick (next frame) processes
-        // the change. Today's BFS path (dirty.light above) continues
-        // to run too — it's still authoritative until Task 9 flips
-        // the GPU upload source. After the cutover, the engine is the
-        // sole writer.
-        self.light_engine
-            .enqueue_block_change(pos, old_block, new_block);
-
-        // The PalettedChunk for this chunk was just recompressed with the new
-        // voxel above. Evict the (now-stale) DenseChunk from the lighting cache
-        // so the next tick re-decompresses from the updated Arc<PalettedChunk>.
-        // Without this, the cache would serve old block data to the BFS,
-        // producing incorrect light values around the edit.
-        self.light_engine.invalidate_chunk(chunk_coord);
-
         // Border edits propagate to the neighbour on that side: its
         // boundary face may have changed visibility, so it needs a
-        // remesh. We deliberately do NOT cascade `dirty.light` here:
-        // every breaking-edit at a boundary would queue up to four
-        // extra relights (chunk + face-adjacent neighbours), each
-        // decompressing 7 chunks and running a full BFS. That blew
-        // the job pool and the wgpu upload path far enough to dip
-        // FPS in half on every click.
-        //
-        // The lighting BFS instead consumes the neighbour's *current*
-        // boundary values when it next runs (see
-        // `lighting::seed_from_neighbors`). So the chunk we're
-        // editing relights correctly using the neighbour's old
-        // boundary; the neighbour will catch up the next time it's
-        // touched for any reason (new chunk gen, a later edit, etc.).
-        // The visible cost is a single-cell-off light discontinuity
-        // at the seam that fades on the next relight pass.
+        // remesh and a border-aware relight.
         let (lx, ly, lz) = (local.0.x, local.0.y, local.0.z);
         let dim = CHUNK_DIM_U;
-        let mut maybe_mark = |this: &mut World, dc: IVec3| {
+        let face_dirs = [
+            IVec3::new(-1, 0, 0),
+            IVec3::new(1, 0, 0),
+            IVec3::new(0, -1, 0),
+            IVec3::new(0, 1, 0),
+            IVec3::new(0, 0, -1),
+            IVec3::new(0, 0, 1),
+        ];
+        for dc in face_dirs {
+            let nc = ChunkCoord(chunk_coord.0 + dc);
+            if let Some(ChunkSlot::Stored { meta, .. }) = self.chunks.get_mut(&nc) {
+                meta.dirty.mesh = true;
+                meta.dirty.light = true;
+                meta.light_version = meta.light_version.wrapping_add(1);
+                meta.light_state = LightState::NeedsBorderReconcile;
+                if !dirty.contains(&nc) {
+                    dirty.push(nc);
+                }
+            }
+        }
+
+        // Four-bit block light reaches at most 15 cells. If an emitter
+        // is placed/removed near a chunk edge or corner, stale light can
+        // live in diagonal neighbours even though their geometry did not
+        // change. Mark the loaded chunks intersecting that radius so the
+        // inline edit relight solves the whole possible stale-light set.
+        const BLOCK_LIGHT_REACH_BLOCKS: i32 = 15;
+        let min_light_chunk = BlockPos(pos.0 - IVec3::splat(BLOCK_LIGHT_REACH_BLOCKS)).to_chunk();
+        let max_light_chunk = BlockPos(pos.0 + IVec3::splat(BLOCK_LIGHT_REACH_BLOCKS)).to_chunk();
+        for cy in min_light_chunk.0.y..=max_light_chunk.0.y {
+            for cz in min_light_chunk.0.z..=max_light_chunk.0.z {
+                for cx in min_light_chunk.0.x..=max_light_chunk.0.x {
+                    let nc = ChunkCoord(IVec3::new(cx, cy, cz));
+                    if dirty.contains(&nc) {
+                        continue;
+                    }
+                    if let Some(ChunkSlot::Stored { meta, .. }) = self.chunks.get_mut(&nc) {
+                        meta.dirty.mesh = true;
+                        meta.dirty.light = true;
+                        meta.light_version = meta.light_version.wrapping_add(1);
+                        meta.light_state = LightState::NeedsBorderReconcile;
+                        dirty.push(nc);
+                    }
+                }
+            }
+        }
+
+        let mut maybe_mark_boundary_mesh = |this: &mut World, dc: IVec3| {
             let nc = ChunkCoord(chunk_coord.0 + dc);
             if let Some(ChunkSlot::Stored { meta, .. }) = this.chunks.get_mut(&nc) {
                 meta.dirty.mesh = true;
-                dirty.push(nc);
+                meta.dirty.light = true;
+                meta.light_state = LightState::NeedsBorderReconcile;
+                if !dirty.contains(&nc) {
+                    dirty.push(nc);
+                }
             }
         };
         if lx == 0 {
-            maybe_mark(self, IVec3::new(-1, 0, 0));
+            maybe_mark_boundary_mesh(self, IVec3::new(-1, 0, 0));
         }
         if lx == dim - 1 {
-            maybe_mark(self, IVec3::new(1, 0, 0));
+            maybe_mark_boundary_mesh(self, IVec3::new(1, 0, 0));
         }
         if ly == 0 {
-            maybe_mark(self, IVec3::new(0, -1, 0));
+            maybe_mark_boundary_mesh(self, IVec3::new(0, -1, 0));
         }
         if ly == dim - 1 {
-            maybe_mark(self, IVec3::new(0, 1, 0));
+            maybe_mark_boundary_mesh(self, IVec3::new(0, 1, 0));
         }
         if lz == 0 {
-            maybe_mark(self, IVec3::new(0, 0, -1));
+            maybe_mark_boundary_mesh(self, IVec3::new(0, 0, -1));
         }
         if lz == dim - 1 {
-            maybe_mark(self, IVec3::new(0, 0, 1));
+            maybe_mark_boundary_mesh(self, IVec3::new(0, 0, 1));
         }
 
         dirty
@@ -481,80 +382,132 @@ mod tests {
         }
     }
 
-    /// World::new must construct a default LightEngine alongside the
-    /// chunks map and registry. The engine is idle (no queued work)
-    /// on a fresh world — PR3 will start feeding it.
     #[test]
-    fn new_world_has_idle_light_engine() {
-        let w = World::new(42);
+    fn inserted_chunk_starts_unlit() {
+        use crate::voxel::chunk::DenseChunk;
+
+        let mut w = World::new(42);
+        let coord = ChunkCoord(IVec3::ZERO);
+        w.insert(coord, PalettedChunk::compress(&DenseChunk::empty()));
+        let ChunkSlot::Stored { meta, .. } = w.chunks.get(&coord).unwrap() else {
+            panic!("chunk should be Stored after insert");
+        };
         assert!(
-            w.light_engine.is_idle(),
-            "freshly-constructed World must have an idle LightEngine",
+            matches!(meta.light_state, LightState::Unlit),
+            "new chunks must relight before their light is authoritative",
         );
+        assert!(meta.dirty.light);
     }
 
     #[test]
-    fn on_block_changed_queues_work_in_engine() {
+    fn set_block_marks_chunk_unlit_and_bumps_light_version() {
         use crate::voxel::block::Block;
         use crate::voxel::coords::BlockPos;
-        let mut w = World::new(42);
-        assert!(w.light_engine.is_idle());
-        w.on_block_changed(BlockPos(IVec3::new(0, 0, 0)), Block::Air, Block::Torch);
-        assert!(!w.light_engine.is_idle());
-        assert!(
-            w.light_engine
-                .pending_block_changes
-                .contains_key(&BlockPos(IVec3::new(0, 0, 0)))
-        );
-    }
 
-    #[test]
-    fn on_chunk_loaded_enqueues_sky_sources_for_air_chunk() {
-        use crate::voxel::chunk::DenseChunk;
         let mut w = World::new(42);
-        let chunk = PalettedChunk::compress(&DenseChunk::empty());
         let coord = ChunkCoord(IVec3::ZERO);
-        w.insert(coord, chunk);
-        w.on_chunk_loaded(coord);
-        // All-air chunk: every cell is a sky source within the chunk;
-        // 32^3 = 32768 cells should land in the sky channel's queue.
-        assert!(!w.light_engine.sky.increase.is_empty());
+        w.insert(coord, PalettedChunk::all_air());
+        let before = match w.chunks.get(&coord).unwrap() {
+            ChunkSlot::Stored { meta, .. } => meta.light_version,
+            ChunkSlot::Pending => unreachable!(),
+        };
+        w.set_block(BlockPos(IVec3::new(1, 1, 1)), Block::Stone);
+        let ChunkSlot::Stored { meta, .. } = w.chunks.get(&coord).unwrap() else {
+            panic!("chunk should be Stored after edit");
+        };
+        assert_eq!(meta.light_version, before.wrapping_add(1));
+        assert!(meta.dirty.light);
+        assert!(matches!(meta.light_state, LightState::Unlit));
     }
 
     #[test]
-    fn light_engine_tick_drains_queued_work() {
+    fn set_block_marks_face_neighbors_for_light_reconcile() {
         use crate::voxel::block::Block;
-        use crate::voxel::chunk::DenseChunk;
-        use crate::voxel::coords::{BlockPos, LocalPos};
-        use glam::UVec3;
+        use crate::voxel::coords::BlockPos;
+
         let mut w = World::new(42);
-        // Build a chunk with a torch at center.
-        let mut dense = DenseChunk::empty();
-        dense.set(LocalPos(UVec3::new(16, 16, 16)), Block::Torch);
-        let chunk = PalettedChunk::compress(&dense);
-        let coord = ChunkCoord(IVec3::ZERO);
-        w.insert(coord, chunk);
-        w.on_chunk_loaded(coord);
-        assert!(!w.light_engine.is_idle());
-        // Drain in 50k-op slices (matching the planned production budget)
-        // until the engine is idle. on_chunk_loaded seeds 32^3 sky entries
-        // which can produce O(32^3 × 15) propagation ops; 20 ticks is
-        // sufficient in practice but we cap at 100 to catch infinite loops.
-        let mut iters = 0usize;
-        while !w.light_engine.is_idle() && iters < 100 {
-            w.light_engine_tick(50_000);
-            iters += 1;
+        let center = ChunkCoord(IVec3::ZERO);
+        w.insert(center, PalettedChunk::all_air());
+        for dc in [
+            IVec3::new(-1, 0, 0),
+            IVec3::new(1, 0, 0),
+            IVec3::new(0, -1, 0),
+            IVec3::new(0, 1, 0),
+            IVec3::new(0, 0, -1),
+            IVec3::new(0, 0, 1),
+        ] {
+            w.insert(ChunkCoord(center.0 + dc), PalettedChunk::all_air());
         }
-        assert!(
-            w.light_engine.is_idle(),
-            "tick should drain all queued work given big enough budget"
-        );
-        if let Some(ChunkSlot::Stored { meta, .. }) = w.chunks.get(&coord) {
+
+        let returned = w.set_block(BlockPos(IVec3::new(8, 8, 8)), Block::Stone);
+        assert_eq!(returned.len(), 7);
+        assert_eq!(returned[0], center);
+
+        for dc in [
+            IVec3::new(-1, 0, 0),
+            IVec3::new(1, 0, 0),
+            IVec3::new(0, -1, 0),
+            IVec3::new(0, 1, 0),
+            IVec3::new(0, 0, -1),
+            IVec3::new(0, 0, 1),
+        ] {
+            let coord = ChunkCoord(center.0 + dc);
+            let ChunkSlot::Stored { meta, .. } = w.chunks.get(&coord).unwrap() else {
+                panic!("neighbor should be Stored");
+            };
+            assert!(meta.dirty.light, "{coord:?} was not queued for relight");
             assert!(
-                meta.light_gpu_dirty,
-                "engine writes should set light_gpu_dirty"
+                matches!(meta.light_state, LightState::NeedsBorderReconcile),
+                "{coord:?} did not enter border reconcile"
             );
         }
-        let _ = BlockPos(IVec3::ZERO); // silence unused import warning
+    }
+
+    #[test]
+    fn set_block_marks_diagonal_chunks_inside_block_light_radius() {
+        use crate::voxel::block::Block;
+        use crate::voxel::coords::BlockPos;
+
+        let mut w = World::new(42);
+        let center = ChunkCoord(IVec3::ZERO);
+        let diagonal = ChunkCoord(IVec3::new(-1, -1, -1));
+        w.insert(center, PalettedChunk::all_air());
+        w.insert(diagonal, PalettedChunk::all_air());
+
+        let returned = w.set_block(BlockPos(IVec3::ZERO), Block::Torch);
+
+        assert!(
+            returned.contains(&diagonal),
+            "diagonal chunk in block-light radius should be relit"
+        );
+        let ChunkSlot::Stored { meta, .. } = w.chunks.get(&diagonal).unwrap() else {
+            panic!("diagonal should be Stored");
+        };
+        assert!(meta.dirty.light);
+        assert!(meta.dirty.mesh);
+        assert!(matches!(meta.light_state, LightState::NeedsBorderReconcile));
+    }
+
+    #[test]
+    fn mark_chunk_unlit_preserves_committed_light_as_reconcile_input() {
+        use crate::voxel::chunk::DenseChunk;
+
+        let mut w = World::new(42);
+        let coord = ChunkCoord(IVec3::ZERO);
+        w.insert(coord, PalettedChunk::compress(&DenseChunk::empty()));
+        let ChunkSlot::Stored { meta, .. } = w.chunks.get_mut(&coord).unwrap() else {
+            panic!("chunk should be Stored");
+        };
+        meta.light_state = LightState::Lit { version: 9 };
+
+        w.mark_chunk_unlit(coord, "test");
+
+        let ChunkSlot::Stored { meta, .. } = w.chunks.get(&coord).unwrap() else {
+            panic!("chunk should be Stored");
+        };
+        assert!(
+            matches!(meta.light_state, LightState::NeedsBorderReconcile),
+            "committed light should remain usable while queued for reconcile"
+        );
     }
 }

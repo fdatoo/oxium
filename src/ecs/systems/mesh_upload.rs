@@ -15,7 +15,7 @@ use crate::jobs::{JobResult, Jobs};
 use crate::persistence::thread::{PersistResult, Persistence};
 use crate::render::Renderer;
 use crate::voxel::block::BlockRegistry;
-use crate::voxel::chunk::PalettedChunk;
+use crate::voxel::chunk::{ChunkState, LightState, PalettedChunk};
 use crate::voxel::coords::ChunkCoord;
 use crate::voxel::world::{ChunkSlot, World};
 use crate::worldgen::Generator;
@@ -56,19 +56,17 @@ pub fn drain_jobs(
             Err(_) => return,
         };
         match result {
-            JobResult::Generated { coord, data } => {
+            JobResult::Generated {
+                coord,
+                data,
+                light_inputs,
+            } => {
                 // Install the new chunk first so neighbour mesh jobs can
                 // see it.
-                world.insert(coord, data);
+                world.insert_with_light_inputs(coord, data, light_inputs);
 
-                // Hand the new chunk to the graph engine. on_chunk_loaded
-                // enqueues sky sources, emissives, and neighbour boundary
-                // cells; the engine's next tick spreads them. Replaces the
-                // old "mark_below_dirty + self+6 cascade" bandaids that
-                // sat here before the graph-engine cutover — those tried
-                // to compensate for the per-chunk BFS not knowing about
-                // out-of-order neighbour arrivals.
-                world.on_chunk_loaded(coord);
+                dispatch_relight(world, jobs, registry, coord);
+                mark_loaded_neighbors_for_relight(world, coord);
 
                 // Spawn LOD0 mesh for this chunk AND any already-
                 // loaded neighbours — when an out-of-order arrival
@@ -91,12 +89,7 @@ pub fn drain_jobs(
                 // LOD1/2 still skipped — the renderer falls back
                 // to LOD0 via `slots.iter().flatten().next()`.
                 for c in std::iter::once(coord).chain(neighbor_coords(coord)) {
-                    if let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get(&c) {
-                        let data_arc = data.clone();
-                        let version = meta.mesh_version;
-                        let neighbors = gather_neighbors(world, c);
-                        jobs.spawn_mesh_lod0(c, data_arc, neighbors, registry.clone(), version);
-                    }
+                    spawn_mesh_lod0_if_ready(world, jobs, registry, c);
                 }
             }
             JobResult::Meshed {
@@ -112,79 +105,73 @@ pub fn drain_jobs(
                 // edit-triggered mesh and overwrite the GPU buffer
                 // with stale geometry — the visible "block flickers
                 // back for a moment" artefact the user reported.
-                let current = match world.chunks.get(&coord) {
-                    Some(ChunkSlot::Stored { meta, .. }) => meta.mesh_version,
-                    _ => 0,
+                let Some(ChunkSlot::Stored { meta, .. }) = world.chunks.get(&coord) else {
+                    continue;
                 };
-                if version >= current {
-                    renderer.upload_chunk_mesh(coord, lod, &mesh);
-                    if let Some(blob) = light_volume {
-                        renderer.upload_chunk_light_volume(coord, blob.as_ref());
-                    }
+                if version != meta.mesh_version {
+                    continue;
                 }
+
+                if light_volume.is_none() && !renderer.has_chunk_light_volume(coord) {
+                    if let Some(ChunkSlot::Stored { meta, .. }) = world.chunks.get_mut(&coord) {
+                        meta.state = ChunkState::Generated;
+                        meta.dirty.mesh = true;
+                    }
+                    log::debug!(
+                        "deferring mesh upload for {coord:?}: real light volume not uploaded yet"
+                    );
+                    continue;
+                }
+
+                if let Some(blob) = light_volume {
+                    renderer.upload_chunk_light_volume(coord, blob.as_ref());
+                }
+                if let Some(ChunkSlot::Stored { meta, .. }) = world.chunks.get_mut(&coord) {
+                    meta.state = ChunkState::Ready;
+                    meta.dirty.mesh = false;
+                }
+                if mesh.indices.is_empty() && renderer.has_chunk_mesh(coord) {
+                    continue;
+                }
+                renderer.upload_chunk_mesh(coord, lod, &mesh);
             }
             JobResult::LightBlobReady { coord, blob } => {
                 // The mesh-pool worker already did the expensive decompress +
                 // 33³ sample loop; just hand the finished blob to the GPU.
                 renderer.upload_chunk_light_volume(coord, blob.as_ref());
             }
-            #[cfg(feature = "legacy-lighting")]
             JobResult::Relit {
                 coord,
+                version,
                 data,
                 changed_faces,
+                unresolved_faces,
                 light_volume,
             } => {
-                // Push the light volume to the GPU FIRST so the chunk's bind
-                // group picks up the new lighting on the next draw — even if
-                // the mesh re-spawn lags.
-                renderer.upload_chunk_light_volume(coord, light_volume.as_ref());
-                // Swap the freshly-relit chunk into the World and reset
-                // its dirty flags. Re-mesh **all three** LOD levels so
-                // distant terrain reflects the new light values too —
-                // without re-spawning LOD1/LOD2 here, far-away
-                // chunks would keep showing whatever brightness was
-                // baked in at initial gen even after their lighting
-                // converged.
                 use crate::voxel::chunk::{ChunkDirty, ChunkState};
                 let data_arc = Arc::new(data);
+                let mut accepted = false;
                 if let Some(ChunkSlot::Stored { data: cur, meta }) = world.chunks.get_mut(&coord) {
-                    // Preserve any `dirty.light` mark added *during the
-                    // in-flight window* — between the pump clearing the
-                    // flag (`relight_pump`) and this result landing.
-                    // Such marks come from a cascade chain or a
-                    // `+Y`-arrival mark that reached this chunk after
-                    // its relight was dispatched but before it
-                    // returned, and they want a fresh relight against
-                    // even-newer neighbour state. Unconditionally
-                    // resetting to `false` here used to drop those
-                    // marks, leaving stale lighting in cells the
-                    // cascade had already passed (visible as the
-                    // "lit/dark patchwork" reported on adjacent
-                    // chunks under deep water).
-                    let still_dirty = meta.dirty.light;
+                    if meta.light_version != version {
+                        continue;
+                    }
                     *cur = data_arc.clone();
                     meta.dirty = ChunkDirty {
                         mesh: true,
-                        light: still_dirty,
+                        light: false,
                     };
                     meta.state = ChunkState::Generated;
-                    // Deliberately NOT bumping `mesh_version` here.
-                    // Relight only rewrites the per-cell light bytes —
-                    // geometry stays the same — so a pre-relight mesh
-                    // (with slightly stale lighting baked into vertex
-                    // colours) still renders correctly enough. Bumping
-                    // the version meant the original `Generated`
-                    // handler's mesh job got *rejected* on completion
-                    // and the chunk had no mesh on the GPU at all
-                    // until the cascade's follow-up mesh arrived —
-                    // visible as huge sky-shader-coloured holes where
-                    // streamed-in chunks should be. The version tag
-                    // still fires on `set_block` (geometry change),
-                    // which is the case that actually needs it.
+                    meta.light_state = LightState::Lit { version };
+                    meta.unresolved_borders = unresolved_faces;
+                    meta.light_gpu_dirty = true;
+                    accepted = true;
                 }
+                if !accepted {
+                    continue;
+                }
+                renderer.upload_chunk_light_volume(coord, light_volume.as_ref());
                 // Bounded cascade: only mark the face neighbours whose
-                // boundary actually changed as `dirty.light`. Most
+                // boundary actually changed as unlit. Most
                 // relights downstream of a cascade produce no further
                 // change, so propagation naturally terminates in
                 // `O(diameter)` iterations rather than blowing up
@@ -194,42 +181,21 @@ pub fn drain_jobs(
                     if !changed {
                         continue;
                     }
-                    if let Some(ChunkSlot::Stored { meta, .. }) = world.chunks.get_mut(&nbrs[i]) {
-                        meta.dirty.light = true;
-                    }
+                    mark_chunk_unlit_for_relight(world, nbrs[i], "relight boundary changed");
                 }
-                // Only re-mesh LOD0 — distant LOD chunks sample one
-                // light value per column (from the topmost air cell),
-                // which almost never changes meaningfully when a deep
-                // chunk re-lights itself. Re-meshing LOD1/LOD2 on
-                // every relight was ~3× the mesh work per cascade
-                // step with no visible benefit at distance.
-                let neighbors = gather_neighbors(world, coord);
-                let version = world
-                    .chunks
-                    .get(&coord)
-                    .and_then(|s| match s {
-                        ChunkSlot::Stored { meta, .. } => Some(meta.mesh_version),
-                        _ => None,
-                    })
-                    .unwrap_or(0);
-                jobs.spawn_mesh_lod0(coord, data_arc, neighbors, registry.clone(), version);
+                spawn_mesh_lod0_if_ready(world, jobs, registry, coord);
             }
             JobResult::LoadedFromDisk { coord, data } => match data {
                 Some(data) => {
                     world.insert(coord, data);
-                    world.on_chunk_loaded(coord);
+                    dispatch_relight(world, jobs, registry, coord);
+                    mark_loaded_neighbors_for_relight(world, coord);
                     // Same neighbour-remesh strategy as Generated.
                     // The parallel `spawn_load` was the trigger for
                     // the out-of-order arrival bug, and Loaded is
                     // where most of those arrivals come from.
                     for c in std::iter::once(coord).chain(neighbor_coords(coord)) {
-                        if let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get(&c) {
-                            let data_arc = data.clone();
-                            let version = meta.mesh_version;
-                            let neighbors = gather_neighbors(world, c);
-                            jobs.spawn_mesh_lod0(c, data_arc, neighbors, registry.clone(), version);
-                        }
+                        spawn_mesh_lod0_if_ready(world, jobs, registry, c);
                     }
                 }
                 None => {
@@ -242,9 +208,6 @@ pub fn drain_jobs(
                     // Re-mark as Vacant so world_stream picks it up
                     // next frame and dispatches gen.
                     world.chunks.remove(&coord);
-                    // Evict any stale decompressed copy from the lighting cache so
-                    // a future gen+install doesn't see the old voxel data.
-                    world.light_engine.invalidate_chunk(coord);
                 }
             },
         }
@@ -260,11 +223,15 @@ pub fn drain_jobs(
 /// can dirty hundreds of chunks at once. Without a cap, the rayon pool
 /// gets buried and the main thread stalls waiting for results — the
 /// same shape of regression as the cancelled v0.1.19 per-edit cascade.
-/// At 4 chunks per frame a couple thousand pending chunks converge in
-/// ~5 seconds at 120 fps without dropping frames.
-#[cfg(feature = "legacy-lighting")]
-pub fn relight_pump(world: &mut World, jobs: &Jobs, registry: &Arc<BlockRegistry>) -> usize {
-    const RELIGHT_BUDGET: usize = 16;
+/// At 128 chunks per frame the dedicated relight pool can stay fed during
+/// stream-in without burying mesh work.
+pub fn relight_pump(
+    world: &mut World,
+    jobs: &Jobs,
+    registry: &Arc<BlockRegistry>,
+    priority: Option<ChunkCoord>,
+) -> usize {
+    const RELIGHT_BUDGET: usize = 128;
     // Snapshot the candidate coords up-front so we don't hold an
     // immutable borrow over the loop body's `get_mut` + `spawn`.
     // Also count the *total* dirty set for the HUD perf readout.
@@ -272,27 +239,30 @@ pub fn relight_pump(world: &mut World, jobs: &Jobs, registry: &Arc<BlockRegistry
     let mut candidates: Vec<ChunkCoord> = Vec::new();
     for (c, slot) in world.chunks.iter() {
         if let ChunkSlot::Stored { meta, .. } = slot
-            && meta.dirty.light
+            && (meta.dirty.light
+                || matches!(
+                    meta.light_state,
+                    LightState::Unlit | LightState::NeedsBorderReconcile
+                ))
         {
             total_dirty += 1;
-            if candidates.len() < RELIGHT_BUDGET {
-                candidates.push(*c);
-            }
+            candidates.push(*c);
         }
     }
-    for c in candidates {
-        // Clone the chunk data + gather neighbour snapshots, then
-        // clear the flag so the next frame's scan doesn't re-queue
-        // this chunk while the worker is still busy.
-        let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get_mut(&c) else {
-            continue;
-        };
-        meta.dirty.light = false;
-        let data_arc = data.clone();
-        let neighbors = gather_neighbors(world, c);
-        jobs.spawn_relight(c, data_arc, neighbors, registry.clone());
+    if let Some(center) = priority {
+        candidates.sort_unstable_by_key(|c| priority_key(*c, center));
+    }
+    for c in candidates.into_iter().take(RELIGHT_BUDGET) {
+        dispatch_relight(world, jobs, registry, c);
     }
     return total_dirty;
+}
+
+fn priority_key(coord: ChunkCoord, center: ChunkCoord) -> i64 {
+    let d = coord.0 - center.0;
+    let h_dist_sq = (d.x as i64).pow(2) + (d.z as i64).pow(2);
+    let v_dist_sq = (d.y as i64).pow(2);
+    h_dist_sq * 100_000 + v_dist_sq
 }
 
 /// The six face-adjacent chunk coordinates, in [`crate::mesher::Face`]
@@ -306,6 +276,121 @@ pub fn neighbor_coords(c: ChunkCoord) -> [ChunkCoord; 6] {
         ChunkCoord(c.0 + IVec3::new(0, 0, 1)),
         ChunkCoord(c.0 + IVec3::new(0, 0, -1)),
     ]
+}
+
+fn mark_loaded_neighbors_for_relight(world: &mut World, coord: ChunkCoord) {
+    for nc in neighbor_coords(coord) {
+        if world.is_loaded(nc) {
+            mark_chunk_unlit_for_relight(world, nc, "neighbor loaded");
+        }
+    }
+}
+
+fn mark_chunk_unlit_for_relight(world: &mut World, coord: ChunkCoord, reason: &'static str) {
+    world.mark_chunk_unlit(coord, reason);
+}
+
+fn dispatch_relight(
+    world: &mut World,
+    jobs: &Jobs,
+    registry: &Arc<BlockRegistry>,
+    coord: ChunkCoord,
+) {
+    if !light_vertical_context_ready(world, coord) {
+        return;
+    }
+    let neighbors = gather_neighbors(world, coord);
+    let neighbor_lit = gather_neighbor_lit(world, coord);
+    let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get(&coord) else {
+        return;
+    };
+    let data_arc = data.clone();
+    let inputs = meta.light_inputs.clone();
+    let Some(version) = world.queue_relight(coord) else {
+        return;
+    };
+    jobs.spawn_relight(
+        coord,
+        version,
+        data_arc,
+        inputs,
+        neighbors,
+        neighbor_lit,
+        registry.clone(),
+    );
+}
+
+fn light_vertical_context_ready(world: &World, coord: ChunkCoord) -> bool {
+    let above = ChunkCoord(coord.0 + IVec3::new(0, 1, 0));
+    if chunk_light_usable(world, above) {
+        return true;
+    }
+    let Some(ChunkSlot::Stored { meta, .. }) = world.chunks.get(&coord) else {
+        return false;
+    };
+    meta.light_inputs.top_sky.iter().all(|&v| v > 0)
+}
+
+fn spawn_mesh_lod0_if_ready(
+    world: &mut World,
+    jobs: &Jobs,
+    registry: &Arc<BlockRegistry>,
+    coord: ChunkCoord,
+) {
+    if !can_spawn_mesh_lod0(world, coord) {
+        return;
+    }
+    let Some((data_arc, version)) = (match world.chunks.get_mut(&coord) {
+        Some(ChunkSlot::Stored { data, meta }) => {
+            let data_arc = data.clone();
+            meta.state = ChunkState::Meshing;
+            meta.dirty.mesh = false;
+            meta.mesh_version = meta.mesh_version.wrapping_add(1);
+            Some((data_arc, meta.mesh_version))
+        }
+        _ => None,
+    }) else {
+        return;
+    };
+    let neighbors = gather_neighbors(world, coord);
+    jobs.spawn_mesh_lod0(coord, data_arc, neighbors, registry.clone(), version, false);
+}
+
+fn can_spawn_mesh_lod0(world: &World, coord: ChunkCoord) -> bool {
+    let Some(ChunkSlot::Stored { meta, .. }) = world.chunks.get(&coord) else {
+        return false;
+    };
+    if !matches!(meta.light_state, LightState::Lit { .. }) {
+        return false;
+    }
+    if meta.state == ChunkState::Ready {
+        return true;
+    }
+    let neighbors = neighbor_coords(coord);
+    // Initial opaque geometry should not be built against absent horizontal
+    // neighbours. Otherwise a stale mesh can expose chunk-edge side faces
+    // until a later neighbour-triggered rebuild hides them.
+    [0, 1, 4, 5]
+        .into_iter()
+        .all(|face| world.is_loaded(neighbors[face]))
+}
+
+pub(crate) fn chunk_light_usable(world: &World, coord: ChunkCoord) -> bool {
+    matches!(
+        world.chunks.get(&coord),
+        Some(ChunkSlot::Stored {
+            meta: crate::voxel::chunk::ChunkMeta {
+                light_state: LightState::Lit { .. } | LightState::NeedsBorderReconcile,
+                ..
+            },
+            ..
+        })
+    )
+}
+
+fn gather_neighbor_lit(world: &World, c: ChunkCoord) -> [bool; 6] {
+    let coords = neighbor_coords(c);
+    std::array::from_fn(|i| chunk_light_usable(world, coords[i]))
 }
 
 /// Drain pending persistence results: install loaded chunks, mark saved
@@ -326,36 +411,16 @@ pub fn drain_persistence(
         match res {
             PersistResult::Loaded { coord, data } => match data {
                 Some(data) => {
-                    world.insert(coord, data);
-                    world.on_chunk_loaded(coord);
-                    // Mark `dirty.light = true` on the just-loaded
-                    // chunk. Saved chunks can carry stale
-                    // sky_light / block_light values when an
-                    // autosave races a player edit: `set_block`
-                    // bumps the data but leaves the light arrays
-                    // for the BFS to recompute later, and the
-                    // autosave/Drop flush writes whichever state is
-                    // current. On reload nothing re-runs the BFS,
-                    // so the chunk renders with stale (often zero)
-                    // light around the edit — which fades to the
-                    // cave-fog gray at distance and shows as the
-                    // "flat fog plane where I modified terrain"
-                    // bug. The relight pump picks this up and
-                    // converges over a few frames.
-                    #[cfg(feature = "legacy-lighting")]
-                    if let Some(ChunkSlot::Stored { meta, .. }) = world.chunks.get_mut(&coord) {
-                        meta.dirty.light = true;
-                    }
+                    let dense = data.decompress();
+                    let light_inputs = generator.light_inputs_for_chunk(coord, &dense, registry);
+                    world.insert_with_light_inputs(coord, data, light_inputs);
+                    dispatch_relight(world, jobs, registry, coord);
+                    mark_loaded_neighbors_for_relight(world, coord);
                     // Re-mesh self + already-Stored neighbours, so
                     // out-of-order arrivals don't leave boundary
                     // faces conservatively-emitted.
                     for c in std::iter::once(coord).chain(neighbor_coords(coord)) {
-                        if let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get(&c) {
-                            let data_arc = data.clone();
-                            let version = meta.mesh_version;
-                            let neighbors = gather_neighbors(world, c);
-                            jobs.spawn_mesh_lod0(c, data_arc, neighbors, registry.clone(), version);
-                        }
+                        spawn_mesh_lod0_if_ready(world, jobs, registry, c);
                     }
                 }
                 None => {
@@ -391,51 +456,4 @@ pub fn gather_neighbors(world: &World, c: ChunkCoord) -> [Option<Arc<PalettedChu
         }
     }
     out
-}
-
-/// Scan loaded chunks for `light_gpu_dirty` and spawn mesh-pool jobs to
-/// rebuild their 3D light textures off the main thread.
-///
-/// Previously this function built each blob inline (decompress + 33³ sample
-/// loop) on the main thread, costing ~8.6% of frame time at a 64-chunk
-/// render radius. Now it merely snapshots the dirty coords, clears the flag
-/// to prevent double-spawning, and hands the heavy work to `spawn_light_blob`.
-/// The finished blobs arrive via `drain_jobs` as `JobResult::LightBlobReady`
-/// and are uploaded to the GPU there without any further CPU work.
-///
-/// Bounded to `UPLOAD_BUDGET` spawns per frame so a large convergence wave
-/// (e.g. the light engine settling after initial streaming) doesn't flood the
-/// mesh pool before it can catch up.
-pub fn upload_dirty_light_volumes(
-    world: &mut crate::voxel::world::World,
-    jobs: &Jobs,
-) {
-    use crate::voxel::world::ChunkSlot;
-    const UPLOAD_BUDGET: usize = 32;
-    // Collect dirty coords up-front so the later mutable borrow of each
-    // slot (to clear `light_gpu_dirty`) doesn't conflict with the
-    // immutable iteration over `world.chunks`.
-    let dirty: Vec<ChunkCoord> = world
-        .chunks
-        .iter()
-        .filter_map(|(c, slot)| match slot {
-            ChunkSlot::Stored { meta, .. } if meta.light_gpu_dirty => Some(*c),
-            _ => None,
-        })
-        .take(UPLOAD_BUDGET)
-        .collect();
-    for coord in dirty {
-        // Gather neighbor Arcs (cheap atomic refcount bumps only) before
-        // taking the mutable borrow below — gather_neighbors needs a
-        // shared borrow of world.chunks.
-        let neighbors = gather_neighbors(world, coord);
-        let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get_mut(&coord) else {
-            continue;
-        };
-        // Clear the flag immediately so the next frame's scan doesn't
-        // re-queue this chunk while the worker is still running.
-        meta.light_gpu_dirty = false;
-        let data_arc = data.clone();
-        jobs.spawn_light_blob(coord, data_arc, neighbors);
-    }
 }

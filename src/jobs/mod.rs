@@ -16,12 +16,12 @@
 //! during the initial worldgen burst — ~11,250 gen jobs queue up at
 //! startup and every Generated result enqueues up to 7 mesh jobs behind
 //! them. Splitting into a `gen_pool` (gen + disk load) and a `mesh_pool`
-//! (meshing + relight) lets mesh jobs run the moment their source
-//! chunk is Stored, in parallel with the gen pool draining its backlog.
+//! meshing, and relighting lets relight work run before visible fallback
+//! lighting lingers behind mesh traffic.
 
 use crate::mesher::ChunkMesh;
 use crate::voxel::block::BlockRegistry;
-use crate::voxel::chunk::{DenseChunk, PalettedChunk};
+use crate::voxel::chunk::{ChunkLightInputs, DenseChunk, FaceMask, PalettedChunk};
 use crate::voxel::coords::ChunkCoord;
 use crate::worldgen::Generator;
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -34,6 +34,7 @@ pub enum JobResult {
     Generated {
         coord: ChunkCoord,
         data: PalettedChunk,
+        light_inputs: ChunkLightInputs,
     },
     /// A meshing job finished; `mesh` is ready for GPU upload. `lod` is the
     /// LOD level (0 = full resolution; 1 and 2 added in M8). `version`
@@ -80,14 +81,15 @@ pub enum JobResult {
     /// `changed_faces[i]` is `true` when the chunk's boundary cells in
     /// the [`crate::mesher::Face`]`(i)` direction differ between the
     /// pre-BFS and post-BFS snapshots. The Relit handler uses this to
-    /// cascade `dirty.light` only to the neighbours whose seed values
+    /// invalidate only the neighbours whose seed values
     /// would actually change — bounded propagation that converges in
     /// `O(loaded-chunk-diameter)` iterations without exploding.
-    #[cfg(feature = "legacy-lighting")]
     Relit {
         coord: ChunkCoord,
+        version: u64,
         data: PalettedChunk,
         changed_faces: [bool; 6],
+        unresolved_faces: FaceMask,
         /// Always present — the relight worker built it from the same
         /// DenseChunk it just relit.
         light_volume: Box<[u8; 33 * 33 * 33 * 4]>,
@@ -105,10 +107,12 @@ pub struct Jobs {
     /// chunk data). Separated from `mesh_pool` so the initial gen burst
     /// can't starve mesh jobs.
     gen_pool: rayon::ThreadPool,
-    /// Pool that runs `spawn_mesh_lod0`, `spawn_mesh_lod`, and
-    /// `spawn_relight` jobs. Relight lives here because it's the
-    /// precursor to a re-mesh and shares cost characteristics.
+    /// Pool that runs `spawn_mesh_lod0` and `spawn_mesh_lod`.
     mesh_pool: rayon::ThreadPool,
+    /// Pool that runs `spawn_relight`. Relight should not sit behind a
+    /// large burst of mesh jobs because chunks stay on fallback lighting
+    /// until relight commits.
+    relight_pool: rayon::ThreadPool,
 }
 
 impl Default for Jobs {
@@ -118,16 +122,15 @@ impl Default for Jobs {
 }
 
 impl Jobs {
-    /// Build two fresh worker pools whose combined size is *N - 1* logical
-    /// CPUs (leaving one for the main thread). The total is split evenly
-    /// between the gen pool (gen + disk load) and the mesh pool (meshing +
-    /// relight), each clamped to at least one thread.
+    /// Build worker pools for generation, meshing, and relighting. The
+    /// relight pool is separate so fallback-lit chunks don't wait behind
+    /// a large mesh backlog during stream-in.
     ///
     /// Result channel is unbounded — it can briefly queue up dozens of
     /// completions during a fast fly-around without stalling the workers.
     pub fn new() -> Self {
         let (tx, rx) = unbounded();
-        let (gen_threads, mesh_threads) = pool_thread_split();
+        let (gen_threads, mesh_threads, relight_threads) = pool_thread_split();
         let gen_pool = rayon::ThreadPoolBuilder::new()
             .num_threads(gen_threads)
             .thread_name(|i| format!("oxium-gen-{i}"))
@@ -138,11 +141,17 @@ impl Jobs {
             .thread_name(|i| format!("oxium-mesh-{i}"))
             .build()
             .expect("rayon mesh pool");
+        let relight_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(relight_threads)
+            .thread_name(|i| format!("oxium-relight-{i}"))
+            .build()
+            .expect("rayon relight pool");
         Self {
             tx,
             rx,
             gen_pool,
             mesh_pool,
+            relight_pool,
         }
     }
 
@@ -185,16 +194,9 @@ impl Jobs {
     ///
     /// 1. Allocates a fresh `DenseChunk`.
     /// 2. Asks the `Generator` to fill it with terrain.
-    /// 3. Runs the lighting BFS using the `neighbours` snapshot supplied
-    ///    by the caller. Chunks generated while their face-adjacent
-    ///    neighbours are already loaded receive correct sky-light
-    ///    column-drop inheritance from the +Y neighbour and lateral
-    ///    block-light seeding from all six, on this single pass — no
-    ///    follow-up relight needed. Chunks generated at the streaming
-    ///    wavefront (neighbours mostly `None`) fall back to a
-    ///    best-effort BFS, same as before.
-    /// 4. Compresses it into a `PalettedChunk` (canonical form).
-    /// 5. Sends the result through the channel.
+    /// 3. Compresses it into a `PalettedChunk` (canonical form).
+    /// 4. Sends the result through the channel. Lighting is handled by
+    ///    `spawn_relight` after the chunk is installed in `World`.
     pub fn spawn_gen(
         &self,
         coord: ChunkCoord,
@@ -215,37 +217,17 @@ impl Jobs {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut dense = DenseChunk::empty();
                 generator.fill_chunk(coord, &mut dense);
-                // Decompress any neighbours the caller snapshotted so the
-                // initial BFS does column-drop inheritance + lateral
-                // seeding correctly. Matches the spawn_relight pattern at
-                // jobs/mod.rs:232-245.
-                #[cfg(feature = "legacy-lighting")]
-                {
-                    let neighbor_dense: Vec<Option<DenseChunk>> = neighbors
-                        .iter()
-                        .map(|opt| opt.as_ref().map(|p| p.decompress()))
-                        .collect();
-                    let n_refs: [Option<&DenseChunk>; 6] = [
-                        neighbor_dense[0].as_ref(),
-                        neighbor_dense[1].as_ref(),
-                        neighbor_dense[2].as_ref(),
-                        neighbor_dense[3].as_ref(),
-                        neighbor_dense[4].as_ref(),
-                        neighbor_dense[5].as_ref(),
-                    ];
-                    let ns = crate::voxel::chunk::Neighbors { chunks: n_refs };
-                    crate::lighting::recompute_chunk(&mut dense, &ns, &registry);
-                }
-                #[cfg(not(feature = "legacy-lighting"))]
-                {
-                    let _ = neighbors;
-                    let _ = registry;
-                }
-                PalettedChunk::compress(&dense)
+                let light_inputs = generator.light_inputs_for_chunk(coord, &dense, &registry);
+                let _ = neighbors;
+                (PalettedChunk::compress(&dense), light_inputs)
             }));
             match result {
-                Ok(data) => {
-                    let _ = tx.send(JobResult::Generated { coord, data });
+                Ok((data, light_inputs)) => {
+                    let _ = tx.send(JobResult::Generated {
+                        coord,
+                        data,
+                        light_inputs,
+                    });
                 }
                 Err(payload) => {
                     log::error!("gen job panic at {coord:?}: {}", panic_message(payload));
@@ -258,24 +240,37 @@ impl Jobs {
     /// BFS with whatever neighbour data is available, recompress.
     ///
     /// Used by the interaction system whenever the player edits a block
-    /// — that flips `meta.dirty.light` and requires the chunk's voxel
+    /// — that marks lighting dirty and requires the chunk's voxel
     /// light arrays to be regenerated before the next mesh job picks up
     /// fresh `light` bytes for the vertex format.
-    #[cfg(feature = "legacy-lighting")]
     pub fn spawn_relight(
         &self,
         coord: ChunkCoord,
+        version: u64,
         data: Arc<PalettedChunk>,
+        inputs: ChunkLightInputs,
         neighbors: [Option<Arc<PalettedChunk>>; 6],
+        neighbor_lit: [bool; 6],
         registry: Arc<BlockRegistry>,
     ) {
         let tx = self.tx.clone();
-        self.mesh_pool.spawn(move || {
+        self.relight_pool.spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let mut dense = data.decompress();
+                let mut unresolved_faces = FaceMask::NONE;
                 let neighbor_dense: Vec<Option<DenseChunk>> = neighbors
                     .iter()
-                    .map(|opt| opt.as_ref().map(|p| p.decompress()))
+                    .enumerate()
+                    .map(|(i, opt)| {
+                        if neighbor_lit[i] {
+                            opt.as_ref().map(|p| p.decompress())
+                        } else {
+                            if opt.is_none() || !neighbor_lit[i] {
+                                unresolved_faces.set(crate::mesher::Face::all()[i]);
+                            }
+                            None
+                        }
+                    })
                     .collect();
                 let n_refs: [Option<&DenseChunk>; 6] = [
                     neighbor_dense[0].as_ref(),
@@ -287,19 +282,21 @@ impl Jobs {
                 ];
                 let ns = crate::voxel::chunk::Neighbors { chunks: n_refs };
                 let pre = crate::lighting::snapshot_face_boundaries(&dense);
-                crate::lighting::recompute_chunk(&mut dense, &ns, &registry);
+                crate::lighting::recompute_chunk_with_inputs(&mut dense, &ns, &inputs, &registry);
                 let post = crate::lighting::snapshot_face_boundaries(&dense);
                 let changed_faces: [bool; 6] = std::array::from_fn(|i| pre[i] != post[i]);
                 let light_volume = crate::voxel::chunk::build_light_volume_blob(&dense, &ns);
                 let data = PalettedChunk::compress(&dense);
-                (data, changed_faces, light_volume)
+                (data, changed_faces, unresolved_faces, light_volume)
             }));
             match result {
-                Ok((data, changed_faces, light_volume)) => {
+                Ok((data, changed_faces, unresolved_faces, light_volume)) => {
                     let _ = tx.send(JobResult::Relit {
                         coord,
+                        version,
                         data,
                         changed_faces,
+                        unresolved_faces,
                         light_volume,
                     });
                 }
@@ -356,6 +353,7 @@ impl Jobs {
         neighbors: [Option<Arc<PalettedChunk>>; 6],
         registry: Arc<BlockRegistry>,
         version: u64,
+        include_light_volume: bool,
     ) {
         let tx = self.tx.clone();
         self.mesh_pool.spawn(move || {
@@ -379,7 +377,8 @@ impl Jobs {
                 // mesher but typically 5-10x fewer vertices per chunk.
                 let mesh = crate::mesher::greedy::mesh_greedy(&dense, &n_refs, &registry);
                 let ns = crate::voxel::chunk::Neighbors { chunks: n_refs };
-                let light_volume = Some(crate::voxel::chunk::build_light_volume_blob(&dense, &ns));
+                let light_volume = include_light_volume
+                    .then(|| crate::voxel::chunk::build_light_volume_blob(&dense, &ns));
                 (mesh, light_volume)
             }));
             match result {
@@ -407,10 +406,8 @@ impl Jobs {
     /// 33³ blob is built. The main thread's `drain_jobs` handler uploads the
     /// finished blob to the GPU without any further computation.
     ///
-    /// Use this instead of calling `build_light_volume_blob` on the main thread
-    /// inside `upload_dirty_light_volumes` — the decompression + blob-build
-    /// accounts for ~8.6% of main-thread frame time at a 64-chunk render
-    /// radius and is purely CPU-bound with no GPU dependency.
+    /// Kept for callers that need to rebuild a light volume without a full
+    /// relight; the relight worker normally returns its blob directly.
     pub fn spawn_light_blob(
         &self,
         coord: ChunkCoord,
@@ -444,7 +441,10 @@ impl Jobs {
                     let _ = tx.send(JobResult::LightBlobReady { coord, blob });
                 }
                 Err(payload) => {
-                    log::error!("light-blob job panic at {coord:?}: {}", panic_message(payload));
+                    log::error!(
+                        "light-blob job panic at {coord:?}: {}",
+                        panic_message(payload)
+                    );
                 }
             }
         });
@@ -476,16 +476,15 @@ fn worker_thread_count() -> usize {
         .max(1)
 }
 
-/// Split the total worker budget between the gen pool and the mesh pool.
+/// Split the total worker budget between gen, mesh, and relight pools.
 ///
-/// Gives the gen pool the ceiling half and the mesh pool the floor half
-/// of `worker_thread_count()`, each clamped to at least one. On systems
-/// with only 1-2 workers available this collapses to 1+1 — meaning the
-/// budget grows by a thread, but only when there's truly nothing to
-/// split. Better than starving either side.
-fn pool_thread_split() -> (usize, usize) {
+/// Relight gets a dedicated slice so visible chunks do not sit on ambient
+/// fallback while the mesh pool drains stream-in work.
+fn pool_thread_split() -> (usize, usize, usize) {
     let total = worker_thread_count();
-    let gen_threads = total.div_ceil(2).max(1);
-    let mesh_threads = total.saturating_sub(gen_threads).max(1);
-    (gen_threads, mesh_threads)
+    let relight_threads = (total / 4).max(1);
+    let remaining = total.saturating_sub(relight_threads).max(2);
+    let gen_threads = remaining.div_ceil(2).max(1);
+    let mesh_threads = remaining.saturating_sub(gen_threads).max(1);
+    (gen_threads, mesh_threads, relight_threads)
 }

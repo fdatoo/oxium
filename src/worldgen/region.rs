@@ -527,12 +527,14 @@ mod tests {
             "expected the first-inserted entry to be evicted after CAP+1 inserts"
         );
         // And the most recent one should still be there.
-        assert!(cache
-            .peek(&RegionCoord {
-                x: FINE_CACHE_CAP as i32,
-                z: 0
-            })
-            .is_some());
+        assert!(
+            cache
+                .peek(&RegionCoord {
+                    x: FINE_CACHE_CAP as i32,
+                    z: 0
+                })
+                .is_some()
+        );
     }
 
     #[test]
@@ -555,8 +557,8 @@ mod tests {
 
     #[test]
     fn concurrent_lookup_builds_key_once() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Barrier;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::thread;
         use std::time::Duration;
 

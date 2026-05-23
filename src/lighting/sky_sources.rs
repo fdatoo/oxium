@@ -1,14 +1,11 @@
 //! Per-chunk sky-source heightmap. For each `(x, z)` column in the chunk,
 //! records the world-Y of the lowest cell that is a sky light source —
 //! i.e., a non-opaque cell with nothing opaque above it (within this
-//! chunk; +Y neighbour lookup is deferred to PR2).
+//! chunk).
 //!
-//! The graph-engine sky channel reads this heightmap to know which cells
-//! are sources (`y >= lowest_source_y` → source at level 15) and to emit
-//! the right add/remove-source ops when a column's heightmap changes.
-//!
-//! See `docs/superpowers/specs/2026-05-21-lighting-graph-engine-design.md`
-//! — "Sky source heightmap" section.
+//! The current recompute lighting path does not need this for correctness,
+//! but the metadata is kept alongside chunks for diagnostics and future
+//! sky-source optimizations.
 
 use crate::voxel::block::BlockRegistry;
 use crate::voxel::chunk::DenseChunk;
@@ -25,7 +22,7 @@ pub const NO_SOURCE_FLOOR: i32 = i32::MIN;
 /// cell that is itself a sky source (level 15 from sky).
 ///
 /// Cells at world-Y `>= lowest_source_y(x, z)` within this chunk are
-/// sources. Cells below propagate via the graph engine.
+/// sources. Cells below receive sky through the recompute pass.
 #[derive(Debug, Clone)]
 pub struct ChunkSkyLightSources {
     lowest_source_y: Box<[i32; (CHUNK_DIM_U * CHUNK_DIM_U) as usize]>,

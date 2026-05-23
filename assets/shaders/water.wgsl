@@ -326,10 +326,28 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let fresnel = fresnel_schlick(cos_theta, 0.04);
     let rgb_fresnel = min(fresnel, 0.92);
 
+    // Sample the chunk light volume at the water surface's air-side.
+    // See the long comment in opaque.wgsl: `min(face_normal, 0)` lands
+    // sample_local inside the air-side cell (PosY: same y as vertex;
+    // NegY: one cell back) so trilinear reads the surface illumination
+    // rather than a 50/50 blend with the opaque cell on the far side.
+    let sample_world = in.v_world + min(in.v_face_normal, vec3<f32>(0.0));
+    let chunk_local  = sample_world - chunk.origin.xyz;
+    let uvw          = (chunk_local + vec3<f32>(0.5, 0.5, 0.5)) / 33.0;
+    let lvol         = textureSampleLevel(light_volume, light_sampler, uvw, 0.0);
+    let sky_level    = lvol.a;
+    let block_rgb    = lvol.rgb;
+    let volume_light = max(
+        sky_level * camera.sun_intensity,
+        max(block_rgb.r, max(block_rgb.g, block_rgb.b)),
+    );
+    let water_light = max(max(in.v_light, volume_light), 0.04);
+    let sky_reflection_light = clamp(sky_level * camera.sun_intensity + max(block_rgb.r, max(block_rgb.g, block_rgb.b)) * 0.15, 0.0, 1.0);
+
     // Base water body colour. Cool deep blue lit by sky-light. The
     // body is mostly hidden by the sky reflection at glancing
     // angles; only really visible when looking nearly straight down.
-    let water_body = vec3<f32>(0.04, 0.20, 0.38) * max(in.v_light, 0.10);
+    let water_body = vec3<f32>(0.04, 0.20, 0.38) * water_light;
 
     // Planar reflection sample. The reflection texture was rendered
     // by a virtual camera mirrored across the water plane (see
@@ -376,7 +394,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         clamp(refl_uv + vec2<f32>( 0.0,  texel.y * blur), vec2<f32>(0.0), vec2<f32>(1.0)), 0.0).rgb;
     refl_sum = refl_sum + textureSampleLevel(reflection_tex, reflection_sampler,
         clamp(refl_uv + vec2<f32>( 0.0, -texel.y * blur), vec2<f32>(0.0), vec2<f32>(1.0)), 0.0).rgb;
-    let sky_reflection = refl_sum * 0.2;
+    let sky_reflection = refl_sum * 0.2 * sky_reflection_light;
     // Fallback for the still-handy horizon colour (used by the
     // distance-fog blend below).
     let horizon = vec3<f32>(0.65, 0.80, 1.00) * camera.sun_intensity
@@ -416,7 +434,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let sun_core_color = vec3<f32>(1.00, 0.98, 0.90);
     let sun_color      = vec3<f32>(1.00, 0.92, 0.70);
     let sun_warm       = vec3<f32>(1.00, 0.78, 0.45);
-    let sun_glint = sun_core_color * core + sun_color * trail + sun_warm * halo;
+    let sun_glint = (sun_core_color * core + sun_color * trail + sun_warm * halo) * sky_level;
 
     // Compose: water body → blend toward sky reflection by fresnel,
     // then add the sun trail on top. The trail is bright enough
@@ -440,13 +458,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let pix = vec2<i32>(in.clip_pos.xy);
     let scene_d   = textureLoad(scene_depth, pix, 0);
     let water_d   = in.clip_pos.z;
+    let has_scene_depth = scene_d < 0.9999;
     let scene_lin = linear_depth(scene_d);
     let water_lin = linear_depth(water_d);
     // `depth_diff` is the world-space distance the camera's view ray
     // travels through water before hitting the bottom. Zero where
     // the water surface IS the bottom (i.e., the camera is grazing
     // a shoreline), grows with depth toward open water.
-    let depth_diff = max(0.0, scene_lin - water_lin);
+    let depth_diff = select(2.5, max(0.0, scene_lin - water_lin), has_scene_depth);
 
     // Shoreline foam: brighten the surface toward white in a thin
     // ribbon where water meets a shallow bottom. The smoothstep
@@ -475,21 +494,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let depth_curve = pow(depth_t, 0.7);
     let deep_tint = vec3<f32>(0.04, 0.18, 0.32);
 
-    // Sample the chunk light volume at the water surface's air-side.
-    // See the long comment in opaque.wgsl: `min(face_normal, 0)` lands
-    // sample_local inside the air-side cell (PosY: same y as vertex;
-    // NegY: one cell back) so trilinear reads the surface illumination
-    // rather than a 50/50 blend with the opaque cell on the far side.
-    let sample_world = in.v_world + min(in.v_face_normal, vec3<f32>(0.0));
-    let chunk_local  = sample_world - chunk.origin.xyz;
-    let uvw          = (chunk_local + vec3<f32>(0.5, 0.5, 0.5)) / 33.0;
-    let lvol         = textureSampleLevel(light_volume, light_sampler, uvw, 0.0);
-    let sky_level    = lvol.a;
-    let block_rgb    = lvol.rgb;
     // Apply ambient + block light to the water's surface colour. This
     // matches the opaque shader's composition style but at a milder
     // strength so water still reads as water (not painted).
-    rgb = rgb * (camera.sky_color.rgb * sky_level * 0.4 + block_rgb * 0.6 + vec3<f32>(0.25));
+    rgb = rgb * (camera.sky_color.rgb * sky_level * 0.4 + block_rgb * 0.6 + vec3<f32>(0.08));
 
     rgb = mix(rgb, deep_tint, depth_curve * 0.75);
 
@@ -502,7 +510,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // wasn't opaque enough to mask anything past the first few
     // blocks. The shader-pack look depends on the surface itself
     // being the visual subject, not the bottom seen through it.
-    let alpha = mix(0.78, 0.97, fresnel);
+    let alpha = select(0.35, mix(0.78, 0.97, fresnel), has_scene_depth);
 
     return vec4<f32>(rgb, alpha);
 }

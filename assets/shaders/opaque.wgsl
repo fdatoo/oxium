@@ -311,7 +311,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         lit = vec3<f32>(1.0, 1.0, 1.0);
     }
 
-    let MIN_SHADE = vec3<f32>(0.02, 0.02, 0.02);
+    // Low neutral cave floor. Voxel light still controls shape, but fully
+    // unlit stone should not collapse to pure black on an SDR display.
+    let MIN_SHADE = vec3<f32>(0.07, 0.075, 0.085);
 
     // Per-block brightness jitter: a small ±6% modulation keyed off
     // the world-space block coordinate. Neighbouring blocks (whole
@@ -341,15 +343,21 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let fog_end   = 360.0;
     let fog_t = clamp((dist - fog_start) / (fog_end - fog_start), 0.0, 1.0);
     // Fog colour: a per-fragment blend between the horizon sky tint
-    // and a near-black "cave" colour. Picked by `in.v_light` — the
-    // fragment's own sky+block light — so deep-cave fragments fade
-    // into darkness instead of the bright sky horizon. Without this
-    // the sky-fog leaks into underground views and distant stone
-    // walls read as washed-out white. The min(0.05) floor avoids
-    // pure black, leaving a hint of colour to silhouette the bulk.
+    // and a near-black "cave" colour. Use both the mesh-baked light
+    // and sampled light volume so pre-relight meshes backed by the
+    // ambient fallback volume don't fade to black while waiting for
+    // their real relight commit.
     let sky_fog = horizon_color(camera.sun_intensity);
-    let cave_fog = vec3<f32>(0.02, 0.02, 0.03);
-    let fog_col = mix(cave_fog, sky_fog, max(in.v_light, 0.05));
+    let cave_fog = vec3<f32>(0.04, 0.045, 0.055);
+    let volume_light = max(
+        sky_level * camera.sun_intensity,
+        max(block_rgb.r, max(block_rgb.g, block_rgb.b)),
+    );
+    let fog_col = mix(
+        cave_fog,
+        sky_fog,
+        max(max(in.v_light, volume_light), 0.05),
+    );
     var out_rgb = mix(lit_rgb, fog_col, fog_t);
 
     // Tonemap + underwater tint both live in composite.wgsl as of

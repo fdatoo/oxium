@@ -40,7 +40,7 @@ pub const UNLOAD_RADIUS: i32 = RENDER_RADIUS + 3;
 pub const UNLOAD_VERT: i32 = VERTICAL_RADIUS + 1;
 
 /// Compute the chunk the player currently stands in.
-fn player_chunk(pos: glam::Vec3) -> ChunkCoord {
+pub(crate) fn player_chunk(pos: glam::Vec3) -> ChunkCoord {
     ChunkCoord(IVec3::new(
         (pos.x / 32.0).floor() as i32,
         (pos.y / 32.0).floor() as i32,
@@ -272,11 +272,6 @@ pub fn world_unload(
             save_index.mark(c);
         }
         world.chunks.remove(&c);
-        // Evict the decompressed copy from the lighting cache. If this chunk
-        // is re-loaded later, the cache will re-decompress from the fresh data;
-        // a stale entry would cause the engine to propagate light through the
-        // old voxel layout instead.
-        world.light_engine.invalidate_chunk(c);
         renderer.remove_chunk_mesh(c);
     }
 }

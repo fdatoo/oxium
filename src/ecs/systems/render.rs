@@ -10,7 +10,7 @@ use crate::app::PerfSnapshot;
 use crate::ecs::GameEcs;
 use crate::ecs::components::{Camera, CursorTarget, Position, Selected, Sun, TimeOfDay};
 use crate::render::Renderer;
-use crate::render::hud::{HOTBAR_BLOCKS, SkyProbe, WorldDebug, build_hud};
+use crate::render::hud::{HOTBAR_BLOCKS, SkyProbe, TargetProbe, WorldDebug, build_hud};
 use crate::voxel::block::BlockRegistry;
 use crate::voxel::coords::{BlockPos, ChunkCoord, LocalPos};
 use crate::voxel::world::{ChunkSlot, World};
@@ -81,6 +81,7 @@ pub fn render(
         .unwrap_or(0.5);
     let probe = generator.probe_column(eye.x as i32, eye.z as i32);
     let sky = sky_probe(world, eye);
+    let target_probe = target_probe(world, renderer, target.hit.map(|(b, _)| b));
     let world_debug = WorldDebug {
         seed: generator.seed(),
         time_of_day,
@@ -88,6 +89,7 @@ pub fn render(
         pitch: cam.pitch,
         probe: &probe,
         sky,
+        target: target_probe,
     };
 
     let (sw, sh) = renderer.framebuffer_size();
@@ -112,6 +114,30 @@ pub fn render(
         fullbright,
         Some(&hud),
     )
+}
+
+fn target_probe(world: &World, renderer: &Renderer, pos: Option<BlockPos>) -> Option<TargetProbe> {
+    let pos = pos?;
+    let chunk = pos.to_chunk();
+    let local = pos.to_local();
+    let idx = local.to_index();
+    let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get(&chunk) else {
+        return None;
+    };
+    let (r, g, b) = data.block_rgb_at(idx);
+    Some(TargetProbe {
+        pos: pos.0,
+        chunk: chunk.0,
+        local: local.0,
+        block: data.block_at(idx),
+        sky: data.sky_light_at(idx),
+        rgb: [r, g, b],
+        chunk_state: meta.state,
+        light_state: meta.light_state,
+        dirty_mesh: meta.dirty.mesh,
+        dirty_light: meta.dirty.light,
+        gpu_light: renderer.has_chunk_light_volume(chunk),
+    })
 }
 
 /// Read `sky_light` around the eye for the debug HUD. Reads straight

@@ -2,8 +2,8 @@
 //!
 //! Two BFS flood-fills, run on a worker thread:
 //!
-//! - **Sky light** drops 15 from the world ceiling and falls off by 1 per
-//!   non-opaque step (water costs 3).
+//! - **Sky light** drops 15 from the world ceiling. Air is lossless,
+//!   translucent solids attenuate, and water costs 3 per vertical step.
 //! - **Block light** spreads outward from blocks with `info.emission > 0`.
 //!
 //! Both are *recompute-on-dirty*: an edit reseeds and re-runs the BFS instead
@@ -11,27 +11,17 @@
 //! milliseconds of worker time for ~10× less code complexity — see the design
 //! spec's "Why recompute over incremental" table.
 
-#[cfg(feature = "legacy-lighting")]
 use crate::voxel::block::{Block, BlockRegistry};
-#[cfg(feature = "legacy-lighting")]
-use crate::voxel::chunk::{DenseChunk, Neighbors, pack_rgb, unpack_rgb};
-#[cfg(feature = "legacy-lighting")]
+use crate::voxel::chunk::{ChunkLightInputs, DenseChunk, Neighbors, pack_rgb, unpack_rgb};
 use crate::voxel::coords::{CHUNK_DIM_U, LocalPos};
-#[cfg(feature = "legacy-lighting")]
 use glam::UVec3;
-#[cfg(feature = "legacy-lighting")]
 use std::collections::VecDeque;
 
-pub mod engine;
-pub mod queue;
 pub mod sky_sources;
 
-pub use engine::{ChannelEngine, LightEngine, RgbChannel};
-pub use queue::{BucketQueue, QueueEntry};
 pub use sky_sources::{ChunkSkyLightSources, NO_SOURCE_FLOOR};
 
 /// Chunk side length as a signed integer (mirrors `D` in the mesher).
-#[cfg(feature = "legacy-lighting")]
 const D: i32 = CHUNK_DIM_U as i32;
 
 /// Recompute *both* sky and block light for one chunk, in place.
@@ -41,21 +31,35 @@ const D: i32 = CHUNK_DIM_U as i32;
 /// only spreads *within* this chunk — cross-boundary leaks are picked up
 /// later by the streaming system, which marks the bordering chunk as
 /// `light_dirty` and queues another recompute.
-#[cfg(feature = "legacy-lighting")]
 pub fn recompute_chunk(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegistry) {
-    sky_light(chunk, neighbors, reg);
+    sky_light(chunk, neighbors, None, reg);
+    block_rgb(chunk, neighbors, reg);
+}
+
+pub fn recompute_chunk_with_inputs(
+    chunk: &mut DenseChunk,
+    neighbors: &Neighbors<'_>,
+    inputs: &ChunkLightInputs,
+    reg: &BlockRegistry,
+) {
+    sky_light(chunk, neighbors, Some(inputs), reg);
     block_rgb(chunk, neighbors, reg);
 }
 
 /// Compute sky light: each column drops `15` straight down until it hits an
-/// opaque block; non-opaque non-air blocks (e.g. leaves, water) cost 1 per
-/// step. A BFS pass then spreads light horizontally so overhangs receive
+/// opaque block. Air is lossless in the vertical drop; water costs 3 and
+/// other transparent non-air blocks cost 1. A BFS pass then spreads light
+/// horizontally so overhangs receive
 /// the correct gradient — and is seeded both from the vertical drop and
 /// from the four lateral chunk neighbours' boundary cells, so a tunnel
 /// dug across a chunk seam keeps a smooth light gradient instead of
 /// hard-switching to black at the boundary.
-#[cfg(feature = "legacy-lighting")]
-fn sky_light(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegistry) {
+fn sky_light(
+    chunk: &mut DenseChunk,
+    neighbors: &Neighbors<'_>,
+    inputs: Option<&ChunkLightInputs>,
+    reg: &BlockRegistry,
+) {
     chunk.sky_light.iter_mut().for_each(|v| *v = 0);
 
     // The chunk-above neighbour, if loaded — its bottom row tells us how
@@ -67,7 +71,7 @@ fn sky_light(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegis
         for x in 0..D {
             let mut light = match above {
                 Some(a) => a.sky_light[LocalPos(UVec3::new(x as u32, 0, z as u32)).to_index()],
-                None => 15,
+                None => inputs.map_or(15, |i| i.top_sky_at(x as u32, z as u32)),
             };
             for y in (0..D).rev() {
                 let idx = LocalPos(UVec3::new(x as u32, y as u32, z as u32)).to_index();
@@ -77,18 +81,19 @@ fn sky_light(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegis
                     light = 0;
                 }
                 chunk.sky_light[idx] = light;
-                // Drop 1 step of attenuation when continuing through
-                // non-opaque (but not perfectly transparent: air doesn't
-                // attenuate, leaves do — we encode that as the BFS step
-                // cost below, not in the vertical drop).
-                if light > 0 && !info.opaque && chunk.blocks[idx] != Block::Air {
-                    light = light.saturating_sub(1);
+                if light > 0 && !info.opaque {
+                    let cost = match chunk.blocks[idx] {
+                        Block::Air => 0,
+                        Block::Water => 3,
+                        _ => 1,
+                    };
+                    light = light.saturating_sub(cost);
                 }
             }
         }
     }
 
-    // Lateral boundary inflow: for each ±X / ±Z / -Y neighbour, copy its
+    // Lateral boundary inflow: for each ±X / ±Z neighbour, copy its
     // *mirror* boundary cells into our cells along that face, minus one
     // attenuation step (the cost of crossing the seam). This is what
     // makes a tunnel that crosses chunk boundaries keep its gradient —
@@ -113,7 +118,6 @@ fn sky_light(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegis
     bfs_spread_sky(&mut q, chunk, reg);
 }
 
-#[cfg(feature = "legacy-lighting")]
 #[derive(Copy, Clone)]
 enum BfsChannel {
     Sky,
@@ -131,18 +135,21 @@ enum BfsChannel {
 /// neighbour was just regenerated and has high light at its boundary
 /// (e.g., the lit end of a tunnel), this seeds *our* boundary cells
 /// so the BFS continues the gradient from there.
-#[cfg(feature = "legacy-lighting")]
 fn seed_from_neighbors(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, channel: BfsChannel) {
     use crate::mesher::Face;
     for face in Face::all() {
-        // Sky light: +Y inflow is handled by the column drop above; the
-        // boundary-seed pass would re-seed those columns to whatever the
-        // above-chunk's bottom holds, which may be `0` (the above chunk
-        // is solid stone) — overwriting the vertical pass's correct
-        // value with 0 isn't a problem because we take `max`, but skip
-        // for clarity.
-        if matches!(channel, BfsChannel::Sky) && face == Face::PosY {
-            continue;
+        if matches!(channel, BfsChannel::Sky) {
+            match face {
+                // +Y inflow is handled by the column drop above.
+                //
+                // -Y is deliberately not a sky source. Importing sky upward
+                // from the chunk below lets stale lower chunks keep a sealed
+                // shaft alive after an opaque edit, and can create feedback
+                // where isolated cave chunks relight one another. Sunlight
+                // enters downward through +Y, then spreads horizontally.
+                Face::PosY | Face::NegY => continue,
+                _ => {}
+            }
         }
         let Some(n) = neighbors.chunks[face as usize] else {
             continue;
@@ -179,14 +186,13 @@ fn seed_from_neighbors(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, channe
 /// `block_rgb` channels) into one `Vec<u8>` per face, ordered by
 /// [`crate::mesher::Face`] discriminant. Used by the relight worker
 /// to detect which faces' boundary values actually changed after the
-/// BFS — the Relit handler then cascades `dirty.light` only to the
-/// neighbours that would consume the changed values.
+/// BFS — the Relit handler then invalidates only the neighbours that
+/// would consume the changed values.
 ///
 /// Each face's `Vec` is `D² × 4` bytes: sky, R, G, B per cell,
 /// walked in the same `(u, v)` order as `mirror_boundary`. The
 /// per-byte comparison is cheap (~12 KB total per chunk) and exact —
 /// no hash collisions to worry about.
-#[cfg(feature = "legacy-lighting")]
 pub fn snapshot_face_boundaries(chunk: &crate::voxel::chunk::DenseChunk) -> [Vec<u8>; 6] {
     use crate::mesher::Face;
     std::array::from_fn(|face_i| {
@@ -220,8 +226,7 @@ pub fn snapshot_face_boundaries(chunk: &crate::voxel::chunk::DenseChunk) -> [Vec
 /// in the two axes orthogonal to the face's normal; `face` decides
 /// which axis is `u` vs `v` and which extreme of the chunk dimension
 /// the boundary sits on.
-#[cfg(feature = "legacy-lighting")]
-fn mirror_boundary(face: crate::mesher::Face, u: i32, v: i32) -> (LocalPos, LocalPos) {
+pub fn mirror_boundary(face: crate::mesher::Face, u: i32, v: i32) -> (LocalPos, LocalPos) {
     use crate::mesher::Face;
     let last = D as u32 - 1;
     let (ours, theirs) = match face {
@@ -259,7 +264,6 @@ fn mirror_boundary(face: crate::mesher::Face, u: i32, v: i32) -> (LocalPos, Loca
 /// extra in water). Boundary cells are also seeded from neighbour chunks so
 /// colored sources continue to glow into adjacent chunks rather than
 /// hard-cutting at the seam.
-#[cfg(feature = "legacy-lighting")]
 fn block_rgb(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegistry) {
     chunk.block_rgb.iter_mut().for_each(|v| *v = 0);
 
@@ -304,7 +308,6 @@ fn block_rgb(chunk: &mut DenseChunk, neighbors: &Neighbors<'_>, reg: &BlockRegis
 
 /// Sky BFS step. Spreads sky light to neighbours within this chunk only;
 /// cross-chunk spread is the streaming system's responsibility.
-#[cfg(feature = "legacy-lighting")]
 fn bfs_spread_sky(
     q: &mut VecDeque<(i32, i32, i32, u8)>,
     chunk: &mut DenseChunk,
@@ -347,7 +350,6 @@ fn bfs_spread_sky(
 /// RGB BFS step. Spreads all three channels simultaneously to neighbours
 /// within this chunk only; cross-chunk spread is the streaming system's
 /// responsibility (via `light_dirty` cascade).
-#[cfg(feature = "legacy-lighting")]
 fn bfs_spread_rgb(
     q: &mut VecDeque<(i32, i32, i32, u16)>,
     chunk: &mut DenseChunk,
@@ -392,10 +394,11 @@ fn bfs_spread_rgb(
     }
 }
 
-#[cfg(all(test, feature = "legacy-lighting"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::voxel::chunk::DenseChunk;
+    use glam::IVec3;
 
     fn empty_neighbors() -> Neighbors<'static> {
         Neighbors { chunks: [None; 6] }
@@ -453,5 +456,69 @@ mod tests {
         recompute_chunk(&mut c, &empty_neighbors(), &r);
         assert_eq!(c.sky_light[LocalPos(UVec3::new(10, 25, 10)).to_index()], 15);
         assert_eq!(c.sky_light[LocalPos(UVec3::new(10, 19, 10)).to_index()], 0);
+    }
+
+    #[test]
+    fn vertical_water_column_attenuates_sky() {
+        let mut c = DenseChunk::empty();
+        for z in 0..32 {
+            for x in 0..32 {
+                for y in 20..=31 {
+                    c.set(LocalPos(UVec3::new(x, y, z)), Block::Water);
+                }
+            }
+        }
+        let r = BlockRegistry::new();
+        recompute_chunk(&mut c, &empty_neighbors(), &r);
+        assert_eq!(c.sky_light[LocalPos(UVec3::new(10, 31, 10)).to_index()], 15);
+        assert_eq!(c.sky_light[LocalPos(UVec3::new(10, 26, 10)).to_index()], 0);
+        assert_eq!(c.sky_light[LocalPos(UVec3::new(10, 19, 10)).to_index()], 0);
+    }
+
+    #[test]
+    fn manifest_controls_missing_above_sky_inflow() {
+        let mut c = DenseChunk::empty();
+        let r = BlockRegistry::new();
+        let inputs =
+            ChunkLightInputs::from_dense(&c, crate::voxel::coords::ChunkCoord(IVec3::ZERO), &r);
+        recompute_chunk_with_inputs(&mut c, &empty_neighbors(), &inputs, &r);
+        assert!(
+            c.sky_light.iter().all(|&v| v == 0),
+            "missing +Y with no worldgen sky hint must not assume full daylight"
+        );
+    }
+
+    #[test]
+    fn manifest_open_sky_hint_lights_missing_above() {
+        let mut c = DenseChunk::empty();
+        let r = BlockRegistry::new();
+        let inputs = ChunkLightInputs::from_dense_with_surface(
+            &c,
+            crate::voxel::coords::ChunkCoord(IVec3::ZERO),
+            &r,
+            |_, _| Some(-1),
+        );
+        recompute_chunk_with_inputs(&mut c, &empty_neighbors(), &inputs, &r);
+        assert!(c.sky_light.iter().all(|&v| v == 15));
+    }
+
+    #[test]
+    fn sky_does_not_seed_upward_from_below_neighbor() {
+        let mut c = DenseChunk::empty();
+        let mut below = DenseChunk::empty();
+        below.sky_light.iter_mut().for_each(|v| *v = 15);
+        let r = BlockRegistry::new();
+        let inputs =
+            ChunkLightInputs::from_dense(&c, crate::voxel::coords::ChunkCoord(IVec3::ZERO), &r);
+        let neighbors = Neighbors {
+            chunks: [None, None, None, Some(&below), None, None],
+        };
+
+        recompute_chunk_with_inputs(&mut c, &neighbors, &inputs, &r);
+
+        assert!(
+            c.sky_light.iter().all(|&v| v == 0),
+            "stale lower chunks must not keep sealed sky light alive"
+        );
     }
 }

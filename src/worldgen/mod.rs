@@ -51,8 +51,8 @@
 //! point that wires them together.
 
 use crate::voxel::block::Block;
-use crate::voxel::chunk::DenseChunk;
-use crate::voxel::coords::{ChunkCoord, LocalPos, CHUNK_DIM_U};
+use crate::voxel::chunk::{ChunkLightInputs, DenseChunk};
+use crate::voxel::coords::{CHUNK_DIM_U, ChunkCoord, LocalPos};
 use crate::worldgen::tuning::{FINE_REGION_SIZE, MAX_TERRAIN_Y, TREE_RATE_TROPICAL};
 use glam::UVec3;
 use noise::{Fbm, MultiFractal, NoiseFn, Simplex};
@@ -1599,6 +1599,36 @@ impl Generator {
         // overlap this one) are placed too, because we scan every
         // cell in a `TREE_MARGIN`-block ring around the chunk.
         self.add_trees(coord, out, &regions);
+    }
+
+    pub fn light_inputs_for_chunk(
+        &self,
+        coord: ChunkCoord,
+        dense: &DenseChunk,
+        registry: &crate::voxel::block::BlockRegistry,
+    ) -> ChunkLightInputs {
+        let origin = coord.origin().0;
+        let regions = self.gather_chunk_regions(coord);
+        let valley_depth_grid = regions.valley_grid(origin.x, origin.z, self.seed);
+        let dim = CHUNK_DIM_U as usize;
+        let mut surfaces = [0i32; 32 * 32];
+        for z in 0..CHUNK_DIM_U {
+            for x in 0..CHUNK_DIM_U {
+                let wx = origin.x + x as i32;
+                let wz = origin.z + z as i32;
+                let col = self.column_data_with(
+                    wx,
+                    wz,
+                    &regions,
+                    Some(valley_depth_grid[z as usize][x as usize]),
+                );
+                surfaces[z as usize * dim + x as usize] = col.height;
+            }
+        }
+
+        ChunkLightInputs::from_dense_with_surface(dense, coord, registry, |x, z| {
+            Some(surfaces[z as usize * dim + x as usize])
+        })
     }
 
     /// Place all trees whose blocks could overlap `coord`'s chunk

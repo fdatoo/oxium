@@ -240,7 +240,7 @@ pub struct Renderer {
     light_sampler: wgpu::Sampler,
     /// Held alive so `placeholder_light_view` stays valid.
     _placeholder_light_tex: wgpu::Texture,
-    /// 1×1×1 black light volume used when a chunk's real volume hasn't
+    /// 1×1×1 ambient light volume used when a chunk's real volume hasn't
     /// uploaded yet (Meshed-before-Relit race). Keeps draw paths from
     /// crashing on missing bind-group entries.
     placeholder_light_view: wgpu::TextureView,
@@ -293,8 +293,11 @@ impl Renderer {
             mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
-        // 1×1×1 black 3D texture as the placeholder when a chunk's real
-        // light volume hasn't been uploaded yet.
+        // 1×1×1 dark 3D texture as the placeholder when a chunk's real
+        // light volume hasn't been uploaded yet. The shader's cave floor
+        // keeps this readable, but it must not pretend to be skylight:
+        // underground chunks can otherwise flash as fully sun-lit while
+        // their relight result is still queued.
         let placeholder_light_tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("chunk-light-placeholder"),
             size: wgpu::Extent3d {
@@ -869,15 +872,20 @@ impl Renderer {
         }
     }
 
-    /// Drop the per-chunk light volume (called when the chunk unloads).
-    pub fn remove_chunk_light_volume(&mut self, coord: ChunkCoord) {
-        self.chunk_lights.remove(&coord);
-    }
-
     /// Number of chunk hashmap entries (one per coord, regardless of how
     /// many LOD slots are filled). Exposed for the debug HUD (M10).
     pub fn chunk_mesh_count(&self) -> usize {
         self.chunk_meshes.len()
+    }
+
+    pub fn has_chunk_mesh(&self, coord: ChunkCoord) -> bool {
+        self.chunk_meshes
+            .get(&coord)
+            .is_some_and(|slots| slots.iter().any(Option::is_some))
+    }
+
+    pub fn has_chunk_light_volume(&self, coord: ChunkCoord) -> bool {
+        self.chunk_lights.contains_key(&coord)
     }
 
     /// Number of `draw_indexed` calls the last opaque pass issued.

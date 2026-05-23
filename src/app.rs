@@ -108,11 +108,8 @@ pub struct AppState {
 /// hand back, so there's no stale-data hazard.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PerfSnapshot {
-    /// Chunks currently flagged `dirty.light` and waiting for the
-    /// relight pump. Non-zero means lighting is still converging — a
-    /// number that holds steady (instead of trending toward zero) is
-    /// the smoking gun for a cascade that doesn't terminate.
-    #[cfg(feature = "legacy-lighting")]
+    /// Chunks waiting for the relight pump. Non-zero means lighting is
+    /// still converging.
     pub light_queue: usize,
     /// LOD0 mesh slots currently held by the renderer. Useful as a
     /// proxy for "is the world fully streamed in yet."
@@ -142,9 +139,8 @@ pub struct PerfSnapshot {
     /// the renderer fed to wgpu, useful for spotting "the CPU is
     /// spending most of the frame in `wgpu::draw_indexed` overhead".
     pub draw_calls: u32,
-    /// Graph-engine op queue depth entering this frame (pre-tick snapshot).
-    /// Non-zero during initial stream-in; approaches zero as light converges.
-    /// Always 0 under `legacy-lighting` (use `light_queue` there instead).
+    /// Relight backlog mirrored into profiler fields that historically
+    /// reported lighting work depth.
     pub light_ops_pending: usize,
 }
 
@@ -390,8 +386,39 @@ impl AppState {
             // `&mut self` while `prof` is still borrowed; the cost
             // shows up in the next step's `WMS` reading instead.
             let edit_start = std::time::Instant::now();
-            for c in &dirty_chunks {
-                Self::apply_edit_inline(&mut self.world, &mut self.renderer, &self.registry, *c);
+            if !dirty_chunks.is_empty() {
+                let dirty_set: std::collections::HashSet<_> =
+                    dirty_chunks.iter().copied().collect();
+                for c in &dirty_chunks {
+                    Self::apply_edit_inline(
+                        &mut self.world,
+                        &mut self.renderer,
+                        &self.registry,
+                        *c,
+                        Some(&dirty_set),
+                        false,
+                        false,
+                    );
+                }
+                for c in &dirty_chunks {
+                    Self::apply_edit_inline(
+                        &mut self.world,
+                        &mut self.renderer,
+                        &self.registry,
+                        *c,
+                        None,
+                        true,
+                        false,
+                    );
+                }
+                for c in &dirty_chunks {
+                    Self::refresh_edit_upload_inline(
+                        &mut self.world,
+                        &mut self.renderer,
+                        &self.registry,
+                        *c,
+                    );
+                }
             }
             if let Some(p) = self.profiler.as_ref() {
                 p.record(
@@ -429,41 +456,29 @@ impl AppState {
                     &self.registry,
                 )
             });
-            let light_pending = self.world.light_engine.pending_ops_count();
-            // Fixed 50k-op budget every frame. The higher 500k "streaming" budget that was
-            // here before caused 37% of main-thread time to be spent in PalettedChunk::decompress
-            // (TickCache is recreated each tick, so every unique chunk the engine touches costs
-            // one decompress). At 50k ops the engine keeps up with generation throughput
-            // (50k × FPS >> per-chunk lighting ops) and the frame loop stays below 2ms.
-            let light_budget = 50_000_usize;
-            self.perf.light_ops_pending = light_pending;
-            time(prof, "light_engine_tick", || {
-                self.world.light_engine_tick(light_budget);
-            });
-            time(prof, "upload_dirty_light_volumes", || {
-                crate::ecs::systems::mesh_upload::upload_dirty_light_volumes(
-                    &mut self.world,
-                    &self.jobs,
-                );
-            });
             // Relight pump runs after the two job-drain stages so it picks
-            // up the `dirty.light` flags those handlers just set on newly
+            // up the lighting states those handlers just set on newly
             // loaded/generated chunks. Each frame queues a bounded number
             // of relight jobs; over a few seconds the world converges to
             // a fixed lighting state with correct cross-chunk propagation.
-            // The return value is the *total* (not just dispatched) count
-            // of `dirty.light` chunks, stored in `perf.light_queue` for
-            // legacy builds; the graph-engine HUD uses `light_ops_pending`.
-            #[cfg(feature = "legacy-lighting")]
-            {
-                self.perf.light_queue = time(prof, "relight_pump", || {
-                    crate::ecs::systems::mesh_upload::relight_pump(
-                        &mut self.world,
-                        &self.jobs,
-                        &self.registry,
-                    )
-                }) as u32 as _;
-            }
+            let relight_priority = {
+                let mut q = self
+                    .ecs
+                    .world
+                    .query_one::<&crate::ecs::components::Position>(self.ecs.player)
+                    .unwrap();
+                q.get()
+                    .map(|pos| crate::ecs::systems::world_stream::player_chunk(pos.0))
+            };
+            self.perf.light_queue = time(prof, "relight_pump", || {
+                crate::ecs::systems::mesh_upload::relight_pump(
+                    &mut self.world,
+                    &self.jobs,
+                    &self.registry,
+                    relight_priority,
+                )
+            });
+            self.perf.light_ops_pending = self.perf.light_queue;
             self.perf.chunks_rendered = self.renderer.chunk_mesh_count();
             self.perf.draw_calls = self.renderer.last_draw_calls();
             // Walk the world chunks once to count Stored vs Pending so
@@ -579,20 +594,23 @@ impl AppState {
         self.frame_edit_count = 0;
     }
 
-    /// Run relight + LOD0 mesh + GPU upload for a single edit-dirtied
-    /// chunk synchronously on the main thread. Called once per
-    /// affected chunk in the same step that the edit happened. The
-    /// total cost is roughly one chunk decompress + one BFS + one
-    /// greedy mesh + one wgpu buffer upload — about 5-10 ms even on
-    /// the worst case — which beats every alternative that puts the
-    /// work on a worker pool already saturated with stream-in jobs.
+    /// Run relight for a single edit-dirtied chunk synchronously on
+    /// the main thread, optionally followed by LOD0 mesh + GPU upload.
+    /// Edits use two relight passes over the dirty neighbourhood: first
+    /// without importing light from other dirty chunks to clear removed
+    /// sources, then with the freshly recomputed neighbours to restore
+    /// valid cross-border propagation.
     fn apply_edit_inline(
         world: &mut crate::voxel::world::World,
         renderer: &mut crate::render::Renderer,
         registry: &crate::voxel::block::BlockRegistry,
         coord: crate::voxel::coords::ChunkCoord,
+        excluded_light_neighbors: Option<
+            &std::collections::HashSet<crate::voxel::coords::ChunkCoord>,
+        >,
+        force_light: bool,
+        upload_now: bool,
     ) {
-        #[cfg(feature = "legacy-lighting")]
         use crate::voxel::chunk::{ChunkDirty, ChunkState, PalettedChunk};
         use crate::voxel::chunk::{DenseChunk, Neighbors};
         use crate::voxel::world::ChunkSlot;
@@ -600,10 +618,8 @@ impl AppState {
         let Some(ChunkSlot::Stored { data, meta }) = world.chunks.get(&coord) else {
             return;
         };
-        #[cfg(feature = "legacy-lighting")]
-        let needs_light = meta.dirty.light;
-        #[cfg(not(feature = "legacy-lighting"))]
-        let _ = meta;
+        let needs_light = force_light || meta.dirty.light;
+        let light_inputs = meta.light_inputs.clone();
         let data_arc = data.clone();
 
         // Decompress chunk + neighbours up-front so the greedy mesher
@@ -614,7 +630,7 @@ impl AppState {
             .iter()
             .map(|opt| opt.as_ref().map(|p| p.decompress()))
             .collect();
-        let neighbor_refs: [Option<&DenseChunk>; 6] = [
+        let mesh_neighbor_refs: [Option<&DenseChunk>; 6] = [
             neighbor_dense[0].as_ref(),
             neighbor_dense[1].as_ref(),
             neighbor_dense[2].as_ref(),
@@ -622,26 +638,51 @@ impl AppState {
             neighbor_dense[4].as_ref(),
             neighbor_dense[5].as_ref(),
         ];
-        let ns = Neighbors {
-            chunks: neighbor_refs,
+        let neighbor_coords = crate::ecs::systems::mesh_upload::neighbor_coords(coord);
+        let neighbor_lit: [bool; 6] = std::array::from_fn(|i| {
+            if excluded_light_neighbors.is_some_and(|set| set.contains(&neighbor_coords[i])) {
+                return false;
+            }
+            crate::ecs::systems::mesh_upload::chunk_light_usable(world, neighbor_coords[i])
+        });
+        let light_neighbor_refs: [Option<&DenseChunk>; 6] = [
+            neighbor_lit[0]
+                .then_some(())
+                .and(neighbor_dense[0].as_ref()),
+            neighbor_lit[1]
+                .then_some(())
+                .and(neighbor_dense[1].as_ref()),
+            neighbor_lit[2]
+                .then_some(())
+                .and(neighbor_dense[2].as_ref()),
+            neighbor_lit[3]
+                .then_some(())
+                .and(neighbor_dense[3].as_ref()),
+            neighbor_lit[4]
+                .then_some(())
+                .and(neighbor_dense[4].as_ref()),
+            neighbor_lit[5]
+                .then_some(())
+                .and(neighbor_dense[5].as_ref()),
+        ];
+        let light_ns = Neighbors {
+            chunks: light_neighbor_refs,
         };
 
         // Relight the edited chunk in-place. Skipped when the edit
         // only dirtied a neighbour's mesh (no `dirty.light` set).
-        // In the default (engine) build, the graph engine handles
-        // light propagation — the inline path just re-meshes.
-        #[cfg(feature = "legacy-lighting")]
         if needs_light {
-            crate::lighting::recompute_chunk(&mut dense, &ns, registry);
+            crate::lighting::recompute_chunk_with_inputs(
+                &mut dense,
+                &light_ns,
+                &light_inputs,
+                registry,
+            );
         }
-
-        // Mesh from the (possibly relit) dense data.
-        let mesh = crate::mesher::greedy::mesh_greedy(&dense, &neighbor_refs, registry);
 
         // Swap the relit data back into the chunk slot if we did
         // relight; bump the version so any in-flight cascade mesh
         // for this chunk gets discarded on completion.
-        #[cfg(feature = "legacy-lighting")]
         if needs_light {
             let new_data = std::sync::Arc::new(PalettedChunk::compress(&dense));
             if let Some(ChunkSlot::Stored { data: cur, meta }) = world.chunks.get_mut(&coord) {
@@ -651,21 +692,98 @@ impl AppState {
                     light: false,
                 };
                 meta.state = ChunkState::Generated;
+                meta.light_state = crate::voxel::chunk::LightState::Lit {
+                    version: meta.light_version,
+                };
+                meta.unresolved_borders = crate::voxel::chunk::FaceMask::NONE;
                 meta.mesh_version = meta.mesh_version.wrapping_add(1);
             }
         }
+
+        if !upload_now {
+            return;
+        }
+
+        // Mesh from the (possibly relit) dense data.
+        let mesh = crate::mesher::greedy::mesh_greedy(&dense, &mesh_neighbor_refs, registry);
+        // Upload the light volume before the mesh so the new chunk bind
+        // group never has to point at the renderer placeholder.
+        let blob = crate::voxel::chunk::build_light_volume_blob(&dense, &light_ns);
+        renderer.upload_chunk_light_volume(coord, blob.as_ref());
 
         // Upload the freshly-built mesh. No version check needed —
         // we just generated it from the current data on the main
         // thread, so by definition it's the latest.
         renderer.upload_chunk_mesh(coord, 0, &mesh);
-        // Upload the light volume too — without this the GPU keeps
-        // the pre-edit values and broken/placed blocks render against
-        // stale lighting (pits stay pitch-black, torches don't bleed
-        // their RGB into neighbours). Cheap (one wgpu queue write of
-        // ~144 KB) and the path is hot enough that the cost is fine.
-        let blob = crate::voxel::chunk::build_light_volume_blob(&dense, &ns);
+        if let Some(ChunkSlot::Stored { meta, .. }) = world.chunks.get_mut(&coord) {
+            meta.state = ChunkState::Ready;
+            meta.dirty.mesh = false;
+        }
+    }
+
+    fn refresh_edit_upload_inline(
+        world: &mut crate::voxel::world::World,
+        renderer: &mut crate::render::Renderer,
+        registry: &crate::voxel::block::BlockRegistry,
+        coord: crate::voxel::coords::ChunkCoord,
+    ) {
+        use crate::voxel::chunk::{DenseChunk, Neighbors};
+        use crate::voxel::world::ChunkSlot;
+
+        let Some(ChunkSlot::Stored { data, .. }) = world.chunks.get(&coord) else {
+            return;
+        };
+        let dense = data.decompress();
+        let neighbor_arcs = crate::ecs::systems::mesh_upload::gather_neighbors(world, coord);
+        let neighbor_dense: Vec<Option<DenseChunk>> = neighbor_arcs
+            .iter()
+            .map(|opt| opt.as_ref().map(|p| p.decompress()))
+            .collect();
+        let mesh_neighbor_refs: [Option<&DenseChunk>; 6] = [
+            neighbor_dense[0].as_ref(),
+            neighbor_dense[1].as_ref(),
+            neighbor_dense[2].as_ref(),
+            neighbor_dense[3].as_ref(),
+            neighbor_dense[4].as_ref(),
+            neighbor_dense[5].as_ref(),
+        ];
+        let neighbor_coords = crate::ecs::systems::mesh_upload::neighbor_coords(coord);
+        let neighbor_lit: [bool; 6] = std::array::from_fn(|i| {
+            crate::ecs::systems::mesh_upload::chunk_light_usable(world, neighbor_coords[i])
+        });
+        let light_neighbor_refs: [Option<&DenseChunk>; 6] = [
+            neighbor_lit[0]
+                .then_some(())
+                .and(neighbor_dense[0].as_ref()),
+            neighbor_lit[1]
+                .then_some(())
+                .and(neighbor_dense[1].as_ref()),
+            neighbor_lit[2]
+                .then_some(())
+                .and(neighbor_dense[2].as_ref()),
+            neighbor_lit[3]
+                .then_some(())
+                .and(neighbor_dense[3].as_ref()),
+            neighbor_lit[4]
+                .then_some(())
+                .and(neighbor_dense[4].as_ref()),
+            neighbor_lit[5]
+                .then_some(())
+                .and(neighbor_dense[5].as_ref()),
+        ];
+        let light_ns = Neighbors {
+            chunks: light_neighbor_refs,
+        };
+
+        let blob = crate::voxel::chunk::build_light_volume_blob(&dense, &light_ns);
         renderer.upload_chunk_light_volume(coord, blob.as_ref());
+        let mesh = crate::mesher::greedy::mesh_greedy(&dense, &mesh_neighbor_refs, registry);
+        renderer.upload_chunk_mesh(coord, 0, &mesh);
+        if let Some(ChunkSlot::Stored { meta, .. }) = world.chunks.get_mut(&coord) {
+            meta.state = crate::voxel::chunk::ChunkState::Ready;
+            meta.dirty.mesh = false;
+            meta.mesh_version = meta.mesh_version.wrapping_add(1);
+        }
     }
 
     /// Apply one UI-emitted intent. Each variant maps to a small piece

@@ -33,6 +33,7 @@ pub struct WorldDebug<'a> {
     pub pitch: f32,
     pub probe: &'a crate::worldgen::probe::ColumnProbe,
     pub sky: SkyProbe,
+    pub target: Option<TargetProbe>,
 }
 
 /// Snapshot of `sky_light` around the player's eye, surfaced on the HUD
@@ -52,6 +53,30 @@ pub struct SkyProbe {
     /// same xz as the eye — what the eye's chunk's column drop would
     /// inherit from above. `None` if +Y not loaded.
     pub above_bottom: Option<u8>,
+}
+
+pub struct TargetProbe {
+    pub pos: glam::IVec3,
+    pub chunk: glam::IVec3,
+    pub local: glam::UVec3,
+    pub block: crate::voxel::block::Block,
+    pub sky: u8,
+    pub rgb: [u8; 3],
+    pub chunk_state: crate::voxel::chunk::ChunkState,
+    pub light_state: crate::voxel::chunk::LightState,
+    pub dirty_mesh: bool,
+    pub dirty_light: bool,
+    pub gpu_light: bool,
+}
+
+fn compact_light_state(state: crate::voxel::chunk::LightState) -> &'static str {
+    match state {
+        crate::voxel::chunk::LightState::Unlit => "Unlit",
+        crate::voxel::chunk::LightState::Queued => "Queued",
+        crate::voxel::chunk::LightState::Lighting { .. } => "Lighting",
+        crate::voxel::chunk::LightState::Lit { .. } => "Lit",
+        crate::voxel::chunk::LightState::NeedsBorderReconcile => "Reconcile",
+    }
 }
 
 fn yaw_to_cardinal(yaw: f32) -> &'static str {
@@ -270,7 +295,7 @@ pub fn build_hud(
         perf.work_ms,
     );
 
-    let (info_str, gen_str, cave_str, sky_str) = if let Some(d) = debug {
+    let (info_str, gen_str, cave_str, sky_str, target_str) = if let Some(d) = debug {
         let total_mins = (d.time_of_day * 24.0 * 60.0) as u32;
         let hh = total_mins / 60;
         let mm = total_mins % 60;
@@ -284,6 +309,30 @@ pub fn build_hud(
             .above_bottom
             .map_or("-".to_string(), |v| format!("{v:X}"));
         let col = d.sky.column_hex.as_deref().unwrap_or("-");
+        let target = d.target.as_ref().map_or("LOOK: -".to_string(), |t| {
+            format!(
+                "LOOK[{},{},{}] {:?} L:{} RGB:{:X}{:X}{:X} CH[{},{},{}] lp[{},{},{}] {:?}/{} D{}{} GPU:{}",
+                t.pos.x,
+                t.pos.y,
+                t.pos.z,
+                t.block,
+                t.sky,
+                t.rgb[0],
+                t.rgb[1],
+                t.rgb[2],
+                t.chunk.x,
+                t.chunk.y,
+                t.chunk.z,
+                t.local.x,
+                t.local.y,
+                t.local.z,
+                t.chunk_state,
+                compact_light_state(t.light_state),
+                if t.dirty_mesh { "M" } else { "-" },
+                if t.dirty_light { "L" } else { "-" },
+                if t.gpu_light { "Y" } else { "N" },
+            )
+        });
         (
             format!(
                 "SEED: {}  TIME: {:02}:{:02}  {} {:.0}°/{:+.0}°",
@@ -301,12 +350,19 @@ pub fn build_hud(
                 "SKY[{},{},{}] eye={}  +Y0={}  col={}",
                 d.sky.eye_chunk.x, d.sky.eye_chunk.y, d.sky.eye_chunk.z, at_eye, above, col,
             ),
+            target,
         )
     } else {
-        (String::new(), String::new(), String::new(), String::new())
+        (
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        )
     };
 
-    let extra_lines = if debug.is_some() { 4 } else { 0 };
+    let extra_lines = if debug.is_some() { 5 } else { 0 };
     // A semi-transparent dark backdrop behind the text lines so the
     // cyan/white glyphs stay readable against bright skies and grass.
     // Panel width tracks the widest string; icons batch draws first in
@@ -320,7 +376,8 @@ pub fn build_hud(
         .max(info_str.chars().count())
         .max(gen_str.chars().count())
         .max(cave_str.chars().count())
-        .max(sky_str.chars().count());
+        .max(sky_str.chars().count())
+        .max(target_str.chars().count());
     let panel_w = widest as f32 * glyph_w + inner_pad * 2.0;
     let panel_h = line_h * (3 + extra_lines) as f32 + inner_pad * 2.0;
     frame.icons.push_rect(
@@ -341,6 +398,7 @@ pub fn build_hud(
         frame.push_text(pad, pad + line_h * 4.0, &gen_str, text_scale, green);
         frame.push_text(pad, pad + line_h * 5.0, &cave_str, text_scale, cyan);
         frame.push_text(pad, pad + line_h * 6.0, &sky_str, text_scale, yellow);
+        frame.push_text(pad, pad + line_h * 7.0, &target_str, text_scale, green);
     }
 
     // ── Bottom-centre hotbar ────────────────────────────────────────

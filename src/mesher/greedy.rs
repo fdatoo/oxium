@@ -90,25 +90,33 @@ pub fn mesh_greedy(
     // fully torch-lit pixel — visible as scattered orange specks on
     // every tree, dug-out cave face, and chunk-seam edge. The proper
     // fix is to read from the actual neighbouring chunk when one is
-    // loaded, and fall back to a sensible direction-specific default
-    // only when no neighbour data exists.
+    // loaded. During stream-in the neighbour may exist but still carry
+    // zeroed light, so border samples fall back to this chunk's clamped
+    // edge light instead of baking black seams into the mesh.
     let light_at = |x: i32, y: i32, z: i32| -> u8 {
         let dim = D as i32;
+        let pack_light = |chunk: &DenseChunk, lx: u32, ly: u32, lz: u32| {
+            let idx = LocalPos(UVec3::new(lx, ly, lz)).to_index();
+            let brightness = crate::voxel::chunk::rgb_brightness(chunk.block_rgb[idx]);
+            (chunk.sky_light[idx] & 0x0F) << 4 | (brightness & 0x0F)
+        };
         let in_range = x >= 0 && y >= 0 && z >= 0 && x < dim && y < dim && z < dim;
         if in_range {
-            let idx = LocalPos(UVec3::new(x as u32, y as u32, z as u32)).to_index();
-            let brightness = crate::voxel::chunk::rgb_brightness(chunk.block_rgb[idx]);
-            return (chunk.sky_light[idx] & 0x0F) << 4 | (brightness & 0x0F);
+            return pack_light(chunk, x as u32, y as u32, z as u32);
         }
+        let own_x = x.clamp(0, dim - 1) as u32;
+        let own_y = y.clamp(0, dim - 1) as u32;
+        let own_z = z.clamp(0, dim - 1) as u32;
+        let own_light = pack_light(chunk, own_x, own_y, own_z);
         let out_x = (x < 0) as i32 + (x >= dim) as i32;
         let out_y = (y < 0) as i32 + (y >= dim) as i32;
         let out_z = (z < 0) as i32 + (z >= dim) as i32;
         if out_x + out_y + out_z >= 2 {
             // Multi-axis corner — no single neighbour owns this cell.
             // Light's only consumed on face cells (1-axis-out), so
-            // this branch shouldn't fire in practice; pick the
-            // gentlest default just in case.
-            return 0x00;
+            // this branch shouldn't fire in practice; clamp to this
+            // chunk to avoid introducing artificial dark corners.
+            return own_light;
         }
         let (face_idx, lx, ly, lz) = if x < 0 {
             (Face::NegX as usize, (dim - 1) as u32, y as u32, z as u32)
@@ -124,24 +132,12 @@ pub fn mesh_greedy(
             (Face::PosZ as usize, x as u32, y as u32, 0u32)
         };
         if let Some(n) = neighbors[face_idx] {
-            let idx = LocalPos(UVec3::new(lx, ly, lz)).to_index();
-            let brightness = crate::voxel::chunk::rgb_brightness(n.block_rgb[idx]);
-            return (n.sky_light[idx] & 0x0F) << 4 | (brightness & 0x0F);
+            let neighbor_light = pack_light(n, lx, ly, lz);
+            if neighbor_light != 0 {
+                return neighbor_light;
+            }
         }
-        // Truly no neighbour data (chunk not loaded yet). Pick a
-        // direction-specific default:
-        //   - +Y face → assume open sky above, full sky-light. Worst
-        //     case the surface temporarily reads bright during
-        //     stream-in; the chunk re-meshes once the +Y neighbour
-        //     arrives.
-        //   - All other faces → 0 (dark). Cave faces a player digs
-        //     out and chunk-boundary side faces no longer bloom
-        //     bright at night.
-        if face_idx == Face::PosY as usize {
-            0xF0
-        } else {
-            0x00
-        }
+        own_light
     };
 
     let block_at = |x: i32, y: i32, z: i32| -> Option<Block> {
@@ -209,7 +205,12 @@ fn emit_water_tops_per_block<F, L>(
                 if here != Block::Water {
                     continue;
                 }
-                let above = block_at(x, y + 1, z).unwrap_or(Block::Air);
+                let Some(above) = block_at(x, y + 1, z) else {
+                    // Unknown +Y cannot be assumed to be air for water. If
+                    // this is an internal chunk seam inside a water column,
+                    // emitting a top face creates a full chunk-sheet artifact.
+                    continue;
+                };
                 // Only emit the topmost water block's top face — the
                 // ones below have water above them and would be
                 // visibility-culled by the greedy rule anyway.
@@ -280,15 +281,27 @@ fn greedy_one_face<F, L>(
                 let (x, y, z) = unmap(slice, u, v, n_axis, u_axis, v_axis);
                 let here = chunk.get(LocalPos(UVec3::new(x as u32, y as u32, z as u32)));
                 let neighbor_pos = step_along(x, y, z, n_axis, normal_sign);
-                let neighbor =
-                    block_at(neighbor_pos.0, neighbor_pos.1, neighbor_pos.2).unwrap_or(Block::Air);
+                let neighbor = block_at(neighbor_pos.0, neighbor_pos.1, neighbor_pos.2);
 
                 // A face is visible when the block is not air, its neighbour
                 // is not opaque, and either we're an opaque block (so the
                 // face shows colour) or the two blocks differ visually.
-                let mut visible = here != Block::Air
-                    && !reg.info(neighbor).opaque
-                    && (reg.info(here).opaque || here != neighbor);
+                let mut visible = if neighbor.is_none()
+                    && (face == Face::NegY || (here == Block::Water && face != Face::PosY))
+                {
+                    // Missing below-neighbor chunks are usually just the
+                    // streaming wavefront. Water also must not treat missing
+                    // side neighbours as air: doing so emits chunk-sized
+                    // transparent curtains inside oceans until the adjacent
+                    // chunk lands. Opaque side faces remain visible; their
+                    // light-volume boundary halo handles missing/unlit light.
+                    false
+                } else {
+                    let neighbor = neighbor.unwrap_or(Block::Air);
+                    here != Block::Air
+                        && !reg.info(neighbor).opaque
+                        && (reg.info(here).opaque || here != neighbor)
+                };
 
                 // Water TOP faces are excluded from greedy merging —
                 // they get re-emitted as 1-block quads by
@@ -554,16 +567,65 @@ mod tests {
 
     #[test]
     fn solid_chunk_produces_six_merged_quads() {
-        // A fully-solid chunk with no neighbours: each of the 6 boundary
-        // faces is greedy-merged into a single 32×32 quad → 6 × 4 verts.
-        // (Unloaded neighbours are treated as Air for the visibility
-        // check, so the boundary faces are conservatively emitted.)
+        // A fully-solid chunk with no neighbours: keep the side and top
+        // faces visible, but suppress the missing bottom neighbour to avoid
+        // temporary dark chunk-floor shelves during stream-in.
         let c = DenseChunk::new_filled(Block::Stone);
         let r = BlockRegistry::new();
         let n: [Option<&DenseChunk>; 6] = [None; 6];
         let mesh = mesh_greedy(&c, &n, &r);
-        assert_eq!(mesh.vertices.len(), 24, "expected 6 merged 32x32 quads");
-        assert_eq!(mesh.indices.len(), 36);
+        assert_eq!(mesh.vertices.len(), 20, "expected 5 merged 32x32 quads");
+        assert_eq!(mesh.indices.len(), 30);
+    }
+
+    #[test]
+    fn border_face_uses_own_light_when_neighbor_is_unlit() {
+        let mut c = DenseChunk::empty();
+        let pos = LocalPos(UVec3::new(31, 5, 5));
+        c.set(pos, Block::Stone);
+        c.sky_light[pos.to_index()] = 12;
+
+        let unlit_neighbor = DenseChunk::empty();
+        let r = BlockRegistry::new();
+        let mut n: [Option<&DenseChunk>; 6] = [None; 6];
+        n[Face::PosX as usize] = Some(&unlit_neighbor);
+
+        let mesh = mesh_greedy(&c, &n, &r);
+        let pos_x_lights: Vec<u8> = mesh
+            .vertices
+            .iter()
+            .filter(|v| v.normal_face == Face::PosX as u8)
+            .map(|v| v.light)
+            .collect();
+        assert_eq!(pos_x_lights, vec![0xC0; 4]);
+    }
+
+    #[test]
+    fn missing_above_neighbor_does_not_force_sky_on_top_boundary_face() {
+        let mut c = DenseChunk::empty();
+        let pos = LocalPos(UVec3::new(5, 31, 5));
+        c.set(pos, Block::Stone);
+
+        let r = BlockRegistry::new();
+        let n: [Option<&DenseChunk>; 6] = [None; 6];
+        let mesh = mesh_greedy(&c, &n, &r);
+        let pos_y_lights: Vec<u8> = mesh
+            .vertices
+            .iter()
+            .filter(|v| v.normal_face == Face::PosY as u8)
+            .map(|v| v.light)
+            .collect();
+        assert_eq!(pos_y_lights, vec![0; 4]);
+    }
+
+    #[test]
+    fn missing_neighbors_do_not_emit_water_chunk_sheets() {
+        let c = DenseChunk::new_filled(Block::Water);
+        let r = BlockRegistry::new();
+        let n: [Option<&DenseChunk>; 6] = [None; 6];
+        let mesh = mesh_greedy(&c, &n, &r);
+        assert_eq!(mesh.vertices.len(), 0);
+        assert_eq!(mesh.indices.len(), 0);
     }
 
     #[test]
