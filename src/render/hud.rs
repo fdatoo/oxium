@@ -17,10 +17,7 @@
 use bytemuck::{Pod, Zeroable};
 
 use crate::render::atlas::{ATLAS_PX, TILE_PX};
-use crate::render::font::{
-    ATLAS_H as FONT_ATLAS_H, ATLAS_W as FONT_ATLAS_W, CELL_W as FONT_CELL_W,
-    GLYPH_H as FONT_GLYPH_H, GLYPH_W as FONT_GLYPH_W,
-};
+use crate::render::font;
 
 /// Extra worldgen + camera values shown in the debug overlay.
 pub struct WorldDebug<'a> {
@@ -192,26 +189,32 @@ impl HudFrame {
     }
 
     /// Append a string of [`crate::render::font`] glyphs anchored at
-    /// pixel `(x, y)`, scaled `scale`× the source 5×7 cell, and tinted
-    /// by `color`. Returns the X coordinate past the last glyph so
-    /// callers can chain runs.
+    /// pixel `(x, y)`, scaled `scale`× the base cell, and tinted by `color`.
+    /// Returns the X coordinate past the last glyph so callers can chain runs.
+    ///
+    /// Each character occupies exactly `cell_w × scale` pixels horizontally
+    /// (the font's monospace advance), and `glyph_h × scale` pixels
+    /// vertically. UV coordinates span the full slot cell so both left bearing
+    /// and right spacing are included in the sampled region — transparent atlas
+    /// pixels outside the visible glyph rasterise to zero alpha and are
+    /// effectively invisible.
     pub fn push_text(&mut self, mut x: f32, y: f32, text: &str, scale: f32, color: [u8; 4]) -> f32 {
-        let cell_w_px = FONT_CELL_W as f32 * scale;
-        let glyph_w_px = FONT_GLYPH_W as f32 * scale;
-        let glyph_h_px = FONT_GLYPH_H as f32 * scale;
-        let atlas_w = FONT_ATLAS_W as f32;
-        let atlas_h = FONT_ATLAS_H as f32;
+        let cw = font::cell_w() as f32;
+        let gh = font::glyph_h() as f32;
+        let aw = font::atlas_w() as f32;
+        let ah = font::atlas_h() as f32;
+        let cw_px = cw * scale;
+        let gh_px = gh * scale;
         for ch in text.chars() {
-            let slot = crate::render::font::slot_for(ch);
-            let u0 = (slot * FONT_CELL_W) as f32 / atlas_w;
-            let u1 = u0 + FONT_GLYPH_W as f32 / atlas_w;
-            // The font atlas is one cell tall, so V always spans the
-            // glyph height (= cell height in the v1 layout).
-            let v0 = 0.0;
-            let v1 = FONT_GLYPH_H as f32 / atlas_h;
-            self.text
-                .push_quad(x, y, glyph_w_px, glyph_h_px, [u0, v0], [u1, v1], color);
-            x += cell_w_px;
+            let slot = font::slot_for(ch) as f32;
+            // UV covers the full cell width so the font's built-in side
+            // bearings are preserved. The atlas row is exactly one cell tall.
+            let u0 = slot * cw / aw;
+            let u1 = u0 + cw / aw;
+            let v0 = 0.0_f32;
+            let v1 = gh / ah; // = 1.0 since atlas_h == glyph_h
+            self.text.push_quad(x, y, cw_px, gh_px, [u0, v0], [u1, v1], color);
+            x += cw_px;
         }
         x
     }
@@ -343,8 +346,12 @@ pub fn build_hud(
                 p.continentalness, p.temperature, p.humidity, p.weirdness, p.biome,
             ),
             format!(
-                "H: {}  CAVE: {}  AQY: {}  FLOW: {}",
-                p.h_target, p.cave_systems_count, p.aquifer_y_top, p.flow_accum,
+                "H: {}  CAVE: {}  RIV: {}  FLOW: {}",
+                p.h_target,
+                p.cave_systems_count,
+                p.river_water_y
+                    .map_or_else(|| "-".to_string(), |y| y.to_string()),
+                p.flow_accum,
             ),
             format!(
                 "SKY[{},{},{}] eye={}  +Y0={}  col={}",
@@ -367,7 +374,7 @@ pub fn build_hud(
     // cyan/white glyphs stay readable against bright skies and grass.
     // Panel width tracks the widest string; icons batch draws first in
     // the pass so this lands beneath the text.
-    let glyph_w = crate::render::font::CELL_W as f32 * text_scale;
+    let glyph_w = font::cell_w() as f32 * text_scale;
     let widest = fps_str
         .chars()
         .count()

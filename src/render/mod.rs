@@ -33,7 +33,7 @@ use crate::render::camera::{
     CameraUniform, ChunkUniform, make_camera_bind_group_layout, make_camera_buffer,
     make_chunk_bind_group_layout, view_proj,
 };
-use crate::render::font::{ATLAS_H as FONT_ATLAS_H, ATLAS_W as FONT_ATLAS_W, build_font_atlas};
+use crate::render::font::{atlas_h as font_atlas_h, atlas_w as font_atlas_w, build_font_atlas};
 use crate::render::gpu::{
     Gpu, make_depth_sample_texture, make_depth_texture, make_msaa_color_texture,
     make_reflection_color_textures, make_reflection_depth_texture,
@@ -479,8 +479,8 @@ impl Renderer {
         // Font atlas texture upload.
         let font_bytes = build_font_atlas();
         let font_size = wgpu::Extent3d {
-            width: FONT_ATLAS_W,
-            height: FONT_ATLAS_H,
+            width: font_atlas_w(),
+            height: font_atlas_h(),
             depth_or_array_layers: 1,
         };
         let font_texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -508,8 +508,8 @@ impl Renderer {
             &font_bytes,
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(FONT_ATLAS_W * 4),
-                rows_per_image: Some(FONT_ATLAS_H),
+                bytes_per_row: Some(font_atlas_w() * 4),
+                rows_per_image: Some(font_atlas_h()),
             },
             font_size,
         );

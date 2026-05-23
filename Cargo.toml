@@ -44,6 +44,10 @@ egui = "0.30"
 egui-wgpu = "0.30"
 egui-winit = "0.30"
 
+# TrueType font rasterisation for the HUD overlay (PixelOperatorMono8).
+# Pure-Rust, no C dependencies. Used only at startup to bake the glyph atlas.
+fontdue = "0.7"
+
 # Bit packing
 bitvec = "1"
 

@@ -1,558 +1,213 @@
-//! Tiny 5×7 bitmap font for the HUD overlay.
+//! TrueType font renderer for the HUD overlay.
 //!
-//! Why a hand-baked bitmap font rather than a TrueType renderer? The
-//! HUD only needs to show short debug strings ("FPS: 60.0", "XYZ:
-//! -100.0  64.0  86.0") — pulling in `glyphon` / `ab_glyph` /
-//! `cosmic-text` to render two lines of monospace digits is overkill.
-//! A hand-drawn 5×7 font fits the pixel-art aesthetic of the textured
-//! blocks, ships zero external assets, and the glyphs compile straight
-//! into the binary as a tiny `const` table.
+//! Replaces the hand-baked 5×7 bitmap table with **PixelOperatorMono8**, a
+//! pixel-art monospace font designed for 8 pt rendering. The font is embedded
+//! at compile time via [`include_bytes!`] and rasterised once at startup by
+//! [`fontdue`] into the same flat `Rgba8Unorm` atlas the HUD pipeline already
+//! consumes. No changes to the GPU pipeline, shader, or vertex builder are
+//! required — only this module and the handful of call sites that read the old
+//! `const` metrics are updated.
 //!
-//! Layout: each glyph is 5 columns × 7 rows of single-bit pixels,
-//! encoded as 7 `u8` values (one per row). Bit 4 is the leftmost
-//! pixel, bit 0 the rightmost. The font texture lays glyphs out
-//! horizontally on a single 256×8 row, one glyph per 8-pixel cell
-//! (the 3-pixel right margin gives the HUD vertex builder a clean
-//! per-character advance and avoids texel bleed at quad edges).
+//! ## Why PixelOperatorMono8?
 //!
-//! Only the characters the HUD actually prints are defined; missing
-//! characters render as the blank "space" cell so a typo never panics
-//! at runtime.
+//! The font is distributed under the MIT license (see
+//! `assets/fonts/FONT_LICENSE.txt`), has a consistent 8-px advance width for
+//! every glyph, and covers the full printable ASCII range — so the HUD can now
+//! render any character rather than the curated 96-glyph table we maintained by
+//! hand.
+//!
+//! ## Atlas layout
+//!
+//! ```text
+//! ┌──────────────────────────────────────────────────────────────────┐
+//! │  slot 0   │  slot 1   │  slot 2   │  …  │  slot 94  │          │
+//! │  U+0020   │  U+0021   │  U+0022   │     │  U+007E   │          │
+//! │  (space)  │    '!'    │    '"'    │     │    '~'    │          │
+//! └──────────────────────────────────────────────────────────────────┘
+//!   ←cell_w→   ←cell_w→
+//! ```
+//!
+//! All 95 printable ASCII glyphs (U+0020 … U+007E) are packed into a single
+//! horizontal row, one glyph per cell of width [`cell_w`]. Slot index is
+//! `codepoint − 0x20`. [`slot_for`] maps any character to its slot, falling
+//! back to the space glyph for code points outside the ASCII printable range.
 
-/// Pixel width of one glyph. The HUD vertex builder uses this to scale
-/// per-character quads.
-pub const GLYPH_W: u32 = 5;
-/// Pixel height of one glyph. Cells in the atlas are slightly taller
-/// (`CELL_H`) to give 1 row of padding above.
-pub const GLYPH_H: u32 = 7;
-/// Horizontal stride between glyph slots in the atlas.
-pub const CELL_W: u32 = 8;
-/// Vertical stride; only one row of glyphs is laid out today.
-pub const CELL_H: u32 = 8;
-/// Number of glyph slots in the atlas. Holds digits + the full
-/// uppercase + lowercase alphabet + common punctuation with room to
-/// spare. Bumped from 64 to 96 when the lowercase set was added — the
-/// extra atlas width (256 → 768 texels) is still trivial.
-pub const SLOT_COUNT: u32 = 96;
-/// Atlas pixel width.
-pub const ATLAS_W: u32 = SLOT_COUNT * CELL_W;
-/// Atlas pixel height.
-pub const ATLAS_H: u32 = CELL_H;
+use std::sync::OnceLock;
 
-/// One glyph's 7-row bit pattern. Convention: row 0 = top of glyph,
-/// bit 4 = leftmost pixel. A `1` bit is opaque white; a `0` bit is
-/// transparent.
-type Glyph = [u8; 7];
+use fontdue::{Font, FontSettings};
 
-/// Per-character glyph table. The HUD looks up each printable char via
-/// [`glyph_for`]; characters not in this list render as blanks.
-///
-/// The set covers digits, the full uppercase alphabet, and common
-/// punctuation — enough for any HUD string we'd want to compose
-/// without having to think about which letters happen to exist.
-/// Add a new char by extending this list (the slot index is just its
-/// position in the array, so order doesn't matter to callers).
-const GLYPHS: &[(char, Glyph)] = &[
-    (
-        '0',
-        [
-            0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        '1',
-        [
-            0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
-        ],
-    ),
-    (
-        '2',
-        [
-            0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111,
-        ],
-    ),
-    (
-        '3',
-        [
-            0b01110, 0b10001, 0b00001, 0b00110, 0b00001, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        '4',
-        [
-            0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
-        ],
-    ),
-    (
-        '5',
-        [
-            0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        '6',
-        [
-            0b01110, 0b10001, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        '7',
-        [
-            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
-        ],
-    ),
-    (
-        '8',
-        [
-            0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        '9',
-        [
-            0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        'A',
-        [
-            0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
-        ],
-    ),
-    (
-        'B',
-        [
-            0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110,
-        ],
-    ),
-    (
-        'C',
-        [
-            0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        'D',
-        [
-            0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110,
-        ],
-    ),
-    (
-        'E',
-        [
-            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
-        ],
-    ),
-    (
-        'F',
-        [
-            0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
-        ],
-    ),
-    (
-        'G',
-        [
-            0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        'H',
-        [
-            0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
-        ],
-    ),
-    (
-        'I',
-        [
-            0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
-        ],
-    ),
-    (
-        'J',
-        [
-            0b00111, 0b00010, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100,
-        ],
-    ),
-    (
-        'K',
-        [
-            0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001,
-        ],
-    ),
-    (
-        'L',
-        [
-            0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
-        ],
-    ),
-    (
-        'M',
-        [
-            0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001,
-        ],
-    ),
-    (
-        'N',
-        [
-            0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001,
-        ],
-    ),
-    (
-        'O',
-        [
-            0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        'P',
-        [
-            0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000,
-        ],
-    ),
-    (
-        'Q',
-        [
-            0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101,
-        ],
-    ),
-    (
-        'R',
-        [
-            0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
-        ],
-    ),
-    (
-        'S',
-        [
-            0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110,
-        ],
-    ),
-    (
-        'T',
-        [
-            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
-        ],
-    ),
-    (
-        'U',
-        [
-            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
-        ],
-    ),
-    (
-        'V',
-        [
-            0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100,
-        ],
-    ),
-    (
-        'W',
-        [
-            0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001,
-        ],
-    ),
-    (
-        'X',
-        [
-            0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001,
-        ],
-    ),
-    (
-        'Y',
-        [
-            0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100,
-        ],
-    ),
-    (
-        'Z',
-        [
-            0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111,
-        ],
-    ),
-    (
-        ':',
-        [
-            0b00000, 0b00100, 0b00100, 0b00000, 0b00100, 0b00100, 0b00000,
-        ],
-    ),
-    (
-        '.',
-        [
-            0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00100, 0b00100,
-        ],
-    ),
-    (
-        '-',
-        [
-            0b00000, 0b00000, 0b00000, 0b01110, 0b00000, 0b00000, 0b00000,
-        ],
-    ),
-    (
-        ',',
-        [
-            0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00100, 0b01000,
-        ],
-    ),
-    // Lowercase alphabet. All anchored at col 0 (leftmost pixel of any
-    // set row is column 0 or column 1 for narrow letters like i/j).
-    // Tall letters (b, d, f, h, k, l, t) extend up to row 0; descenders
-    // (g, j, p, q, y) are clipped at the baseline because the cell has
-    // no extra row below it. Max body width is 4 columns so the
-    // 4-pixel right gap matches uppercase's spacing.
-    (
-        'a',
-        [
-            0b00000, 0b00000, 0b11100, 0b00010, 0b11110, 0b10010, 0b11110,
-        ],
-    ),
-    (
-        'b',
-        [
-            0b10000, 0b10000, 0b11100, 0b10010, 0b10010, 0b10010, 0b11100,
-        ],
-    ),
-    (
-        'c',
-        [
-            0b00000, 0b00000, 0b11100, 0b10010, 0b10000, 0b10010, 0b11100,
-        ],
-    ),
-    (
-        'd',
-        [
-            0b00010, 0b00010, 0b11110, 0b10010, 0b10010, 0b10010, 0b11110,
-        ],
-    ),
-    (
-        'e',
-        [
-            0b00000, 0b00000, 0b11100, 0b10010, 0b11110, 0b10000, 0b11100,
-        ],
-    ),
-    (
-        'f',
-        [
-            0b00110, 0b01000, 0b11100, 0b01000, 0b01000, 0b01000, 0b01000,
-        ],
-    ),
-    (
-        'g',
-        [
-            0b00000, 0b00000, 0b11110, 0b10010, 0b11110, 0b00010, 0b11100,
-        ],
-    ),
-    (
-        'h',
-        [
-            0b10000, 0b10000, 0b11100, 0b10010, 0b10010, 0b10010, 0b10010,
-        ],
-    ),
-    (
-        'i',
-        [
-            0b01000, 0b00000, 0b01000, 0b01000, 0b01000, 0b01000, 0b01000,
-        ],
-    ),
-    (
-        'j',
-        [
-            0b00100, 0b00000, 0b00100, 0b00100, 0b00100, 0b00100, 0b11000,
-        ],
-    ),
-    (
-        'k',
-        [
-            0b10000, 0b10000, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010,
-        ],
-    ),
-    (
-        'l',
-        [
-            0b11000, 0b01000, 0b01000, 0b01000, 0b01000, 0b01000, 0b11100,
-        ],
-    ),
-    (
-        'm',
-        [
-            0b00000, 0b00000, 0b11010, 0b10101, 0b10101, 0b10101, 0b10101,
-        ],
-    ),
-    (
-        'n',
-        [
-            0b00000, 0b00000, 0b11100, 0b10010, 0b10010, 0b10010, 0b10010,
-        ],
-    ),
-    (
-        'o',
-        [
-            0b00000, 0b00000, 0b11100, 0b10010, 0b10010, 0b10010, 0b11100,
-        ],
-    ),
-    (
-        'p',
-        [
-            0b00000, 0b00000, 0b11100, 0b10010, 0b11100, 0b10000, 0b10000,
-        ],
-    ),
-    (
-        'q',
-        [
-            0b00000, 0b00000, 0b11110, 0b10010, 0b11110, 0b00010, 0b00010,
-        ],
-    ),
-    (
-        'r',
-        [
-            0b00000, 0b00000, 0b10110, 0b11000, 0b10000, 0b10000, 0b10000,
-        ],
-    ),
-    (
-        's',
-        [
-            0b00000, 0b00000, 0b11110, 0b10000, 0b11100, 0b00010, 0b11100,
-        ],
-    ),
-    (
-        't',
-        [
-            0b01000, 0b11100, 0b01000, 0b01000, 0b01000, 0b01010, 0b00100,
-        ],
-    ),
-    (
-        'u',
-        [
-            0b00000, 0b00000, 0b10010, 0b10010, 0b10010, 0b10010, 0b01110,
-        ],
-    ),
-    (
-        'v',
-        [
-            0b00000, 0b00000, 0b10010, 0b10010, 0b10010, 0b01100, 0b00100,
-        ],
-    ),
-    (
-        'w',
-        [
-            0b00000, 0b00000, 0b10001, 0b10001, 0b10101, 0b10101, 0b01010,
-        ],
-    ),
-    (
-        'x',
-        [
-            0b00000, 0b00000, 0b10010, 0b01100, 0b01100, 0b01100, 0b10010,
-        ],
-    ),
-    (
-        'y',
-        [
-            0b00000, 0b00000, 0b10010, 0b10010, 0b11110, 0b00010, 0b11100,
-        ],
-    ),
-    (
-        'z',
-        [
-            0b00000, 0b00000, 0b11110, 0b00100, 0b01000, 0b10000, 0b11110,
-        ],
-    ),
-    // Punctuation needed by the chat console + pause overlay.
-    (
-        '/',
-        [
-            0b00001, 0b00010, 0b00010, 0b00100, 0b00100, 0b01000, 0b01000,
-        ],
-    ),
-    (
-        '>',
-        [
-            0b10000, 0b01000, 0b00100, 0b00010, 0b00100, 0b01000, 0b10000,
-        ],
-    ),
-    (
-        '<',
-        [
-            0b00001, 0b00010, 0b00100, 0b01000, 0b00100, 0b00010, 0b00001,
-        ],
-    ),
-    (
-        '(',
-        [
-            0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010,
-        ],
-    ),
-    (
-        ')',
-        [
-            0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000,
-        ],
-    ),
-    (
-        '!',
-        [
-            0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00100,
-        ],
-    ),
-    (
-        '?',
-        [
-            0b01110, 0b10001, 0b00010, 0b00100, 0b00100, 0b00000, 0b00100,
-        ],
-    ),
-    (' ', [0; 7]),
-];
+/// Embedded PixelOperatorMono8 TrueType data. Licensed under MIT —
+/// see `assets/fonts/FONT_LICENSE.txt`.
+const FONT_DATA: &[u8] = include_bytes!("../../assets/fonts/PixelOperatorMono8.ttf");
 
-/// Return the bit pattern for `c`, or the `space` blank if `c` isn't
-/// in the table. The linear scan is fine: `GLYPHS` is short and this
-/// runs only at startup (the atlas is baked once). Test-only — the
-/// production atlas builder walks `GLYPHS` directly without this
-/// indirection.
-#[cfg(test)]
-fn glyph_for(c: char) -> Glyph {
-    for (k, g) in GLYPHS {
-        if *k == c {
-            return *g;
-        }
-    }
-    [0; 7]
+/// Rasterisation size in pixels. PixelOperator8 is hinted for 8 pt; rendering
+/// at exactly 8 px produces crisply aligned, zero-antialiased pixel edges. The
+/// HUD vertex builder scales character quads independently via a float factor,
+/// so this only affects the resolution of the atlas itself.
+const PX_SIZE: f32 = 8.0;
+
+/// First code point stored in the atlas: U+0020 (space). Slot index = cp − FIRST.
+const FIRST: u32 = 0x0020;
+/// Last code point stored in the atlas (inclusive): U+007E ('~').
+const LAST: u32 = 0x007E;
+/// Number of glyph slots — the 95 printable ASCII characters.
+const SLOT_COUNT: u32 = LAST - FIRST + 1;
+
+/// All rasterised metrics and atlas data, computed once and cached.
+struct FontState {
+    /// Flat RGBA8 atlas buffer: `atlas_w × atlas_h × 4` bytes.
+    atlas: Vec<u8>,
+    /// Horizontal advance width in pixels, uniform across all glyphs because
+    /// PixelOperatorMono is a monospace family.
+    cell_w: u32,
+    /// Full line-box height: ascent + |descent|. Character quads are drawn at
+    /// `glyph_h × scale` pixels tall.
+    glyph_h: u32,
+    /// Atlas pixel width: `SLOT_COUNT × cell_w`.
+    atlas_w: u32,
+    /// Atlas pixel height: equals `glyph_h`.
+    atlas_h: u32,
 }
 
-/// Index a character maps to within the atlas's horizontal grid. The
-/// HUD vertex builder uses this to compute per-glyph UV rects.
-pub fn slot_for(c: char) -> u32 {
-    for (i, (k, _)) in GLYPHS.iter().enumerate() {
-        if *k == c {
-            return i as u32;
-        }
-    }
-    // Space falls through to its own slot; if "space" isn't in the
-    // table either, return the last slot which is guaranteed blank
-    // (we always end with `' '`).
-    (GLYPHS.len() - 1) as u32
+static FONT: OnceLock<FontState> = OnceLock::new();
+
+/// Initialise the [`OnceLock`] and return a reference to the cached state.
+/// Called by every public accessor; the first call triggers rasterisation.
+fn state() -> &'static FontState {
+    FONT.get_or_init(build)
 }
 
-/// Build the font atlas as a flat `Rgba8` byte buffer matching the
-/// block atlas's format. Lit pixels are `(255, 255, 255, 255)`,
-/// unlit are `(0, 0, 0, 0)` — so the HUD shader's `tex * vertex_color`
-/// works uniformly for both the font batch (alpha-masked tint) and
-/// the block-icon batch (pre-coloured RGBA).
-pub fn build_font_atlas() -> Vec<u8> {
-    let mut atlas = vec![0u8; (ATLAS_W * ATLAS_H * 4) as usize];
-    for (i, (_, glyph)) in GLYPHS.iter().enumerate() {
-        let col0 = (i as u32) * CELL_W;
-        for row in 0..GLYPH_H {
-            let bits = glyph[row as usize];
-            for col in 0..GLYPH_W {
-                let mask = 1u8 << (GLYPH_W - 1 - col);
-                if bits & mask != 0 {
-                    let x = col0 + col;
-                    let y = row;
-                    let i = ((y * ATLAS_W + x) * 4) as usize;
-                    atlas[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
+/// Build the [`FontState`] by rasterising every printable ASCII glyph with
+/// fontdue and compositing the coverage bitmaps into the atlas.
+fn build() -> FontState {
+    let font = Font::from_bytes(FONT_DATA, FontSettings::default())
+        .expect("PixelOperatorMono8.ttf embedded in the binary is valid; this is a build bug");
+
+    // Derive cell dimensions from the font's line metrics at the chosen size.
+    let line = font
+        .horizontal_line_metrics(PX_SIZE)
+        .expect("PixelOperatorMono8.ttf has horizontal line metrics");
+
+    // fontdue reports descent as a negative value (below the baseline).
+    let ascent = line.ascent.ceil() as i32;
+    let descent = (-line.descent).ceil() as i32;
+    let glyph_h = (ascent + descent) as u32;
+
+    // Monospace fonts share a single advance width; measure against 'M'.
+    let (ref_m, _) = font.rasterize('M', PX_SIZE);
+    let cell_w = ref_m.advance_width.ceil() as u32;
+
+    let atlas_w = SLOT_COUNT * cell_w;
+    let atlas_h = glyph_h;
+    let mut atlas = vec![0u8; (atlas_w * atlas_h * 4) as usize];
+
+    for slot in 0..SLOT_COUNT {
+        let ch = char::from_u32(FIRST + slot).unwrap_or(' ');
+        let (m, bitmap) = font.rasterize(ch, PX_SIZE);
+        let col0 = (slot * cell_w) as i32;
+
+        // Place the glyph bitmap into the cell using baseline alignment.
+        //
+        // fontdue's coordinate system has y increasing upward; `ymin` is the
+        // signed distance from the baseline to the *bottom* of the bitmap
+        // (positive = above the baseline, negative = descender).
+        //
+        // The atlas uses screen-space y (increasing downward). The baseline
+        // sits at y = ascent from the top of the cell, so:
+        //
+        //   cell_y_for_bitmap_row_0 = ascent − ymin − height
+        //
+        // This aligns cap-height letters flush with the top of the cell and
+        // lets descenders (g, p, q, y …) spill into the descent region.
+        let glyph_top = ascent - m.ymin - m.height as i32;
+
+        for row in 0..m.height {
+            let cell_y = glyph_top + row as i32;
+            if cell_y < 0 || cell_y >= atlas_h as i32 {
+                // Glyph extends outside the allocated cell — clip silently.
+                continue;
+            }
+            for col in 0..m.width {
+                let coverage = bitmap[row * m.width + col];
+                if coverage == 0 {
+                    continue;
                 }
+                // xmin: left bearing (usually 0 or 1 for a pixel font).
+                let cell_x = col0 + m.xmin + col as i32;
+                if cell_x < 0 || cell_x >= atlas_w as i32 {
+                    continue;
+                }
+                let idx = (cell_y as u32 * atlas_w + cell_x as u32) as usize * 4;
+                // Coverage is typically 0 or 255 for a pixel font at its design
+                // size. Intermediate values arise at sub-pixel glyph edges and
+                // give slightly smoother rendering when the quad is GPU-scaled.
+                atlas[idx..idx + 4].copy_from_slice(&[255, 255, 255, coverage]);
             }
         }
     }
-    atlas
+
+    FontState {
+        atlas,
+        cell_w,
+        glyph_h,
+        atlas_w,
+        atlas_h,
+    }
+}
+
+// ── Public accessors ─────────────────────────────────────────────────────────
+//
+// All callers go through these instead of the old `pub const` values because
+// the dimensions are not known until fontdue has parsed the font at startup.
+
+/// Horizontal pixel advance for any character. Uniform across all glyphs
+/// because PixelOperatorMono is monospace.
+pub fn cell_w() -> u32 {
+    state().cell_w
+}
+
+/// Full line-box height in pixels: ascent + |descent|. Used to size the
+/// character quad vertically in the HUD vertex builder.
+pub fn glyph_h() -> u32 {
+    state().glyph_h
+}
+
+/// Total pixel width of the font atlas texture.
+pub fn atlas_w() -> u32 {
+    state().atlas_w
+}
+
+/// Pixel height of the font atlas texture (equal to [`glyph_h`]).
+pub fn atlas_h() -> u32 {
+    state().atlas_h
+}
+
+/// Slot index within the atlas for character `c`.
+///
+/// Maps printable ASCII (U+0020 … U+007E) directly to its slot (`cp − 0x20`).
+/// Any character outside that range — including all Unicode above U+007E —
+/// silently maps to slot 0 (space), so a missing glyph renders as blank rather
+/// than panicking.
+pub fn slot_for(c: char) -> u32 {
+    let cp = c as u32;
+    if cp >= FIRST && cp <= LAST {
+        cp - FIRST
+    } else {
+        0 // fall back to space (slot 0)
+    }
+}
+
+/// Build the font atlas as a flat `Rgba8` byte buffer.
+///
+/// Lit pixels are encoded as `(255, 255, 255, coverage)` where `coverage` is
+/// fontdue's per-pixel rasterisation output. For a pixel font at its design
+/// size this is predominantly 0 or 255, matching the binary behaviour of the
+/// old hand-baked table. Unlit pixels are `(0, 0, 0, 0)`.
+///
+/// The atlas is built exactly once and cached in a [`OnceLock`]; this call
+/// clones only the ~24 KB result, which happens once at renderer startup.
+pub fn build_font_atlas() -> Vec<u8> {
+    state().atlas.clone()
 }
 
 #[cfg(test)]
@@ -560,37 +215,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn space_slot_is_zero() {
+        assert_eq!(slot_for(' '), 0);
+    }
+
+    #[test]
+    fn printable_ascii_slots_are_contiguous() {
+        // '!' is U+0021, slot 1; '~' is U+007E, slot 94.
+        assert_eq!(slot_for('!'), 1);
+        assert_eq!(slot_for('~'), 94);
+        assert_eq!(slot_for('A'), b'A' as u32 - FIRST);
+        assert_eq!(slot_for('z'), b'z' as u32 - FIRST);
+    }
+
+    #[test]
+    fn out_of_range_chars_fall_back_to_space() {
+        // '@' IS in ASCII printable range (0x40); '€' is not.
+        assert_eq!(slot_for('@'), b'@' as u32 - FIRST);
+        assert_eq!(slot_for('€'), 0); // falls back to space
+        assert_eq!(slot_for('\n'), 0);
+    }
+
+    #[test]
+    fn atlas_dimensions_are_consistent() {
+        // Building the atlas must not panic and dimensions must be non-zero.
+        let data = build_font_atlas();
+        let w = atlas_w();
+        let h = atlas_h();
+        assert!(w > 0 && h > 0, "atlas must have positive dimensions");
+        assert_eq!(
+            data.len(),
+            (w * h * 4) as usize,
+            "atlas byte count must match w × h × 4"
+        );
+        assert_eq!(w, SLOT_COUNT * cell_w(), "atlas_w must equal SLOT_COUNT × cell_w");
+        assert_eq!(h, glyph_h(), "atlas_h must equal glyph_h");
+    }
+
+    #[test]
     fn space_slot_is_blank() {
-        let atlas = build_font_atlas();
-        let slot = slot_for(' ');
-        let col0 = slot * CELL_W;
-        // Every pixel in the space cell is fully transparent.
-        for y in 0..GLYPH_H {
-            for x in 0..GLYPH_W {
-                let i = ((y * ATLAS_W + col0 + x) * 4) as usize;
-                assert_eq!(atlas[i + 3], 0, "space cell alpha at ({x},{y}) not 0");
+        // Every pixel in the space cell must have alpha = 0.
+        let data = build_font_atlas();
+        let cw = cell_w();
+        let aw = atlas_w();
+        let ah = glyph_h();
+        for y in 0..ah {
+            for x in 0..cw {
+                let idx = (y * aw + x) as usize * 4;
+                assert_eq!(data[idx + 3], 0, "space cell alpha at ({x},{y}) must be 0");
             }
         }
-    }
-
-    #[test]
-    fn digit_zero_has_a_filled_top_row() {
-        // '0' starts with 0b01110: pixels 1..=3 set, edges clear.
-        let atlas = build_font_atlas();
-        let slot = slot_for('0');
-        let col0 = slot * CELL_W;
-        let alpha = |x: u32| atlas[((col0 + x) * 4 + 3) as usize];
-        assert_eq!(alpha(0), 0);
-        assert_eq!(alpha(1), 255);
-        assert_eq!(alpha(2), 255);
-        assert_eq!(alpha(3), 255);
-        assert_eq!(alpha(4), 0);
-    }
-
-    #[test]
-    fn missing_char_falls_back_to_blank() {
-        // '@' isn't in the table — glyph_for returns the blank pattern.
-        let g = glyph_for('@');
-        assert_eq!(g, [0; 7]);
     }
 }
