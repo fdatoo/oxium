@@ -190,6 +190,7 @@ pub struct Generator {
     config: config::ConfigHolder,
 }
 
+// ── §1 Generator construction ─────────────────────────────────────────────
 impl Generator {
     /// Build a `Generator` with the given world seed and the bundled
     /// default config. Equivalent to [`Self::with_config`] passing a
@@ -294,6 +295,8 @@ impl Generator {
         }
     }
 
+    // ── §2 Region / carver helpers ────────────────────────────────────────
+
     /// Fetch (build if missing) the carver tunnels rooted at the
     /// given chunk. Pure in `(seed, coord)`; cached so neighbour
     /// chunk fills don't rebuild it.
@@ -392,6 +395,8 @@ impl Generator {
         }
         ChunkRegions { center, grid }
     }
+
+    // ── §3 Column data (terrain + biome per (wx, wz)) ────────────────────
 
     /// Convenience wrapper around `column_data_with` that gathers
     /// the 3 × 3 region neighbourhood inline. Used by tests and by
@@ -509,6 +514,11 @@ impl Generator {
             water_surface_y,
         }
     }
+
+    // ── §4 Probe / visualizer debug methods ──────────────────────────────
+    // These methods are debug/viz-only. They are not on the hot path and
+    // none of them mutate state. They access private Generator fields so
+    // they remain in mod.rs rather than probe.rs.
 
     /// Snapshot every pipeline value computed for this column. Used by
     /// the viz column probe. Read-only, byte-stable per `(seed, wx, wz)`.
@@ -1089,6 +1099,8 @@ impl Generator {
         }
     }
 
+    // ── §5 Chunk fill pipeline ────────────────────────────────────────────
+
     /// Return the world seed this generator was constructed with.
     pub fn seed(&self) -> u64 {
         self.seed
@@ -1666,6 +1678,11 @@ impl Generator {
             Some(surfaces[z as usize * dim + x as usize])
         })
     }
+
+    // ── §6 Tree placement ─────────────────────────────────────────────────
+    // These methods stay in mod.rs because they access private Generator
+    // fields (self.seed, self.heightmap, self.density). Free-standing
+    // helpers (Tree struct, try_set_air, tree_hash) live in trees.rs.
 
     /// Place all trees whose blocks could overlap `coord`'s chunk
     /// volume. Each tree is deterministic in `(seed, cell_x, cell_z)`,
