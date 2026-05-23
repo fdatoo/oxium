@@ -1,11 +1,11 @@
 //! Cave pool derivation — qualifying large, deep-enough chambers get fluid
 //! bodies (water or lava) placed at their floor.
+use super::style::SALT_POOL_LAVA;
 use crate::worldgen::aquifer::LAVA_BAND_TOP_Y;
 use crate::worldgen::fluid::FluidBodyKind;
 use crate::worldgen::hash::mix_unit;
 use crate::worldgen::region::FineRegion;
 use crate::worldgen::tuning::*;
-use super::style::SALT_POOL_LAVA;
 
 /// Derive `CavePool` entries for every qualifying chamber in the region.
 ///

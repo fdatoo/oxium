@@ -1,8 +1,10 @@
+use super::noise_carvers::CARVER_CELL_COUNT;
 use super::*;
 use crate::worldgen::density::HeightmapNoise;
 use crate::worldgen::region::{CaveSystem, FineRegion, RegionCoord};
-use crate::worldgen::tuning::{CAVE_BAND_MIDDLE, CAVE_BAND_SHALLOW, CAVE_SYSTEMS_PER_REGION, CARVER_CELL_SIZE};
-use super::noise_carvers::CARVER_CELL_COUNT;
+use crate::worldgen::tuning::{
+    CARVER_CELL_SIZE, CAVE_BAND_MIDDLE, CAVE_BAND_SHALLOW, CAVE_SYSTEMS_PER_REGION,
+};
 use glam::IVec3;
 use noise::NoiseFn;
 

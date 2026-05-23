@@ -1,17 +1,19 @@
 //! Cave system builder — Poisson-disk chamber placement, Kruskal MST tunnel
 //! graph, entrance rolling, and the public `build_systems_for_region` entry
 //! point.
-use crate::worldgen::hash::{mix_range, mix_u32, mix_unit};
-use crate::worldgen::density::HeightmapNoise;
-use crate::worldgen::region::{CaveSystem, Chamber, Entrance, EntranceKind, FineRegion, RegionCoord, Tunnel};
-use crate::worldgen::tuning::*;
-use glam::{IVec3, Vec3};
-use super::style::{
-    CaveStyle, DepthBand, pick_style,
-    SALT_BB_ORIGIN_X, SALT_BB_ORIGIN_Z, SALT_CHAMBER_COUNT, SALT_EXTRA_LOOPS, SALT_SYSTEM_COUNT,
-};
 use super::connectors::build_vertical_connectors;
 use super::pools::derive_cave_pools;
+use super::style::{
+    CaveStyle, DepthBand, SALT_BB_ORIGIN_X, SALT_BB_ORIGIN_Z, SALT_CHAMBER_COUNT, SALT_EXTRA_LOOPS,
+    SALT_SYSTEM_COUNT, pick_style,
+};
+use crate::worldgen::density::HeightmapNoise;
+use crate::worldgen::hash::{mix_range, mix_u32, mix_unit};
+use crate::worldgen::region::{
+    CaveSystem, Chamber, Entrance, EntranceKind, FineRegion, RegionCoord, Tunnel,
+};
+use crate::worldgen::tuning::*;
+use glam::{IVec3, Vec3};
 
 /// Per-style parameter set extracted from the style table.
 pub(super) struct StyleParams {
@@ -21,7 +23,10 @@ pub(super) struct StyleParams {
     pub tunnel_r: (f32, f32),
 }
 
-pub(super) fn style_params(style: CaveStyle, table: &crate::worldgen::config::CaveStyleTable) -> StyleParams {
+pub(super) fn style_params(
+    style: CaveStyle,
+    table: &crate::worldgen::config::CaveStyleTable,
+) -> StyleParams {
     match style {
         CaveStyle::Cathedral => StyleParams {
             chamber_count: table.cathedral_chamber_count,
@@ -520,9 +525,13 @@ fn build_system(
     let sp = style_params(style, &cave_cfg.style_table);
 
     let (bb_min, bb_max) = roll_bounding_box(seed, coord, system_idx, y_min, y_max);
-    let chambers = sample_chambers(seed, coord, system_idx, bb_min, bb_max, style, &sp, cave_cfg);
+    let chambers = sample_chambers(
+        seed, coord, system_idx, bb_min, bb_max, style, &sp, cave_cfg,
+    );
     let tunnels = connect_chambers_mst(seed, coord, system_idx, &chambers, &sp);
-    let entrances = roll_entrances(seed, coord, system_idx, &chambers, band, heightmap, climate, density);
+    let entrances = roll_entrances(
+        seed, coord, system_idx, &chambers, band, heightmap, climate, density,
+    );
     let (bb_min, bb_max) = finalize_aabb(bb_min, bb_max, &chambers, &tunnels, &entrances);
 
     CaveSystem {

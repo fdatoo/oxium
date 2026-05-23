@@ -50,21 +50,21 @@
 //! `docs/book/content/part-3-region-build/3.5-rivers-lakes.mdx`, and
 //! `docs/superpowers/specs/2026-05-19-worldgen-overhaul-design.md`.
 
-pub mod grid;
-pub mod macro_pass;
 pub mod fine_pass;
-pub mod valley;
-pub mod rivers;
+pub mod grid;
 pub mod lakes;
+pub mod macro_pass;
+pub mod rivers;
+pub mod valley;
 
 // Re-export the public API so callers use `hydrology::build_fine_hydro`
 // rather than `hydrology::fine_pass::build_fine_hydro`.
+pub use fine_pass::{NeighbourEdges, build_fine_hydro, gather_neighbour_edges};
 pub use grid::{DIR_NONE, DIR_OFFSETS};
-pub use macro_pass::build_macro_region;
-pub use fine_pass::{NeighbourEdges, gather_neighbour_edges, build_fine_hydro};
-pub use valley::{valley_carve, valley_grid};
 pub use lakes::lake_rim_at;
+pub use macro_pass::build_macro_region;
 pub(crate) use valley::{for_each_segment, perpendicular_distance};
+pub use valley::{valley_carve, valley_grid};
 
 #[cfg(test)]
 mod tests;

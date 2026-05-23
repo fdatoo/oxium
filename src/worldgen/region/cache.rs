@@ -26,14 +26,14 @@
 //! ownership of a fresh build (if no other thread got there first) or
 //! wait on the next builder.
 
+use super::coords::{MacroRegionCoord, RegionCoord};
+use super::data::{FineRegion, MacroRegion};
 use crate::worldgen::tuning::{FINE_CACHE_CAP, MACRO_CACHE_CAP};
 use lru::LruCache;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Condvar, Mutex};
-use super::coords::{MacroRegionCoord, RegionCoord};
-use super::data::{FineRegion, MacroRegion};
 
 // ── Public type aliases ───────────────────────────────────────────────
 

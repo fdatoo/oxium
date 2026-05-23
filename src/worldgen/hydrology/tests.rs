@@ -1,5 +1,5 @@
-use super::*;
 use super::grid::Grid;
+use super::*;
 
 fn make_grid(n: usize, h: Vec<i16>) -> Grid {
     Grid {

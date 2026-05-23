@@ -12,7 +12,9 @@
 //! See `docs/book/content/part-3-region-build/3.5-rivers-lakes.mdx`.
 
 use super::grid::{DIR_NONE, DIR_OFFSETS, Grid};
-use crate::worldgen::region::{FineRegion, RegionCoord, RiverSegment, RiverSegmentKind, bitset_get};
+use crate::worldgen::region::{
+    FineRegion, RegionCoord, RiverSegment, RiverSegmentKind, bitset_get,
+};
 use crate::worldgen::tuning::*;
 
 /// Convert tagged river cells in `region` into `RiverSegment` structs.

@@ -4,7 +4,7 @@
 //! Every per-system roll is namespaced by a `SALT_*` constant so two
 //! different rolls at the same coordinates cannot produce correlated output.
 //! See the `// ── Hash domain separators ──` block below.
-use crate::worldgen::hash::{mix_unit};
+use crate::worldgen::hash::mix_unit;
 use crate::worldgen::region::RegionCoord;
 use crate::worldgen::tuning::*;
 

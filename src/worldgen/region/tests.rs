@@ -1,5 +1,7 @@
 use super::*;
-use crate::worldgen::tuning::{FINE_CACHE_CAP, FINE_CELLS_PER_REGION, FINE_REGION_SIZE, MACRO_REGION_SIZE};
+use crate::worldgen::tuning::{
+    FINE_CACHE_CAP, FINE_CELLS_PER_REGION, FINE_REGION_SIZE, MACRO_REGION_SIZE,
+};
 use std::sync::Arc;
 
 #[test]

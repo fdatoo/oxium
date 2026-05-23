@@ -68,14 +68,14 @@ pub use coords::{MacroRegionCoord, RegionCoord};
 
 // data
 pub use data::{
-    build_fine_region_placeholder, build_macro_region_placeholder, Chamber, CavePool, CaveSystem,
-    Entrance, EntranceKind, FineRegion, MacroRegion, RiverSegment, RiverSegmentKind, Tunnel,
+    CavePool, CaveSystem, Chamber, Entrance, EntranceKind, FineRegion, MacroRegion, RiverSegment,
+    RiverSegmentKind, Tunnel, build_fine_region_placeholder, build_macro_region_placeholder,
 };
 
 // cache
 pub use cache::{
-    fresh_fine_cache, fresh_macro_cache, get_fine, get_macro, peek_fine, BuildCache, FineCache,
-    MacroCache,
+    BuildCache, FineCache, MacroCache, fresh_fine_cache, fresh_macro_cache, get_fine, get_macro,
+    peek_fine,
 };
 
 // bitset
