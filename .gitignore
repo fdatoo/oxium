@@ -1,4 +1,5 @@
 .worktrees/
+.claude/
 .DS_Store
 *.log
 /.superpowers
