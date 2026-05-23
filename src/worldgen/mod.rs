@@ -76,6 +76,7 @@ pub mod biome;
 pub mod carver;
 pub mod caves;
 pub mod climate;
+pub mod columns;
 pub mod config;
 pub mod density;
 pub mod flat_cache;
@@ -98,6 +99,7 @@ pub use crate::worldgen::tuning::SEA_LEVEL;
 // Re-export Biome and TreeKind so callers at `worldgen::Biome` continue
 // to work after the type moved to `biome.rs`.
 pub use biome::Biome;
+pub use columns::ColumnData;
 use biome::TreeKind;
 
 // Compatibility re-exports: external callers that import
@@ -1851,35 +1853,6 @@ impl Generator {
             }
         }
     }
-}
-
-/// Per-column biome + geometry summary used by both `fill_chunk` and
-/// `add_trees` so block selection and tree placement stay in sync.
-#[derive(Debug, Clone, Copy)]
-pub struct ColumnData {
-    /// Surface height in world Y, post-carve, clamped.
-    pub height: i32,
-    /// Pre-carve surface height. Used by the terasology ambient carver's
-    /// surface suppression.
-    pub h_pre: f32,
-    /// True if the column's `h_pre` slope exceeds `CLIFF_SLOPE_THRESH`
-    /// AND its elevation is at/above `CLIFF_MIN_HEIGHT`. Cliff
-    /// columns expose stone faces directly, skipping the dirt cap.
-    pub is_cliff: bool,
-    /// Jitter-perturbed `desertness` noise value. Used by the
-    /// sand/grass transition band: inside the band on the grass side
-    /// of the desert boundary, the surface block is rolled
-    /// stochastically.
-    pub desertness: f32,
-    /// Discrete biome label derived from temperature, humidity, and
-    /// the desert mask, with threshold perturbation applied.
-    pub biome: Biome,
-    /// Unified water-surface Y: `Some(y)` means this column is submerged
-    /// and the topmost Water voxel sits at world Y == y. Priority:
-    /// river > lake > ocean > `None`. River priority is patched in by
-    /// `fill_chunk` after the river grid is built; other callers receive
-    /// only the lake/ocean classification computed here.
-    pub water_surface_y: Option<i32>,
 }
 
 
