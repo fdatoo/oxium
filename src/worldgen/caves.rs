@@ -57,6 +57,35 @@ use crate::worldgen::tuning::*;
 use glam::{IVec3, Vec3};
 use noise::{Fbm, NoiseFn, Simplex};
 
+// ── Hash domain separators ────────────────────────────────────────────────────
+// Each constant uniquely namespaces one per-region or per-system hash roll so
+// two different rolls at the same coordinates cannot produce correlated output.
+// Values are arbitrary but must be globally unique within this file.
+
+/// Namespaces the depth-band (Shallow / Middle / Deep) roll for a cave system.
+const SALT_DEPTH_BAND: i32 = 100;
+/// Namespaces the style roll (Cathedral / Warren / Slot / Sump / Karst).
+const SALT_CAVE_STYLE: i32 = 7000;
+/// Namespaces the total-system-count roll for the region.
+const SALT_SYSTEM_COUNT: i32 = 1;
+/// Namespaces the lava-vs-water pool kind roll for a chamber.
+const SALT_POOL_LAVA: i32 = 99_001;
+/// Namespaces the vertical-connector probability roll between two systems.
+const SALT_VERTICAL_CONNECTOR: i32 = 9500;
+/// Namespaces the cross-region trunk probability roll. (See `build_trunks`.)
+const SALT_TRUNK_PROB: i32 = 9000;
+/// Namespaces the trunk midpoint lateral-offset roll (determines which side of
+/// the straight line the arc bows toward).
+const SALT_TRUNK_MID_OFFSET: i32 = 9001;
+/// Namespaces the bounding-box X-origin roll within the region.
+const SALT_BB_ORIGIN_X: i32 = 10;
+/// Namespaces the bounding-box Z-origin roll within the region.
+const SALT_BB_ORIGIN_Z: i32 = 11;
+/// Namespaces the chamber-count roll (how many chambers this system has).
+const SALT_CHAMBER_COUNT: i32 = 20;
+/// Namespaces the extra-loop-count roll (how many non-MST tunnel edges to add).
+const SALT_EXTRA_LOOPS: i32 = 50;
+
 /// Distinct cave-system personalities, rolled per system from the
 /// region cell id and the system's depth band.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,7 +114,7 @@ pub enum DepthBand {
 impl DepthBand {
     fn pick(seed: u64, system_id: i32, region: RegionCoord) -> Self {
         // Three-way roll: 35% Shallow, 35% Middle, 30% Deep.
-        let r = mix_unit(seed, &[region.x, region.z, system_id, 100]);
+        let r = mix_unit(seed, &[region.x, region.z, system_id, SALT_DEPTH_BAND]);
         if r < 0.35 {
             DepthBand::Shallow
         } else if r < 0.70 {
@@ -122,7 +151,7 @@ pub fn pick_style(
     band: DepthBand,
     cfg: &crate::worldgen::config::CaveConfig,
 ) -> CaveStyle {
-    let u = mix_unit(seed, &[coord.x, coord.z, system_idx, 7000]);
+    let u = mix_unit(seed, &[coord.x, coord.z, system_idx, SALT_CAVE_STYLE]);
     let weights = match band {
         DepthBand::Shallow => &cfg.style_table.style_weights_shallow,
         DepthBand::Middle => &cfg.style_table.style_weights_middle,
@@ -163,7 +192,7 @@ pub fn build_systems_for_region(
     let n_max = cave_cfg
         .systems_per_region_max
         .min(CAVE_SYSTEMS_PER_REGION.1);
-    let n = n_min + (mix_u32(seed, &[coord.x, coord.z, 1]) % (n_max - n_min + 1));
+    let n = n_min + (mix_u32(seed, &[coord.x, coord.z, SALT_SYSTEM_COUNT]) % (n_max - n_min + 1));
     region.cave_systems.clear();
     for system_idx in 0..n as i32 {
         let sys = build_system(
@@ -219,7 +248,7 @@ fn derive_cave_pools(seed: u64, region: &mut FineRegion) {
                         ch.center.x as i32,
                         ch.center.y as i32,
                         ch.center.z as i32,
-                        99_001,
+                        SALT_POOL_LAVA,
                     ],
                 );
                 roll < POOL_LAVA_PROB
@@ -282,7 +311,16 @@ pub fn build_vertical_connectors(
             if band_idx(bands[j]) != band_idx(bands[i]) + 1 {
                 continue;
             }
-            let u = mix_unit(seed, &[coord.x, coord.z, i as i32, j as i32, 9500]);
+            let u = mix_unit(
+                seed,
+                &[
+                    coord.x,
+                    coord.z,
+                    i as i32,
+                    j as i32,
+                    SALT_VERTICAL_CONNECTOR,
+                ],
+            );
             if u > cfg.vertical_connector_prob {
                 continue;
             }
@@ -363,7 +401,10 @@ pub fn build_trunks(
         let salt_x = my_center.x as i32;
         let salt_y = my_center.y as i32;
         let salt_z = my_center.z as i32;
-        let u = mix_unit(seed, &[coord.x, coord.z, salt_x, salt_y, salt_z, 9000]);
+        let u = mix_unit(
+            seed,
+            &[coord.x, coord.z, salt_x, salt_y, salt_z, SALT_TRUNK_PROB],
+        );
         if u > cfg.trunk_prob {
             continue;
         }
@@ -391,8 +432,19 @@ pub fn build_trunks(
         let axis = other_center - my_center;
         let len = (axis.x * axis.x + axis.z * axis.z).sqrt().max(1.0);
         let perp = glam::Vec3::new(-axis.z / len, 0.0, axis.x / len);
-        let o =
-            (mix_unit(seed, &[coord.x, coord.z, salt_x, salt_y, salt_z, 9001]) * 2.0 - 1.0) * 40.0;
+        let o = (mix_unit(
+            seed,
+            &[
+                coord.x,
+                coord.z,
+                salt_x,
+                salt_y,
+                salt_z,
+                SALT_TRUNK_MID_OFFSET,
+            ],
+        ) * 2.0
+            - 1.0)
+            * 40.0;
         let mid = glam::Vec3::new(
             (my_center.x + other_center.x) * 0.5 + perp.x * o,
             (my_center.y + other_center.y) * 0.5,
@@ -498,11 +550,11 @@ fn build_system(
     );
     let region_origin = coord.origin();
     let bb_origin_x = region_origin.0
-        + (mix_u32(seed, &[coord.x, coord.z, system_idx, 10])
+        + (mix_u32(seed, &[coord.x, coord.z, system_idx, SALT_BB_ORIGIN_X])
             % (FINE_REGION_SIZE - bb_size.x).max(1) as u32) as i32
         - (bb_size.x / 2);
     let bb_origin_z = region_origin.1
-        + (mix_u32(seed, &[coord.x, coord.z, system_idx, 11])
+        + (mix_u32(seed, &[coord.x, coord.z, system_idx, SALT_BB_ORIGIN_Z])
             % (FINE_REGION_SIZE - bb_size.z).max(1) as u32) as i32
         - (bb_size.z / 2);
     let bb_origin_y = y_min;
@@ -511,8 +563,9 @@ fn build_system(
 
     // Chamber count — from style table.
     let (cn_min, cn_max) = sp.chamber_count;
-    let chamber_count =
-        cn_min + (mix_u32(seed, &[coord.x, coord.z, system_idx, 20]) % (cn_max - cn_min + 1));
+    let chamber_count = cn_min
+        + (mix_u32(seed, &[coord.x, coord.z, system_idx, SALT_CHAMBER_COUNT])
+            % (cn_max - cn_min + 1));
 
     // Pre-compute Sump bb_center_y / bb_half_y for the bias formula.
     let bb_center_y = (bb_min.y + bb_max.y) as f32 * 0.5;
@@ -629,7 +682,7 @@ fn build_system(
         // Optional loop edges: pick the shortest edges not already in
         // the MST.
         let extra_loop_count = MST_EXTRA_LOOPS.0
-            + (mix_u32(seed, &[coord.x, coord.z, system_idx, 50])
+            + (mix_u32(seed, &[coord.x, coord.z, system_idx, SALT_EXTRA_LOOPS])
                 % (MST_EXTRA_LOOPS.1 - MST_EXTRA_LOOPS.0 + 1));
         let mut added_extras = 0u32;
         for &(_, a, b) in &edges {
@@ -969,7 +1022,14 @@ pub fn trunks_sdf(
 
         let u = mix_unit(
             seed,
-            &[my_coord.x, my_coord.z, salt_x, salt_y, salt_z, 9000],
+            &[
+                my_coord.x,
+                my_coord.z,
+                salt_x,
+                salt_y,
+                salt_z,
+                SALT_TRUNK_PROB,
+            ],
         );
         if u > trunk_prob {
             continue;
@@ -1008,7 +1068,14 @@ pub fn trunks_sdf(
         let perp = Vec3::new(-axis.z / len, 0.0, axis.x / len);
         let o = (mix_unit(
             seed,
-            &[my_coord.x, my_coord.z, salt_x, salt_y, salt_z, 9001],
+            &[
+                my_coord.x,
+                my_coord.z,
+                salt_x,
+                salt_y,
+                salt_z,
+                SALT_TRUNK_MID_OFFSET,
+            ],
         ) * 2.0
             - 1.0)
             * 40.0;

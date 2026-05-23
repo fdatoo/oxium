@@ -36,6 +36,11 @@ use crate::worldgen::config::WorldgenConfig;
 use crate::worldgen::hash;
 use serde::{Deserialize, Serialize};
 
+/// Hash domain separator for the stochastic sand-transition roll inside
+/// [`ConditionSource::SandTransitionRoll`]. Ensures this roll doesn't
+/// correlate with other per-column hash rolls that use the same `(wx, wz)` key.
+const SALT_SAND_TRANSITION: i32 = 71;
+
 /// All state available to a [`ConditionSource`] / [`RuleSource`]
 /// during a single voxel evaluation.
 pub struct SurfaceContext<'a> {
@@ -114,7 +119,7 @@ impl ConditionSource {
                 if ctx.desertness < *temp_min || matches!(ctx.biome, Biome::Desert) {
                     return false;
                 }
-                let roll = hash::mix_unit(ctx.seed, &[ctx.wx, ctx.wz, 71]);
+                let roll = hash::mix_unit(ctx.seed, &[ctx.wx, ctx.wz, SALT_SAND_TRANSITION]);
                 roll < *probability
             }
             ConditionSource::BelowWaterSurface { offset } => {
