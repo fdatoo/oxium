@@ -176,6 +176,63 @@ impl CarverRng {
     }
 }
 
+// ── Walk types ───────────────────────────────────────────────────
+
+/// Context shared across the entire walk tree for one cave.
+///
+/// Every recursive call re-uses the same `WalkCtx` — it holds the
+/// mutable output collectors and the per-cave constants that don't
+/// change between the parent walk and its branches.
+struct WalkCtx<'a> {
+    rng: &'a mut CarverRng,
+    tunnels: &'a mut Vec<CarverTunnel>,
+    /// World-space center of the origin chunk, used for the
+    /// reachability cull: a tunnel that wanders too far from
+    /// `chunk_center` is unlikely to contribute spheres to the
+    /// origin chunk and is aborted early.
+    chunk_center: Vec3,
+    /// Vertical-to-horizontal radius ratio for all spheres in this
+    /// cave. U[0.1, 0.9] — lower values flatten the cave ellipsoids.
+    y_scale: f32,
+    /// Normalized Y cutoff for sphere carving — voxels below
+    /// `floor_level × v_radius` from the sphere center are skipped,
+    /// giving each sphere a flat floor. MC: U[-1.0, -0.4].
+    floor_level: f32,
+    /// Maximum number of walk steps. Drawn from
+    /// `MAX_DISTANCE - U[0, MAX_DISTANCE/4)` so each cave has a
+    /// slightly different length.
+    dist: i32,
+}
+
+/// State for one walk invocation — changes at every recursive branch.
+///
+/// `WalkState` is `Copy` so the branch-call struct literals are cheap
+/// and clear: each branch names every field that differs from the
+/// parent, making the branching logic self-documenting.
+#[derive(Clone, Copy)]
+struct WalkState {
+    /// Current world-space position of the walk head.
+    pos: Vec3,
+    /// Horizontal rotation (radians). Drifts via a damped random walk.
+    h_rot: f32,
+    /// Vertical rotation (radians). Decays toward zero each step.
+    v_rot: f32,
+    /// Horizontal sphere radius scale. Branches get half the parent's
+    /// thickness; the sine profile modulates radius over the lifetime.
+    thickness: f32,
+    /// Step index to start from. The root always starts at 0; branches
+    /// start at the step where the parent branched.
+    start_step: i32,
+    /// Step at which this walk forks into two branches. `None` for
+    /// child walks — only the root splits.
+    split: Option<i32>,
+    /// Recursion depth. Guards against infinite branching.
+    branch_depth: u8,
+    /// Stable identity for this walk, used as an RNG salt. Parent
+    /// passes incrementing IDs; branches derive from the parent's ID.
+    branch_id: u32,
+}
+
 // ── Builder ──────────────────────────────────────────────────────
 
 /// Build all carver tunnels originating in this chunk. Deterministic
@@ -227,21 +284,26 @@ pub fn build_tunnels_for_chunk(seed: u64, chunk: ChunkCoord) -> Vec<CarverTunnel
         let dist = MAX_DISTANCE - cave_rng.next_range(MAX_DISTANCE as u32 / 4) as i32;
         let split = (cave_rng.next_range((dist / 2).max(1) as u32) as i32) + dist / 4;
 
-        walk(
-            &mut cave_rng,
-            &mut tunnels,
+        let mut ctx = WalkCtx {
+            rng: &mut cave_rng,
+            tunnels: &mut tunnels,
             chunk_center,
-            pos,
-            h_rot,
-            v_rot,
-            thickness,
             y_scale,
             floor_level,
-            0,
             dist,
-            Some(split),
-            0,
-            cave_idx as u32,
+        };
+        walk(
+            &mut ctx,
+            WalkState {
+                pos,
+                h_rot,
+                v_rot,
+                thickness,
+                start_step: 0,
+                split: Some(split),
+                branch_depth: 0,
+                branch_id: cave_idx as u32,
+            },
         );
     }
 
@@ -250,35 +312,35 @@ pub fn build_tunnels_for_chunk(seed: u64, chunk: ChunkCoord) -> Vec<CarverTunnel
 
 /// One walk produces (potentially) one `CarverTunnel` of spheres plus
 /// any recursive branch tunnels.
-#[allow(clippy::too_many_arguments)]
-fn walk(
-    rng: &mut CarverRng,
-    tunnels: &mut Vec<CarverTunnel>,
-    chunk_center: Vec3,
-    mut pos: Vec3,
-    mut h_rot: f32,
-    mut v_rot: f32,
-    thickness: f32,
-    y_scale: f32,
-    floor_level: f32,
-    start_step: i32,
-    dist: i32,
-    split: Option<i32>,
-    branch_depth: u8,
-    branch_id: u32,
-) {
-    if branch_depth > MAX_BRANCH_DEPTH {
+///
+/// The walk advances `state.pos` one step per iteration, nudging
+/// `h_rot` and `v_rot` via a damped random walk (MC formula). At the
+/// split step the walk forks perpendicularly into two branches and the
+/// parent stops — matching MC's branching behaviour.
+fn walk(ctx: &mut WalkCtx<'_>, state: WalkState) {
+    if state.branch_depth > MAX_BRANCH_DEPTH {
         return;
     }
 
-    let is_steep = rng.next_range(6) == 0;
+    let WalkState {
+        mut pos,
+        mut h_rot,
+        mut v_rot,
+        thickness,
+        start_step,
+        split,
+        branch_depth,
+        branch_id,
+    } = state;
+
+    let is_steep = ctx.rng.next_range(6) == 0;
     let vert_decay: f32 = if is_steep { 0.92 } else { 0.7 };
 
     let mut x_rota: f32 = 0.0;
     let mut y_rota: f32 = 0.0;
     let mut tunnel = CarverTunnel::new();
 
-    for step in start_step..dist {
+    for step in start_step..ctx.dist {
         // Advance one unit in the current direction.
         let cos_v = v_rot.cos();
         pos.x += h_rot.cos() * cos_v;
@@ -291,8 +353,8 @@ fn walk(
         h_rot += y_rota * 0.1;
         x_rota *= 0.9;
         y_rota *= 0.75;
-        x_rota += (rng.next_f32() - rng.next_f32()) * rng.next_f32() * 2.0;
-        y_rota += (rng.next_f32() - rng.next_f32()) * rng.next_f32() * 4.0;
+        x_rota += (ctx.rng.next_f32() - ctx.rng.next_f32()) * ctx.rng.next_f32() * 2.0;
+        y_rota += (ctx.rng.next_f32() - ctx.rng.next_f32()) * ctx.rng.next_f32() * 4.0;
 
         // Branch at the split point — only the parent (with the
         // original `split`) branches; child walks have `split = None`.
@@ -303,39 +365,33 @@ fn walk(
         {
             let branch_id_a = branch_id.wrapping_mul(7) ^ step as u32;
             let branch_id_b = branch_id_a.wrapping_add(1);
-            let new_thickness_a = rng.next_f32() * 0.5 + 0.5;
-            let new_thickness_b = rng.next_f32() * 0.5 + 0.5;
+            let new_thickness_a = ctx.rng.next_f32() * 0.5 + 0.5;
+            let new_thickness_b = ctx.rng.next_f32() * 0.5 + 0.5;
             walk(
-                rng,
-                tunnels,
-                chunk_center,
-                pos,
-                h_rot - FRAC_PI_2,
-                v_rot / 3.0,
-                new_thickness_a,
-                y_scale,
-                floor_level,
-                step,
-                dist,
-                None,
-                branch_depth + 1,
-                branch_id_a,
+                ctx,
+                WalkState {
+                    pos,
+                    h_rot: h_rot - FRAC_PI_2,
+                    v_rot: v_rot / 3.0,
+                    thickness: new_thickness_a,
+                    start_step: step,
+                    split: None,
+                    branch_depth: branch_depth + 1,
+                    branch_id: branch_id_a,
+                },
             );
             walk(
-                rng,
-                tunnels,
-                chunk_center,
-                pos,
-                h_rot + FRAC_PI_2,
-                v_rot / 3.0,
-                new_thickness_b,
-                y_scale,
-                floor_level,
-                step,
-                dist,
-                None,
-                branch_depth + 1,
-                branch_id_b,
+                ctx,
+                WalkState {
+                    pos,
+                    h_rot: h_rot + FRAC_PI_2,
+                    v_rot: v_rot / 3.0,
+                    thickness: new_thickness_b,
+                    start_step: step,
+                    split: None,
+                    branch_depth: branch_depth + 1,
+                    branch_id: branch_id_b,
+                },
             );
             // Parent stops after branching (matches MC: return).
             break;
@@ -343,34 +399,34 @@ fn walk(
 
         // MC: 1-in-4 chance to skip this step entirely. Adds spatial
         // jitter and reduces sphere count.
-        if rng.next_range(4) == 0 {
+        if ctx.rng.next_range(4) == 0 {
             continue;
         }
 
         // Reachability: if we've wandered too far from the origin
         // chunk's center to plausibly return, abort.
-        let dx = pos.x - chunk_center.x;
-        let dz = pos.z - chunk_center.z;
-        let remaining = (dist - step) as f32;
+        let dx = pos.x - ctx.chunk_center.x;
+        let dz = pos.z - ctx.chunk_center.z;
+        let remaining = (ctx.dist - step) as f32;
         let rr = thickness + 2.0 + REACH_BUFFER;
         if dx * dx + dz * dz - remaining * remaining > rr * rr {
             break;
         }
 
-        let progress = step as f32 / dist.max(1) as f32;
+        let progress = step as f32 / ctx.dist.max(1) as f32;
         let h_radius = 1.5 + (PI * progress).sin() * thickness;
-        let v_radius = h_radius * y_scale;
+        let v_radius = h_radius * ctx.y_scale;
 
         tunnel.push_sphere(CarverSphere {
             center: pos,
             h_radius,
             v_radius,
-            floor_level,
+            floor_level: ctx.floor_level,
         });
     }
 
     if !tunnel.spheres.is_empty() {
-        tunnels.push(tunnel);
+        ctx.tunnels.push(tunnel);
     }
 }
 
