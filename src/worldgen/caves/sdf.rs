@@ -493,12 +493,9 @@ pub fn smin(a: f32, b: f32, k: f32) -> f32 {
     a.min(b) - h * h * k * 0.25
 }
 
+/// Thin wrapper over [`CaveSystem::contains_point`]. Kept for call-site
+/// symmetry with `any_system_y_in_range` inside this module.
 #[inline]
 pub(super) fn system_bb_contains(sys: &CaveSystem, wx: i32, wy: i32, wz: i32) -> bool {
-    wx >= sys.bb_min.x
-        && wx <= sys.bb_max.x
-        && wy >= sys.bb_min.y
-        && wy <= sys.bb_max.y
-        && wz >= sys.bb_min.z
-        && wz <= sys.bb_max.z
+    sys.contains_point(wx, wy, wz)
 }

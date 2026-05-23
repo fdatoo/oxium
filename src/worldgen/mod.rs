@@ -587,6 +587,8 @@ impl Generator {
                 for slot in row {
                     if let Some(r) = slot {
                         for sys in &r.cave_systems {
+                            // Check only the XZ plane — count systems
+                            // that *might* touch this column regardless of Y.
                             if sys.bb_min.x <= wx
                                 && wx <= sys.bb_max.x
                                 && sys.bb_min.z <= wz
@@ -1909,13 +1911,7 @@ impl ChunkRegions {
             for slot in row {
                 if let Some(r) = slot {
                     for sys in &r.cave_systems {
-                        if sys.bb_max.x >= chunk_min.x
-                            && sys.bb_min.x <= chunk_max.x
-                            && sys.bb_max.y >= chunk_min.y
-                            && sys.bb_min.y <= chunk_max.y
-                            && sys.bb_max.z >= chunk_min.z
-                            && sys.bb_min.z <= chunk_max.z
-                        {
+                        if sys.overlaps_box(chunk_min, chunk_max) {
                             out.push(sys);
                         }
                     }

@@ -195,8 +195,9 @@ pub struct CavePool {
 /// before entering the per-voxel inner loop.
 #[derive(Debug, Clone)]
 pub struct CaveSystem {
-    /// World-space axis-aligned bounding box, inclusive.
+    /// World-space axis-aligned bounding box (inclusive min, inclusive max).
     pub bb_min: glam::IVec3,
+    /// World-space axis-aligned bounding box (inclusive min, inclusive max).
     pub bb_max: glam::IVec3,
     pub chambers: Vec<Chamber>,
     pub tunnels: Vec<Tunnel>,
@@ -210,6 +211,37 @@ pub struct CaveSystem {
     /// systems in the same region (Shallow↔Middle, Middle↔Deep).
     /// Populated in PR3.2 by `build_vertical_connectors`.
     pub vertical_connectors: Vec<Tunnel>,
+}
+
+impl CaveSystem {
+    /// True when world point `(wx, wy, wz)` is inside this system's
+    /// axis-aligned bounding box (inclusive on both ends).
+    ///
+    /// Used as a fast early-exit in the per-voxel carve inner loop:
+    /// if the voxel isn't inside the BB there is no need to evaluate
+    /// the full chamber/tunnel SDF.
+    #[inline]
+    pub fn contains_point(&self, wx: i32, wy: i32, wz: i32) -> bool {
+        wx >= self.bb_min.x
+            && wx <= self.bb_max.x
+            && wy >= self.bb_min.y
+            && wy <= self.bb_max.y
+            && wz >= self.bb_min.z
+            && wz <= self.bb_max.z
+    }
+
+    /// True when this system's bounding box overlaps the axis-aligned
+    /// box `[chunk_min, chunk_max)`. Used in `gather_chunk_regions` to
+    /// pre-filter cave systems before the per-voxel inner loop.
+    #[inline]
+    pub fn overlaps_box(&self, box_min: glam::IVec3, box_max: glam::IVec3) -> bool {
+        self.bb_max.x >= box_min.x
+            && self.bb_min.x <= box_max.x
+            && self.bb_max.y >= box_min.y
+            && self.bb_min.y <= box_max.y
+            && self.bb_max.z >= box_min.z
+            && self.bb_min.z <= box_max.z
+    }
 }
 
 /// One ellipsoidal chamber — the primary air volume in a cave system.
