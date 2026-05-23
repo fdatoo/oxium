@@ -101,6 +101,7 @@ pub use crate::worldgen::tuning::SEA_LEVEL;
 pub use biome::Biome;
 pub use columns::ColumnData;
 use biome::TreeKind;
+use trees::{Tree, tree_hash, try_set_air};
 
 // Compatibility re-exports: external callers that import
 // `oxium::worldgen::heightmap::HeightmapNoise` (e.g. integration
@@ -2139,56 +2140,6 @@ impl ChunkRegions {
     }
 }
 
-/// Tree placement metadata for one cell.
-#[derive(Debug, Clone, Copy)]
-struct Tree {
-    /// World-space X coordinate of the trunk.
-    wx: i32,
-    /// World-space Z coordinate of the trunk.
-    wz: i32,
-    /// World-space Y of the surface block under the trunk (the trunk
-    /// itself starts at `base_y + 1`).
-    base_y: i32,
-    /// Number of Wood blocks above the surface, inclusive.
-    trunk_h: i32,
-    /// Tree shape (`Oak` round canopy vs `Palm` spreading fronds).
-    /// Picked from the biome at the cell's column.
-    kind: TreeKind,
-}
-
-/// Write `b` at world coords `(wx, wy, wz)` if they fall inside
-/// `coord`'s 32³ volume *and* the existing block is Air. Both
-/// conditions are required so a tree's trunk doesn't cut through
-/// hills and adjacent chunks' calls don't overwrite each other.
-fn try_set_air(coord: ChunkCoord, out: &mut DenseChunk, wx: i32, wy: i32, wz: i32, b: Block) {
-    use crate::voxel::coords::CHUNK_DIM;
-    let chunk_origin = coord.origin().0;
-    let lx = wx - chunk_origin.x;
-    let ly = wy - chunk_origin.y;
-    let lz = wz - chunk_origin.z;
-    if lx < 0 || ly < 0 || lz < 0 || lx >= CHUNK_DIM || ly >= CHUNK_DIM || lz >= CHUNK_DIM {
-        return;
-    }
-    let lp = LocalPos(UVec3::new(lx as u32, ly as u32, lz as u32));
-    if out.get(lp) != Block::Air {
-        return;
-    }
-    out.set(lp, b);
-}
-
-/// Deterministic mixer: `(seed, x, z, salt) → u32`. Uses the same
-/// xor-shift / golden-ratio multiply pattern as the Wang/Mix hashes
-/// commonly stamped into shader noise functions. Good enough for
-/// tree placement; not cryptographic.
-fn tree_hash(seed: u64, x: i32, z: i32, salt: u32) -> u32 {
-    let mut h = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    h ^= (x as i64 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
-    h = h.rotate_left(13);
-    h ^= (z as i64 as u64).wrapping_mul(0x1656_67B1_9E37_79F9);
-    h = h.rotate_left(17);
-    h ^= (salt as u64).wrapping_mul(0xCC9E_2D51_1B87_3593);
-    ((h ^ (h >> 33)) as u32) ^ ((h >> 16) as u32)
-}
 
 #[cfg(test)]
 mod tests {
