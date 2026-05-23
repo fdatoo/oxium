@@ -22,6 +22,10 @@
 //!
 //! Caves stay per-voxel — cave SDFs need 1-block resolution and are
 //! subtracted from the interpolated density at chunk-fill time.
+//!
+//! See `docs/book/content/part-4-chunk-fill/4.1-density-graph.mdx`,
+//! `docs/book/content/part-4-chunk-fill/4.2-cell-evaluator.mdx`, and
+//! `docs/superpowers/specs/2026-05-19-worldgen-3d-design.md`.
 
 use crate::voxel::coords::CHUNK_DIM_U;
 use crate::worldgen::config::{DensityConfig, NestedSpline};
@@ -216,15 +220,26 @@ pub fn build_default_tree(
     }
 }
 
-/// Per-chunk corner-lattice cache + trilerp evaluator.
+/// Per-chunk 9×9×9 corner-lattice cache + trilinear interpolation evaluator.
 ///
-/// Holds 9×9×9 = 729 `f32` density samples per chunk, plus a
-/// per-column climate cache (8×8 = 64 entries) so the 2D inputs
-/// don't get resampled per cell corner.
+/// Rather than evaluating the full density graph per voxel (~98k voxels
+/// per chunk), this evaluator samples the graph once at each corner of a
+/// 4×4×4-voxel cell grid — 9 corners per chunk axis (8 cells + 1), for
+/// 729 total. Per-voxel density is then the trilinear interpolation of the
+/// 8 surrounding cell corners. This trades ~134× fewer expensive density
+/// evaluations for a small smooth-density approximation error that is
+/// only visible at the density=0 iso-surface inside a cell. In practice
+/// the terrain heightmap changes slowly enough that the trilerp approximation
+/// is visually indistinguishable from exact evaluation.
+///
+/// A 2D climate cache (8×8 = 64 entries keyed by corner XZ) ensures the
+/// 2D climate channels (`continentalness`, `terrain_shape`, `ridges_pv`)
+/// are evaluated only once per (cx, cz) column of corners rather than per
+/// 3D corner — a further 9× reduction for the 2D inputs.
 ///
 /// Usage:
-/// 1. `new(graph, climate, density, cfg, chunk_origin, chunk_climate_fn)`
-///    — fills the corner lattice + climate cache.
+/// 1. `new(graph, density, cfg, chunk_origin, column_climate_fn)`
+///    — fills the corner lattice + 2D climate cache.
 /// 2. `evaluate(wx, wy, wz)` — trilerps the 8 surrounding corners.
 pub struct CellEvaluator {
     /// Stored as `[x][y][z]` → linear index `x + y*CORNER + z*CORNER*CORNER`.

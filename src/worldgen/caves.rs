@@ -1,18 +1,51 @@
-//! Graph-based cave systems.
+//! Graph-based cave systems plus ambient noise carvers.
 //!
-//! Each fine region deterministically rolls `1..=4` cave systems.
-//! A system is a 4–8 chamber graph wired by spline tunnels (MST +
-//! 1–2 loops), placed inside a bounding box at a depth band
-//! (shallow / middle / deep). Each chamber independently rolls
-//! whether to expose itself to the surface via a sinkhole, cliff
-//! mouth, or skylight.
+//! Each 512×512-block fine region deterministically rolls 0–3 cave systems.
+//! A system is a small graph of ellipsoidal chambers connected by spline
+//! tunnels (minimum spanning tree + 1–2 loop edges), placed inside a
+//! per-system bounding box at one of three depth bands:
 //!
-//! Carving runs at chunk fill time: for each cave system whose
-//! bounding box intersects the chunk, ellipsoid + capsule SDFs
-//! decide which voxels are air. The grass cap is preserved by
-//! refusing to carve within `CAVE_SURFACE_BUFFER` blocks of `h_pre`,
-//! except where an explicit entrance feature punches through.
+//! - **Shallow** (`CAVE_BAND_SHALLOW`): near surface, high entrance rate.
+//! - **Middle** (`CAVE_BAND_MIDDLE`): mid-depth, moderate entrance rate.
+//! - **Deep** (`CAVE_BAND_DEEP`): very deep, rare entrances.
 //!
+//! Each system is assigned a style ([`CaveStyle`]) that parametrises
+//! chamber count, radii, and tunnel widths. Adjacent systems in different
+//! bands may be linked by vertical connectors.
+//!
+//! ### Carving at chunk fill time
+//!
+//! Carving is deferred to chunk fill. For each system whose bounding box
+//! intersects the chunk, signed SDF functions (`cave_sdf`, `trunks_sdf`,
+//! `entrance_sdf`) return a positive intensity wherever a voxel lies inside
+//! a chamber or tunnel. The fill loop subtracts these from the base density
+//! via `smin` (smooth-min), so cave walls have soft, chamfered edges.
+//!
+//! The `CAVE_SURFACE_BUFFER` guard preserves the grass cap by refusing to
+//! apply the graph SDFs within `CAVE_SURFACE_BUFFER` blocks of `h_pre`.
+//! Entrance features (sinkholes, cliff mouths, skylights) bypass this guard
+//! via a separate `entrance_sdf` gate so intentional cave openings can still
+//! breach the surface.
+//!
+//! ### Ambient noise carvers
+//!
+//! Alongside the graph systems, two MC-derived ambient carvers fire on every
+//! underground voxel:
+//!
+//! - **Cheese** ([`cheese_contribution`]): threshold-sampled 3D FBM produces
+//!   Swiss-cheese-like isolated pockets. A `cave_layer²` stratification term
+//!   concentrates carving at specific depth bands.
+//! - **Terasology ambient** ([`terasology_ambient`]): two independent FBM
+//!   channels are intersected; carving occurs where both are near zero —
+//!   geometrically a disk in 2D noise space. Disk radius grows with depth.
+//!
+//! Both layers are sampled via a `CarverEvaluator` corner-lattice trilerp
+//! (same 9³ pattern as `density_graph::CellEvaluator`) to avoid per-voxel
+//! FBM cost.
+//!
+//! See `docs/superpowers/specs/2026-05-21-cave-system-overhaul-design.md`,
+//! `docs/book/content/part-3-region-build/3.6-cave-systems.mdx`, and
+//! `docs/book/content/part-4-chunk-fill/4.3-composing-caves.mdx`.
 use crate::worldgen::aquifer::LAVA_BAND_TOP_Y;
 use crate::worldgen::fluid::FluidBodyKind;
 use crate::worldgen::hash::{mix_range, mix_u32, mix_unit};
@@ -416,6 +449,29 @@ fn style_params(style: CaveStyle, table: &crate::worldgen::config::CaveStyleTabl
 }
 
 /// Build one cave system inside region `coord`.
+///
+/// ### Chamber placement (Poisson-disk rejection sampling)
+///
+/// Candidate chamber centers are drawn uniformly at random inside the
+/// system bounding box. A candidate is rejected if it lies within
+/// `mean_radius × POISSON_MIN_SPACING_MULT` of any already-placed
+/// chamber. This minimum-distance constraint prevents rooms from
+/// overlapping or crowding into impenetrable clusters. Each attempt
+/// increments an independent counter; after `max_tries` attempts the
+/// sampling stops — if a target chamber count can't be reached, the
+/// system uses however many fit, down to a minimum of 1.
+///
+/// ### Tunnel graph (Kruskal's MST)
+///
+/// After all chambers are placed, every pair of chambers becomes a
+/// candidate edge weighted by their 3D Euclidean distance. Kruskal's
+/// minimum spanning tree algorithm selects the subset of edges that
+/// connects all chambers with the smallest total tunnel length. Path-
+/// compression union-find gives near-O(α(n)) per edge, amortised over
+/// the whole system. Additionally `MST_EXTRA_LOOPS.0..=1` short non-MST
+/// edges are added back to introduce cycles — without loops the cave
+/// graph is a tree and every room has exactly one entrance/exit, which
+/// feels unnatural.
 fn build_system(
     seed: u64,
     coord: RegionCoord,
@@ -1252,24 +1308,35 @@ impl NoiseCarvers {
     }
 }
 
-/// Signed-density cheese contribution.
+/// MC-style cheese cave contribution.
+///
+/// Where the signed FBM noise is negative enough (below `cheese_offset`
+/// as a threshold), the cheese term goes negative, carving a hole. The
+/// "cheese" metaphor: if you sample a random 3D FBM and threshold it at
+/// zero, you get a Swiss-cheese-like collection of blobs where the field
+/// dips below the threshold, each blob being an isolated pocket of air.
+///
+/// The `cave_layer² × intensity` term adds horizontal stratification:
+/// `cave_layer` is a low-frequency noise that controls which horizontal
+/// strata are rich in caves. Where `cave_layer ≈ 0`, the `layer²` term
+/// is near-zero so the raw cheese signal dominates and carves freely.
+/// Where `|cave_layer|` is large, the `layer²` term is strongly positive,
+/// pushing the total toward solid and suppressing caves in that stratum.
+/// This produces the characteristic Minecraft "cave layer" banding —
+/// caves that cluster at specific depths rather than distributing evenly.
+///
+/// `term1` (raw cheese signal) + `term2` (surface suppression, using
+/// `raw_density` as a proxy for depth near the surface) + `layerized`.
+/// The caller composes via `smin(density, cheese, k)` so the whole
+/// signed value participates in the soft-blend.
 ///
 /// ```text
-///   term1  = clamp(cheese_offset + cheese_noise, -1, 1)
-///   term2  = clamp(supp_offset + supp_slope * raw_density,
-///                  supp_min, supp_max)
-///   result = term1 + term2
+///   term1      = clamp(cheese_offset + cheese_noise, -1, 1)
+///   term2      = clamp(supp_offset + supp_slope × raw_density,
+///                      supp_min, supp_max)
+///   layerized  = cave_layer_intensity × layer²
+///   result     = term1 + term2 + layerized
 /// ```
-///
-/// `term1` is the raw cheese signal — negative values bias the
-/// voxel toward air. `term2` is a surface-suppression term that
-/// pushes the result strongly positive (solid) near the surface
-/// (where `raw_density` is near zero) and dies off at depth, so
-/// cheese carves freely underground but not just under the
-/// heightmap.
-///
-/// The caller composes this via `min(other_caves, cheese)` — any
-/// signed component going negative pulls the voxel to air.
 pub fn cheese_contribution(
     wx: i32,
     wy: i32,
@@ -1346,9 +1413,19 @@ pub fn pillar_contribution(
     cfg.pillar_intensity * depth
 }
 
-/// Polynomial smooth-min — pulls the result below `min(a, b)` by up to
-/// `k/4` when `|a - b| < k`. Used to merge cave SDFs near layer boundaries
-/// so close-but-not-touching pockets connect into one volume.
+/// Polynomial smooth-min (Inigo Quilez's C1 smooth-min).
+///
+/// Produces a soft blend between two SDF surfaces within a blending radius
+/// `k`. When `k = 0`, this is ordinary `min(a, b)`. Increasing `k` merges
+/// nearby cave chambers and tunnels into one organic-looking connected
+/// volume rather than leaving hard intersections where SDFs meet.
+///
+/// The formula: `min(a, b) - h²·k/4` where `h = max(0, k - |a-b|) / k`.
+/// This is continuous and has a continuous first derivative at the blend
+/// boundary; the maximum "pull below min" is exactly `k/4`.
+///
+/// Used to merge cave SDFs near layer boundaries so close-but-not-touching
+/// pockets connect into one volume instead of staying as isolated bubbles.
 #[inline]
 pub fn smin(a: f32, b: f32, k: f32) -> f32 {
     if k <= 0.0 {
@@ -1358,21 +1435,32 @@ pub fn smin(a: f32, b: f32, k: f32) -> f32 {
     a.min(b) - h * h * k * 0.25
 }
 
-/// Terasology-style depth-driven 2-noise cave carver.
+/// Terasology-style depth-driven 2-noise disk carver.
 ///
-/// Inspired by `org.terasology.caves.CaveFacetProvider`. Two independent
-/// 4-octave FBM-Simplex channels are intersected: voxels where both are
-/// near zero are cave. The cave region in 2D noise space is a disk of
-/// radius `freq_depth`, centered at `(0, -freq_reduction)`. The disk
-/// grows with depth (more caves deeper) and shifts off-axis near the
-/// surface (caves rare up top). Y is sampled at `tera_y_factor` × the
-/// XZ frequency, which forces the resulting tubes to lean horizontal.
+/// Two independently seeded 3D FBM noise channels (`tera_a`, `tera_b`) are
+/// each evaluated at the same scaled position. Geometrically, the pair
+/// `(n0, n1)` defines a point in 2D noise space; carving occurs where that
+/// point falls inside a disk of radius `freq_depth` centred near the
+/// origin. Because noise values cluster near zero, the disk selects a
+/// thin connected manifold — visually a set of nearly-horizontal tubes
+/// threading through the rock, mimicking the stratigraphy-following
+/// caves found in real karst.
 ///
-/// Returns signed density: negative = carve, positive = solid. Magnitude
-/// scales by `* 5.0` so the output aligns with the cheese carver's range
-/// for downstream `min`/`smin` composition. Typical values: `[-5.4, +6.7]`
-/// (lower bound at deep + on-axis noise, upper bound at noise extrema with
-/// no cave region).
+/// Two depth-driven offsets modulate the disk:
+/// - `freq_reduction` shifts the disk center off-axis near the surface,
+///   suppressing carving there (`tera_supp` controls the suppression
+///   depth). This replaces the blunt `CAVE_SURFACE_BUFFER` for tera-caves.
+/// - `freq_depth` grows with depth so caves become more frequent
+///   underground. The growth rate is `tera_thresh_depth`.
+///
+/// The Y axis is sampled at `tera_y_factor × freq` to squash the noise
+/// vertically, keeping the tubes lean-horizontal.
+///
+/// Returns signed density: negative = carve, positive = solid. Output is
+/// scaled by `* 5.0` to align its magnitude with the cheese carver for
+/// downstream `smin` composition. Typical range: `[-5.4, +6.7]`.
+///
+/// Reference: `org.terasology.caves.CaveFacetProvider`.
 pub fn terasology_ambient(
     wx: i32,
     wy: i32,

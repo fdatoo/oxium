@@ -50,6 +50,9 @@
 //! `gap > 0` (above) and a gentle linear taper for `gap ≤ 0`
 //! (below). Lava is similar but biased to stay near its source
 //! pocket — its `top_falloff` is sharper than water.
+//!
+//! See `docs/book/content/part-4-chunk-fill/4.7-aquifers.mdx` for the
+//! design rationale.
 
 use crate::voxel::block::Block;
 use crate::worldgen::hash;

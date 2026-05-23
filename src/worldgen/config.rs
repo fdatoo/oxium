@@ -5,6 +5,31 @@
 //! change via [`ConfigHolder`]. The graph topology (which density
 //! functions exist, what marker wrappers apply) stays in Rust;
 //! only values are file-driven.
+//!
+//! ### The tuning.rs / default.ron boundary
+//!
+//! Hot-reloadable world-character knobs live here (terrain splines, biome
+//! hyperboxes, noise channel descriptors, cave style weights). Compile-time
+//! architectural invariants live in `tuning.rs`. A new knob goes in
+//! `default.ron` if a designer could tune it live without recompiling —
+//! e.g. "how steep is a cliff", "what temperature range is Tundra", or
+//! "how fat are cave tunnels". It goes in `tuning.rs` if changing it
+//! at runtime could corrupt a data structure, break coordinate math, or
+//! invalidate cached region data — e.g. "how many blocks per fine region"
+//! or "how many LRU entries in the region cache".
+//!
+//! ### Hot reload
+//!
+//! `ConfigHolder` wraps an `Arc<WorldgenConfig>` behind an `ArcSwap`
+//! (via [`arc_swap::ArcSwap`]). The file watcher (in `app.rs`) calls
+//! [`ConfigHolder::swap`] when `default.ron` is written; in-progress chunk
+//! fills finish with the old config snapshot and new fills start with the
+//! fresh one. The world stays byte-deterministic per `(seed, coord)` for
+//! any fixed config snapshot.
+//!
+//! See `docs/book/content/part-5-engineering/5.3-config-hot-reload.mdx`
+//! and `docs/superpowers/specs/2026-05-20-worldgen-docs-design.md` for
+//! more detail.
 
 use crate::worldgen::spline::CubicSpline;
 use serde::{Deserialize, Serialize};

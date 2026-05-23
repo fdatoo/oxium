@@ -23,6 +23,7 @@
 //! - MC `net/minecraft/world/level/levelgen/carver/CaveWorldCarver.java`
 //! - MC `net/minecraft/world/level/levelgen/carver/WorldCarver.java`
 //! - MC `data/minecraft/worldgen/configured_carver/cave.json`
+//! - Oxium spec: `docs/superpowers/specs/2026-05-21-cave-system-overhaul-design.md`
 
 use crate::voxel::coords::{CHUNK_DIM, ChunkCoord};
 use crate::worldgen::hash;

@@ -21,9 +21,13 @@
 //! `net/minecraft/world/level/biome/Climate.java`. Integers give
 //! byte-deterministic equality comparison across platforms.
 //!
-//! The lookup is wrapped in an [`RTree`] with fanout 6 and a per-
-//! thread last-leaf cache so adjacent voxels (which almost always
-//! hit the same leaf) prune the tree on the first child check.
+//! The lookup is wrapped in an [`RTree`] with fanout 6 and a per-thread
+//! last-leaf cache so adjacent voxels (which almost always hit the same
+//! leaf) prune the tree on the first child check.
+//!
+//! See `docs/book/content/part-3-region-build/3.2-climate.mdx` and
+//! `docs/superpowers/specs/2026-05-19-worldgen-3d-design.md` for the
+//! design rationale and the mapping from MC's climate channels to ours.
 
 use crate::worldgen::Biome;
 use serde::{Deserialize, Serialize};

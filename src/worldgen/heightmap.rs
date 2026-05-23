@@ -32,6 +32,9 @@
 //! All three are sampled once per column and broadcast across the
 //! voxel loop (PR 5 wraps this in `FlatCache2D` for cell-grid
 //! evaluation; PR 3 just reads per-voxel).
+//!
+//! See `docs/book/content/part-3-region-build/3.3-heightmap.mdx` and
+//! `docs/superpowers/specs/2026-05-19-worldgen-3d-design.md`.
 
 use crate::worldgen::config::{ClimateConfig, DensityConfig};
 use crate::worldgen::plates::{Plate, PlateKind, PlateLookup, plate_at};

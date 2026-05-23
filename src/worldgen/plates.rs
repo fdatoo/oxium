@@ -15,6 +15,9 @@
 //! deep inside a plate; downstream modules use `t` to interpolate
 //! between adjacent plates' base elevations (continental shelf taper)
 //! and to gate the mountain-ridge lift.
+//!
+//! See `docs/book/content/part-3-region-build/3.1-plates.mdx` and
+//! `docs/superpowers/specs/2026-05-19-worldgen-overhaul-design.md`.
 
 use crate::worldgen::hash::{mix_range, mix_unit};
 use crate::worldgen::tuning::*;

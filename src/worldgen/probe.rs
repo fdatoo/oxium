@@ -1,10 +1,22 @@
-//! Inspection types for the worldgen visualizer (PR 2).
+//! Inspection types for the worldgen visualizer.
 //!
-//! `ColumnProbe` is a snapshot of every value the pipeline computes
-//! for one (wx, wz) column. `Stage` enumerates the per-column scalar
-//! stages exposed as 2D overlays. `DensityBreakdown` is the
-//! per-voxel density decomposition surfaced in the probe panel's
-//! "sliding y" section.
+//! These types carry diagnostic data from the generator to the
+//! `worldgen_viz` binary without coupling the generator to any windowing
+//! or rendering code. Three granularities are exposed:
+//!
+//! - [`PaintColumn`]: a lean per-column snapshot used for the 2D overlay
+//!   map — only the fields the per-pixel color function needs, cheap
+//!   enough to populate for all 1024 columns in a chunk.
+//! - [`ColumnProbe`]: a full pipeline trace for one `(wx, wz)` column,
+//!   including hydrology, biome, aquifer, and cave system data.
+//! - [`DensityBreakdown`]: per-voxel density decomposition for the
+//!   "sliding y" section of the probe panel — shows what each layer
+//!   (bias, 3D noise, cave SDF, cheese, tera, pillar) contributes to
+//!   the final density at a given voxel.
+//! - [`Stage`]: enum of per-column scalar stages that the 2D overlay map
+//!   can display (continentalness, temperature, h_target, flow_accum, …).
+//!
+//! See `docs/book/content/part-5-engineering/5.4-visualizer.mdx`.
 
 use crate::voxel::block::Block;
 use crate::worldgen::Biome;

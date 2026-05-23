@@ -1,8 +1,21 @@
 //! Static terrain-aware fluid planning for chunk generation.
 //!
 //! Runtime fluid simulation is deliberately out of scope here. This
-//! planner writes deterministic source bodies after terrain and cave
-//! carving have decided which voxels are solid or empty.
+//! planner writes deterministic fluid source blocks after terrain and cave
+//! carving have decided which voxels are solid or empty. There are two
+//! entry points:
+//!
+//! - [`FluidPlanner::apply_surface_fluids`]: stamps Water into any Air voxel
+//!   in `(col.height, water_surface_y]` for columns where a surface water
+//!   body (ocean, lake, river) has been identified by the hydrology pass.
+//! - [`FluidPlanner::apply_cave_pools`]: stamps Water or Lava into Air
+//!   voxels inside cave chamber ellipsoids that qualified for a pool during
+//!   region build (see `caves::derive_cave_pools`).
+//!
+//! Both passes run after the main voxel fill loop and after the surface-block
+//! fixer, so they stamp into already-correctly-surfaced terrain.
+//!
+//! See `docs/book/content/part-4-chunk-fill/4.8-fluid-settle.mdx`.
 
 use crate::voxel::block::Block;
 use crate::voxel::chunk::DenseChunk;

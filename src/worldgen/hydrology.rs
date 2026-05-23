@@ -45,6 +45,10 @@
 //! halo). Operates on 128 × 128 cells per macro region (window 3 ×
 //! 128 = 384 cells); sees a 24 km drainage horizon — enough for
 //! continental-scale trunk rivers and inland-basin lakes.
+//!
+//! See `docs/book/content/part-3-region-build/3.4-hydrology.mdx`,
+//! `docs/book/content/part-3-region-build/3.5-rivers-lakes.mdx`, and
+//! `docs/superpowers/specs/2026-05-19-worldgen-overhaul-design.md`.
 
 use crate::worldgen::heightmap::HeightmapNoise;
 use crate::worldgen::region::{
@@ -129,11 +133,24 @@ impl Grid {
         ix >= 0 && iz >= 0 && (ix as usize) < self.n && (iz as usize) < self.n
     }
 
-    /// Priority-queue Planchon-Darboux sink fill. Every cell ends up
-    /// with `h_fill[c] >= h[c]` and a non-strictly-decreasing path to
-    /// the window boundary. `epsilon` is added between adjacent cells
-    /// to break flat-plateau ties; we use 0 for integer heights —
-    /// flat plateaus aren't a problem at our chunk scale.
+    /// Priority-queue Planchon-Darboux sink fill.
+    ///
+    /// Works like water pouring onto a landscape: start from the
+    /// boundaries (edges of the computation window always drain to the
+    /// edge — they're guaranteed outlets), then process cells in order of
+    /// increasing elevation. Each interior cell is forced to be at least as
+    /// high as the lowest drain-accessible surface, ensuring no closed
+    /// sinks remain. Uses a min-heap so cells are always processed
+    /// lowest-first, giving the "water rises from below" intuition.
+    ///
+    /// After `sink_fill`, every cell has a non-strictly-decreasing path to
+    /// the window boundary. Cells whose `h_fill > h` were the bottoms of
+    /// closed basins — they are the future lake interiors.
+    ///
+    /// Reference: Planchon & Darboux (2002), "A fast, simple and versatile
+    /// algorithm to fill the depressions of digital elevation models".
+    /// Our variant uses 0 for epsilon (integer heights; flat plateaus are
+    /// not a problem at our chunk scale).
     fn sink_fill(&mut self) {
         let n = self.n;
         // Min-heap of (filled height, packed (ix, iz)) for cells whose
@@ -202,10 +219,21 @@ impl Grid {
         }
     }
 
-    /// Compute D8 flow direction on the *filled* heightmap. Every
-    /// cell picks the steepest-downhill neighbour by `slope = drop /
-    /// distance`. Cells at the boundary point inward toward their
-    /// best neighbour (the boundary itself can't flow off the grid).
+    /// Compute D8 flow direction on the *filled* heightmap.
+    ///
+    /// D8 flow direction: each cell drains to whichever of its 8
+    /// neighbours (N, NE, E, SE, S, SW, W, NW) lies at the steepest
+    /// downhill slope. Slope is measured as `height_drop / distance` so
+    /// a 1-block cardinal drop (distance 1) correctly beats a 1-block
+    /// diagonal drop (distance √2). Cells with no downhill neighbour
+    /// (flat or local high-points after sink fill — lake rims) stay as
+    /// `DIR_NONE` until an outflow direction is determined.
+    ///
+    /// This is the standard D8 algorithm from O'Callaghan & Mark (1984),
+    /// "The extraction of drainage networks from digital elevation data".
+    /// D8's single-flow-direction model occasionally produces
+    /// bifurcation artefacts at flat plateaus, but those are rare in
+    /// our integer heightmaps.
     fn compute_flow(&mut self) {
         let n = self.n;
         for iz in 0..n {
@@ -250,9 +278,16 @@ impl Grid {
     }
 
     /// Compute upstream flow accumulation in topological order.
-    /// Each cell donates `1 + trunk_injection[c]` to its downstream
-    /// neighbour. After this, `flow_acc[c]` is the total upstream
-    /// drainage that reaches `c` (in fine cells).
+    ///
+    /// Walk upstream-to-downstream: each cell's accumulation equals 1
+    /// (itself) plus any injected trunk units plus the sum of all cells
+    /// that drain into it. Since we process in topological order (highest
+    /// filled elevation first), every upstream contributor is already
+    /// counted when we reach a cell. After this pass, `flow_acc[c]` is the
+    /// total upstream drainage area (in fine cells) flowing through `c`.
+    ///
+    /// Cells with `flow_acc >= RIVER_THRESH` become rivers; width follows
+    /// a power-law `clamp(sqrt(acc) * RIVER_WIDTH_SCALE, MIN, MAX)`.
     fn compute_acc(&mut self) {
         let n = self.n;
         // Initialise: each cell contributes 1 + injection + (PR 1)
@@ -289,8 +324,16 @@ impl Grid {
 
 // ── Macro pass ────────────────────────────────────────────────────────
 
-/// Build the macro region for `coord` from noise alone. Pure in
-/// `(seed, coord)`.
+/// Build the macro region for `coord` from noise alone.
+///
+/// Runs the full D8 + sink-fill + flow-accumulation pipeline on the
+/// coarse (64 m / cell) grid. The result is stored in the macro cache
+/// and used by the fine-region builder to inject trunk-river drainage
+/// from outside the fine window, producing correctly-sized rivers that
+/// flow in from off-screen.
+///
+/// Pure in `(seed, coord)` — the same key always rebuilds to the same
+/// result.
 pub fn build_macro_region(
     seed: u64,
     coord: MacroRegionCoord,
@@ -368,12 +411,21 @@ pub fn build_macro_region(
 /// Build the hydrology layer of a fine region. Requires access to the
 /// macro cache so trunk drainage from outside the fine window can be
 /// injected.
-/// Read-only snapshots of the four cardinal-neighbour fine regions of
-/// a region currently being built. Each entry is `Some` iff the
-/// neighbour is already in the fine cache; `gather_neighbour_edges`
-/// never triggers a build. Names denote the direction *to* the
-/// neighbour. Corner neighbours are omitted — diagonal contact is one
-/// cell and not worth the bookkeeping.
+/// Read-only snapshots of the four cardinal-neighbour fine regions.
+///
+/// Used by the fine hydrology builder to stitch river flow and
+/// accumulation across region boundaries. Each entry is `Some` iff
+/// the neighbour is already in the fine cache —
+/// `gather_neighbour_edges` never triggers a build. Names denote the
+/// direction *to* the neighbour. Corner neighbours are omitted
+/// because diagonal contact is only one cell and not worth the added
+/// bookkeeping.
+///
+/// When a neighbour is `Some`, `build_fine_hydro` reads the edge row
+/// of that neighbour's flow field and injects it as `inbound_dir` /
+/// `inbound_acc` on the corresponding edge of the new grid. This
+/// breaks 2-cycles across the seam and keeps large rivers from
+/// suddenly shrinking at region boundaries.
 pub struct NeighbourEdges {
     pub west: Option<std::sync::Arc<crate::worldgen::region::FineRegion>>,
     pub east: Option<std::sync::Arc<crate::worldgen::region::FineRegion>>,
@@ -393,8 +445,12 @@ impl NeighbourEdges {
     }
 }
 
-/// Build a [`NeighbourEdges`] for `coord` by peeking the four cardinal
-/// neighbours in the fine cache. Cold neighbours stay `None`.
+/// Peek the four cardinal neighbours in the fine cache without building.
+///
+/// Returns a [`NeighbourEdges`] where `None` entries indicate that the
+/// neighbour has not yet been built. Cold cache entries stay `None`
+/// rather than triggering a recursive build — the fine region builder
+/// handles the missing-edge case by treating those edges as free-draining.
 pub fn gather_neighbour_edges(
     coord: RegionCoord,
     fine_cache: &crate::worldgen::region::FineCache,
@@ -431,6 +487,20 @@ pub fn gather_neighbour_edges(
     }
 }
 
+/// Build the hydrology layer of a fine region.
+///
+/// Runs the 8-step pipeline described in the module header: sample
+/// h_pre → sink fill → macro trunk injection → D8 flow direction →
+/// flow accumulation → river/lake classification → segment extraction
+/// → write into `region`. After this call, `region.flow_acc`,
+/// `region.is_river`, `region.is_lake`, `region.lake_rim`,
+/// `region.segments`, and `region.h_pre` are all populated.
+///
+/// Requires `macro_cache` so trunk drainage injected from outside the
+/// fine window is properly accounted for. Requires `fine_cache` (read-only
+/// peek) so existing cardinal-neighbour regions can stitch their edge
+/// flow fields into the new region, preventing rivers from snapping to
+/// new directions at region seams.
 pub fn build_fine_hydro(
     seed: u64,
     coord: RegionCoord,

@@ -1,4 +1,4 @@
-//! Region cache: lazy, deterministic, two-level memoization.
+//! Region cache: lazy, deterministic, two-level memoisation.
 //!
 //! The new worldgen wants per-region precomputation (flow accumulation,
 //! cave system rolls) that's too expensive to redo per chunk. This
@@ -11,10 +11,36 @@
 //! are byte-identical to the original. No serialisation across
 //! runs — caches start cold on every program start.
 //!
+//! ### BuildCache concurrency model
+//!
+//! `BuildCache<K, V>` is a **dual-Mutex + Condvar** design. The outer
+//! `Mutex<BuildCacheInner>` guards the LRU map and a `HashMap` of
+//! in-flight builds. The inner `Mutex<InFlightState>` + `Condvar` guards
+//! the result of a single in-progress build.
+//!
+//! The protocol for a miss:
+//! 1. Lock the outer mutex; check the LRU (hit → return immediately).
+//! 2. Check `in_flight`: if another worker is already building this key,
+//!    grab a clone of the `Arc<InFlight>` slot, **drop the outer lock**,
+//!    then wait on the `Condvar` inside the slot.
+//! 3. If no in-flight entry exists, insert one and drop the outer lock,
+//!    then run the build closure outside any lock.
+//! 4. On build completion, re-acquire the outer lock to install the
+//!    result into the LRU and remove the in-flight entry; then signal
+//!    all waiters through the slot's `Condvar`.
+//!
+//! The `loop` in [`get_or_build`] is necessary: if the builder panics,
+//! `BuildClaim`'s `Drop` impl marks the slot as `aborted` and wakes all
+//! waiters. A waiter re-enters the loop from the top to either claim
+//! ownership of a fresh build (if no other thread got there first) or
+//! wait on the next builder.
+//!
 //! In PR 1 the cache types exist but the build functions return
 //! default-filled placeholders. PRs 2–4 fill them in: PR 2 populates
-//! the heightmap samples, PR 3 the river network, PR 4 the cave
-//! systems.
+//! the heightmap samples, PR 3 the river network, PR 4 the cave systems.
+//!
+//! See `docs/book/content/part-5-engineering/5.2-region-cache.mdx` and
+//! `docs/superpowers/specs/2026-05-19-worldgen-overhaul-design.md`.
 
 use crate::worldgen::fluid::FluidBodyKind;
 use crate::worldgen::tuning::*;
@@ -26,8 +52,10 @@ use std::sync::{Arc, Condvar, Mutex};
 
 // ── Region coordinate keys ────────────────────────────────────────────
 
-/// Coordinate of a fine region (512 × 512 blocks). `(world_x /
-/// FINE_REGION_SIZE).floor()` etc.
+/// Grid coordinate of a fine region (512 × 512 blocks).
+///
+/// `x` and `z` equal `floor(world_coord / FINE_REGION_SIZE)`. Negative
+/// values are valid — the world grid extends in all directions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RegionCoord {
     pub x: i32,
@@ -49,7 +77,11 @@ impl RegionCoord {
     }
 }
 
-/// Coordinate of a macro region (8192 × 8192 blocks).
+/// Grid coordinate of a macro region (8192 × 8192 blocks).
+///
+/// The macro grid covers the same infinite plane as fine regions but at
+/// 16× coarser granularity. One macro region covers 16 × 16 fine regions.
+/// Used by the trunk-river pass to provide long-distance drainage context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MacroRegionCoord {
     pub x: i32,
@@ -151,7 +183,13 @@ impl FineRegion {
     }
 }
 
-/// What the macro cache stores. Populated by PR 3.
+/// Pre-computed coarse hydrology for one 8192×8192-block macro region.
+///
+/// Stores the D8 flow field and accumulation at 64 m/cell resolution.
+/// Cells with `flow_acc >= MACRO_RIVER_THRESH` are flagged as trunk rivers
+/// in `is_trunk` and their accumulation is injected into the fine grid
+/// when building overlapping fine regions, so intercontinental rivers stay
+/// fat even when they first appear in a fine region window.
 #[derive(Debug)]
 pub struct MacroRegion {
     pub coord: MacroRegionCoord,
@@ -213,9 +251,13 @@ pub enum RiverSegmentKind {
     Waterfall,
 }
 
-/// A water or lava pool inside a cave chamber. Derived from a `Chamber`
-/// ellipsoid during region build; read by the fluid planner at chunk fill
-/// time via `cave_pools_intersecting`. Stored per-region in the `FineCache`.
+/// A static fluid pool inside a cave chamber.
+///
+/// Derived from qualifying `Chamber` ellipsoids during region build and
+/// stored per-region. At chunk fill time the fluid planner reads all pools
+/// whose bounding ellipsoid intersects the chunk and stamps the fluid into
+/// Air voxels between `bed_y` and `surface_y`. Large chambers deep in the
+/// lava band may roll as lava pools; shallower ones are always water.
 #[derive(Debug, Clone)]
 pub struct CavePool {
     /// World-space center of the originating ellipsoid chamber.
@@ -230,8 +272,14 @@ pub struct CavePool {
     pub kind: FluidBodyKind,
 }
 
-/// Pre-built cave system. Stored in the region cache; carving happens
-/// at chunk fill time.
+/// A fully-resolved graph-based cave system.
+///
+/// Stored in the fine region cache (immutable behind `Arc`). Carving
+/// happens at chunk fill time: the SDF functions in `caves.rs` query
+/// `chambers`, `tunnels`, `entrances`, and `vertical_connectors` to
+/// decide which voxels are air. The `bb_min`/`bb_max` bounding box lets
+/// `fill_chunk` cull the list to only the systems that overlap the chunk
+/// before entering the per-voxel inner loop.
 #[derive(Debug, Clone)]
 pub struct CaveSystem {
     /// World-space axis-aligned bounding box, inclusive.
@@ -251,22 +299,37 @@ pub struct CaveSystem {
     pub vertical_connectors: Vec<Tunnel>,
 }
 
-/// One chamber — an ellipsoid of air. Radii independent per axis.
+/// One ellipsoidal chamber — the primary air volume in a cave system.
+///
+/// A voxel at position `p` is inside the chamber when
+/// `(p - center)^2 / radii^2 <= 1` (normalised squared distance ≤ 1).
+/// Radii are independent per axis so chambers can be wide (Cathedral,
+/// Sump) or tall (Slot).
 #[derive(Debug, Clone, Copy)]
 pub struct Chamber {
     pub center: glam::Vec3,
     pub radii: glam::Vec3,
 }
 
-/// One tunnel — a Catmull-Rom spline through 2–4 control points.
-/// The capsule along this spline is carved out of the world.
+/// A tunnel corridor connecting two chambers.
+///
+/// Represented as a polyline of 2–4 control points. The SDF carver
+/// approximates the smooth Catmull-Rom path as a sequence of straight
+/// capsule segments (`control_points[i] → control_points[i+1]`); any
+/// voxel within `radius` of the nearest point on any segment is carved.
 #[derive(Debug, Clone)]
 pub struct Tunnel {
     pub control_points: Vec<glam::Vec3>,
     pub radius: f32,
 }
 
-/// One surface entrance feature attached to a chamber.
+/// A surface entrance feature carved above a chamber to connect it to the
+/// open world.
+///
+/// There are three kinds (see [`EntranceKind`]): `Sinkhole` (vertical shaft
+/// from chamber top to surface), `CliffMouth` (horizontal tunnel to a
+/// cliff face), and `Skylight` (narrow vertical shaft). The `entrance_sdf`
+/// function uses `surface` as the anchor for the carved geometry.
 #[derive(Debug, Clone, Copy)]
 pub struct Entrance {
     pub chamber_idx: u32,
@@ -303,10 +366,17 @@ pub fn bitset_set(bytes: &mut [u8], i: usize, v: bool) {
 
 // ── Cache infrastructure ──────────────────────────────────────────────
 
-/// LRU cache of fine regions. Shared so concurrent chunk jobs can hit it.
+/// Shared LRU cache of fine regions. `Arc`-wrapped so all concurrent chunk
+/// generation threads share a single cache instance with atomic eviction.
 pub type FineCache = Arc<BuildCache<RegionCoord, FineRegion>>;
+/// Shared LRU cache of macro regions.
 pub type MacroCache = Arc<BuildCache<MacroRegionCoord, MacroRegion>>;
 
+/// Concurrent LRU cache with one-builder-per-key semantics.
+///
+/// On a miss, exactly one thread builds the value; all others wait on
+/// a `Condvar`. See the module-level concurrency section for the full
+/// protocol.
 pub struct BuildCache<K, V> {
     inner: Mutex<BuildCacheInner<K, V>>,
 }
@@ -425,6 +495,19 @@ where
     get_or_build(cache, coord, build)
 }
 
+/// Core cache lookup + one-builder-per-key build protocol.
+///
+/// Returns the cached value if present, otherwise runs `build` once and
+/// caches the result. If another thread is already building this key, the
+/// caller waits on a `Condvar` inside the in-flight slot until that build
+/// completes (or aborts).
+///
+/// **Why the `loop`:** if the builder panics, `BuildClaim`'s `Drop` impl
+/// sets `aborted = true` and wakes all waiters. A waiter that wakes to an
+/// aborted slot continues to the top of the loop to either claim ownership
+/// of a fresh rebuild (if no other thread has done so) or wait for the next
+/// builder to succeed. Without the loop, an aborted build would leave all
+/// waiters stuck with no value.
 fn get_or_build<K, V, F>(cache: &Arc<BuildCache<K, V>>, key: K, build: F) -> Arc<V>
 where
     K: Copy + Eq + Hash,

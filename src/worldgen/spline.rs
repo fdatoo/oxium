@@ -2,17 +2,30 @@
 //!
 //! A [`CubicSpline`] is either a constant scalar or a list of knots
 //! whose values are themselves splines — enabling nested `f(x, y)`
-//! composition by stacking 1D splines. Evaluation uses the standard
-//! Hermite formula:
+//! composition by stacking 1D splines. The outer spline is evaluated at
+//! `continentalness`; its per-knot *values* are inner splines evaluated at
+//! `terrain_shape`; those inner values are themselves splines evaluated at
+//! `ridges_pv`. This produces a fully 3D terrain-shape surface from three
+//! 1D spline lookups, matching Minecraft 1.18+'s `CubicSpline` design.
 //!
-//!   t = (input - x1) / (x2 - x1)
-//!   result = lerp(t, y1, y2) + t·(1-t)·lerp(t, a, b)
-//!     where a =  d1·(x2-x1) − (y2-y1)
-//!           b = -d2·(x2-x1) + (y2-y1)
+//! ### Hermite formula
 //!
-//! Outside the knot range, evaluation is linear extrapolation using
-//! the endpoint derivative. Matches the algorithm in Minecraft 1.18+
-//! `net/minecraft/util/CubicSpline.java`.
+//! For an input between knots `k1` and `k2`:
+//!
+//! ```text
+//!   t = (input - k1.loc) / (k2.loc - k1.loc)
+//!   a =  k1.slope · (k2.loc - k1.loc) − (k2.val - k1.val)
+//!   b = -k2.slope · (k2.loc - k1.loc) + (k2.val - k1.val)
+//!   result = lerp(t, k1.val, k2.val) + t·(1-t)·lerp(t, a, b)
+//! ```
+//!
+//! Outside the knot range, evaluation is linear extrapolation using the
+//! endpoint derivative (`knot.slope`), giving smooth extension past the
+//! defined domain.
+//!
+//! Matches the algorithm in Minecraft 1.18+
+//! `net/minecraft/util/CubicSpline.java`. See also
+//! `docs/book/content/part-1-foundations/1.7-splines.mdx`.
 
 use serde::{Deserialize, Serialize};
 

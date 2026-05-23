@@ -5,10 +5,30 @@
 //! [`ConditionSource`] and [`RuleSource`] nodes, modeled after
 //! Minecraft 1.18+ `SurfaceRules.java`.
 //!
-//! The rule tree is held in `WorldgenConfig::surface` and walked
-//! once per voxel by [`SurfaceSystem::surface_block`]. A
-//! [`SurfaceContext`] carries the per-voxel column state
-//! (`h_target`, `is_cliff`, `depth_below_surface`, `biome`, etc.).
+//! The rule tree is held in `WorldgenConfig::surface` and walked once per
+//! solid voxel during chunk fill. A [`SurfaceContext`] carries per-voxel
+//! column state (`h_target`, `is_cliff`, `depth_below_surface`, `biome`,
+//! etc.) and is passed to the root [`RuleSource`], which short-circuits
+//! on the first matching rule.
+//!
+//! ### Key concepts
+//!
+//! - **Conditions** ([`ConditionSource`]): predicates over the column state
+//!   — e.g. `IsCliff`, `WithinSurfaceBand(N)`, `Biome([Desert])`.
+//! - **Rules** ([`RuleSource`]): a block to place when the condition is
+//!   met, or a sequence / conditional chain.
+//! - **`SurfaceContext`**: carries `depth_below_surface` (blocks below the
+//!   most recent air→solid transition), which is updated by the chunk fill
+//!   loop as it scans top-down through each column.
+//!
+//! ### Hot reload
+//!
+//! The rule tree lives in `assets/worldgen/default.ron`'s `surface` field.
+//! It can be edited while the engine runs; the file watcher swaps it
+//! atomically and newly generated chunks pick it up immediately.
+//!
+//! See `docs/book/content/part-4-chunk-fill/4.6-surface-rules.mdx` and
+//! `docs/superpowers/specs/2026-05-19-worldgen-overhaul-design.md`.
 
 use crate::voxel::block::Block;
 use crate::worldgen::Biome;

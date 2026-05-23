@@ -49,6 +49,11 @@
 //! cave systems / cheese+pillar noise → biomes / surface materials / trees.
 //! Each layer is in its own module; this file is the public entry
 //! point that wires them together.
+//!
+//! See `docs/book/content/part-2-overview/2.1-big-picture.mdx` for an
+//! illustrated overview, `docs/superpowers/specs/2026-05-19-worldgen-overhaul-design.md`
+//! for the architectural spec, and `docs/superpowers/specs/2026-05-19-worldgen-3d-design.md`
+//! for the 3D density + climate multi-noise design.
 
 use crate::voxel::block::Block;
 use crate::voxel::chunk::{ChunkLightInputs, DenseChunk};
