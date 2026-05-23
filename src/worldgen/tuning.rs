@@ -165,6 +165,54 @@ pub const MAX_VERTICAL_AIR_RUN: i32 = 256;
 
 // ── Caves ────────────────────────────────────────────────────────────
 
+/// Half-extent (blocks) of the XZ footprint when rolling a cave system's
+/// bounding box inside a fine region. Smaller → systems clustered toward
+/// region center; larger → systems can extend near region edges.
+pub const CAVE_SYSTEM_BB_HALF_EXTENT: i32 = 220;
+
+/// Y depth below which the per-chamber radius multiplier kicks in. Chambers
+/// whose center Y is below this depth get a bonus radius scaling.
+/// Higher → radius bonus starts deeper underground.
+pub const DEPTH_SCALE_PIVOT_Y: f32 = 40.0;
+/// Vertical range (blocks) over which the depth-scale multiplier ramps from
+/// 0 to 1. Smaller → the full bonus applies sooner below DEPTH_SCALE_PIVOT_Y.
+pub const DEPTH_SCALE_RANGE: f32 = 80.0;
+
+/// Magnitude scalar applied to the Terasology ambient cave output before
+/// compositing into the density sum. Higher → more aggressive Terasology
+/// carving; lower → subtler ambient caves.
+pub const TERA_OUTPUT_SCALE: f32 = 5.0;
+
+/// Base thickness offset in the MC-parity pillar cave formula. Appears as
+/// `(PILLAR_THICKNESS_BASE + PILLAR_THICKNESS_BASE * noise).powi(3)`.
+/// Higher → thicker pillar formations at a given noise value.
+pub const PILLAR_THICKNESS_BASE: f32 = 0.55;
+
+/// Amplitude multiplier on the cross-section warp applied along Catmull-Rom
+/// tunnel polylines. Higher → more sinuous, offset tunnel paths; lower →
+/// straighter tunnels connecting chamber centers.
+pub const TUNNEL_WARP_AMP: f32 = 4.0;
+
+/// Minimum depth below surface (blocks) for a Skylight entrance.
+/// Skylights connect the surface to chambers at least this deep.
+pub const SKYLIGHT_DEPTH_MIN: i32 = 30;
+/// Maximum depth below surface (blocks) for a Skylight entrance.
+/// Chambers deeper than this are too far from the surface for a
+/// convincing skylight shaft.
+pub const SKYLIGHT_DEPTH_MAX: i32 = 60;
+
+/// Lateral expansion (blocks) added to each side of a cave entrance's
+/// bounding box to include the shaft geometry. Larger → entrance shafts
+/// affect a wider area of the surface.
+pub const ENTRANCE_BB_EXPAND: i32 = 4;
+
+/// Edge length (blocks) of one cell in the corner-lattice trilerp cache
+/// for cave carvers. Must divide 32 evenly (chunk dim). Smaller → higher
+/// carve accuracy at the cost of more lattice evaluations per chunk.
+/// Current value of 4 gives 8×8×8 cells per chunk, each with 9×9×9
+/// corner evaluations → 5832 evaluations vs 32768 per-voxel.
+pub const CARVER_CELL_SIZE: i32 = 4;
+
 /// Inclusive range of cave systems rolled per fine region.
 /// Was: (0, 0) — graph caves disabled.
 /// Now: (0, 3) per cave-overhaul spec defaults. The configured upper bound

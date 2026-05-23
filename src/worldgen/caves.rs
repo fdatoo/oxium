@@ -491,7 +491,11 @@ fn build_system(
     // Bounding-box footprint inside the region. The box is allowed to
     // straddle the region boundary — neighbouring regions consult our
     // systems via the 3 × 3 region neighbourhood at chunk fill time.
-    let bb_size = IVec3::new(220, (y_max - y_min).min(64), 220);
+    let bb_size = IVec3::new(
+        CAVE_SYSTEM_BB_HALF_EXTENT,
+        (y_max - y_min).min(64),
+        CAVE_SYSTEM_BB_HALF_EXTENT,
+    );
     let region_origin = coord.origin();
     let bb_origin_x = region_origin.0
         + (mix_u32(seed, &[coord.x, coord.z, system_idx, 10])
@@ -541,7 +545,8 @@ fn build_system(
 
         // Depth multiplier: deeper = larger chambers.
         let cy_raw = bb_min.y as f32 + sy;
-        let depth_mult = 1.0 + cave_cfg.depth_scale * ((40.0 - cy_raw).max(0.0) / 80.0);
+        let depth_mult = 1.0
+            + cave_cfg.depth_scale * ((DEPTH_SCALE_PIVOT_Y - cy_raw).max(0.0) / DEPTH_SCALE_RANGE);
 
         let rx = mix_range(
             seed,
@@ -665,7 +670,7 @@ fn build_system(
                 &[coord.x, coord.z, system_idx, 61, idx as i32],
                 radius * 1.0,
                 radius * 1.5,
-            ) * 4.0;
+            ) * TUNNEL_WARP_AMP;
             let off1_u = mix_range(
                 seed,
                 &[coord.x, coord.z, system_idx, 62, idx as i32],
@@ -747,9 +752,9 @@ fn build_system(
             });
             continue;
         }
-        // 3. Skylight: chamber 30–60 below surface.
+        // 3. Skylight: chamber SKYLIGHT_DEPTH_MIN–SKYLIGHT_DEPTH_MAX below surface.
         let dy = surface_h - cwy_top;
-        if (30..=60).contains(&dy) {
+        if (SKYLIGHT_DEPTH_MIN..=SKYLIGHT_DEPTH_MAX).contains(&dy) {
             entrances.push(Entrance {
                 chamber_idx: ci as u32,
                 kind: EntranceKind::Skylight,
@@ -788,10 +793,10 @@ fn build_system(
         // surface.
         bb_min.y = bb_min.y.min(e.surface.y);
         bb_max.y = bb_max.y.max(e.surface.y + 1);
-        bb_min.x = bb_min.x.min(e.surface.x - 4);
-        bb_max.x = bb_max.x.max(e.surface.x + 4);
-        bb_min.z = bb_min.z.min(e.surface.z - 4);
-        bb_max.z = bb_max.z.max(e.surface.z + 4);
+        bb_min.x = bb_min.x.min(e.surface.x - ENTRANCE_BB_EXPAND);
+        bb_max.x = bb_max.x.max(e.surface.x + ENTRANCE_BB_EXPAND);
+        bb_min.z = bb_min.z.min(e.surface.z - ENTRANCE_BB_EXPAND);
+        bb_max.z = bb_max.z.max(e.surface.z + ENTRANCE_BB_EXPAND);
     }
 
     CaveSystem {
@@ -1404,7 +1409,7 @@ pub fn pillar_contribution(
     let thickness_noise = carvers
         .pillar_thickness
         .get([wx as f64, wy as f64, wz as f64]) as f32;
-    let thickness = (0.55 + 0.55 * thickness_noise).powi(3);
+    let thickness = (PILLAR_THICKNESS_BASE + PILLAR_THICKNESS_BASE * thickness_noise).powi(3);
     let raw = (pillar_raw + pillar_rare) * thickness;
     if raw < cfg.pillar_cutoff {
         return 0.0;
@@ -1485,7 +1490,7 @@ pub fn terasology_ambient(
         (wz as f32 * freq) as f64,
     ]) as f32
         + freq_reduction;
-    ((n0 * n0 + n1 * n1).sqrt() - freq_depth) * 5.0
+    ((n0 * n0 + n1 * n1).sqrt() - freq_depth) * TERA_OUTPUT_SCALE
     // scale: align magnitude with cheese carver for downstream smin composition
 }
 
@@ -1503,7 +1508,6 @@ pub fn terasology_ambient(
 // formulas to within FBM's local smoothness — visually equivalent at
 // 4-block resolution, the same precedent as the base density.
 
-const CARVER_CELL_SIZE: i32 = 4;
 const CARVER_CELL_COUNT: usize =
     (crate::voxel::coords::CHUNK_DIM_U as usize) / CARVER_CELL_SIZE as usize; // 8
 const CARVER_CORNER_COUNT: usize = CARVER_CELL_COUNT + 1; // 9
@@ -1665,7 +1669,7 @@ impl CarverEvaluator {
         let thickness_noise = self.trilerp(&lc, |c| c.pillar_thick);
         let pillar_raw = 2.0 * pillar;
         let pillar_rare = -1.0 - pillar_rare_n;
-        let thickness = (0.55 + 0.55 * thickness_noise).powi(3);
+        let thickness = (PILLAR_THICKNESS_BASE + PILLAR_THICKNESS_BASE * thickness_noise).powi(3);
         let raw = (pillar_raw + pillar_rare) * thickness;
         if raw < cfg.pillar_cutoff {
             return 0.0;
@@ -1692,7 +1696,7 @@ impl CarverEvaluator {
         let freq_reduction = (cfg.tera_supp - depth / cfg.tera_supp_depth).max(0.0);
         let freq_depth = cfg.tera_thresh_base + depth / cfg.tera_thresh_depth;
         let n1 = n1_raw + freq_reduction;
-        ((n0_raw * n0_raw + n1 * n1).sqrt() - freq_depth) * 5.0
+        ((n0_raw * n0_raw + n1 * n1).sqrt() - freq_depth) * TERA_OUTPUT_SCALE
     }
 }
 
