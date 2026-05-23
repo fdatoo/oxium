@@ -89,6 +89,7 @@ pub mod probe_impl;
 pub mod region;
 pub mod spline;
 pub mod surface;
+pub(crate) mod terrain_ref;
 pub mod trees;
 pub mod trees_impl;
 pub mod tuning;
@@ -344,25 +345,20 @@ impl Generator {
         let mut r = region::FineRegion::empty(coord);
         r.coord = coord;
         let cfg = self.config.load();
+        let terrain = terrain_ref::TerrainRef {
+            heightmap: &self.heightmap,
+            climate: &cfg.climate,
+            density: &cfg.density,
+        };
         hydrology::build_fine_hydro(
             self.seed,
             coord,
-            &self.heightmap,
-            &cfg.climate,
-            &cfg.density,
+            terrain,
             &self.macro_cache,
             &self.fine_cache,
             &mut r,
         );
-        caves::build_systems_for_region(
-            self.seed,
-            coord,
-            &self.heightmap,
-            &cfg.climate,
-            &cfg.density,
-            &mut r,
-            &cfg.cave,
-        );
+        caves::build_systems_for_region(self.seed, coord, terrain, &mut r, &cfg.cave);
         r
     }
 

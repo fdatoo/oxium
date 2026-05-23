@@ -22,10 +22,10 @@
 use super::grid::{DIR_NONE, Grid};
 use super::macro_pass::build_macro_region;
 use super::rivers::build_segments_from_fine;
-use crate::worldgen::density::HeightmapNoise;
 use crate::worldgen::region::{
     FineRegion, MacroCache, MacroRegionCoord, RegionCoord, RiverWidth, bitset_get, bitset_set,
 };
+use crate::worldgen::terrain_ref::TerrainRef;
 use crate::worldgen::tuning::*;
 
 /// Read-only snapshots of the four cardinal-neighbour fine regions.
@@ -116,12 +116,10 @@ pub fn gather_neighbour_edges(
 /// flow fields into the new region, preventing rivers from snapping to
 /// new directions at region seams.
 #[allow(clippy::too_many_arguments)]
-pub fn build_fine_hydro(
+pub(crate) fn build_fine_hydro(
     seed: u64,
     coord: RegionCoord,
-    heightmap: &HeightmapNoise,
-    climate: &crate::worldgen::config::ClimateConfig,
-    density: &crate::worldgen::config::DensityConfig,
+    terrain: TerrainRef<'_>,
     macro_cache: &MacroCache,
     fine_cache: &crate::worldgen::region::FineCache,
     region: &mut FineRegion,
@@ -134,19 +132,9 @@ pub fn build_fine_hydro(
     let origin_x = (coord.x - halo) * FINE_REGION_SIZE;
     let origin_z = (coord.z - halo) * FINE_REGION_SIZE;
 
-    let mut grid = sample_halo_heights(seed, n, origin_x, origin_z, heightmap, climate, density);
+    let mut grid = sample_halo_heights(seed, n, origin_x, origin_z, terrain);
 
-    stamp_macro_into_fine(
-        &mut grid,
-        seed,
-        n,
-        origin_x,
-        origin_z,
-        heightmap,
-        climate,
-        density,
-        macro_cache,
-    );
+    stamp_macro_into_fine(&mut grid, seed, n, origin_x, origin_z, terrain, macro_cache);
 
     stitch_neighbour_inbounds(&mut grid, &neighbours, halo, inner, n);
 
@@ -171,9 +159,7 @@ fn sample_halo_heights(
     n: usize,
     origin_x: i32,
     origin_z: i32,
-    heightmap: &HeightmapNoise,
-    climate: &crate::worldgen::config::ClimateConfig,
-    density: &crate::worldgen::config::DensityConfig,
+    terrain: TerrainRef<'_>,
 ) -> Grid {
     let mut grid = Grid {
         n,
@@ -191,8 +177,13 @@ fn sample_halo_heights(
         for ix in 0..n {
             let wx = origin_x + (ix as i32) * FINE_CELL + FINE_CELL / 2;
             let wz = origin_z + (iz as i32) * FINE_CELL + FINE_CELL / 2;
-            grid.h[iz * n + ix] =
-                heightmap.h_pre(seed, wx as f32, wz as f32, climate, density) as i16;
+            grid.h[iz * n + ix] = terrain.heightmap.h_pre(
+                seed,
+                wx as f32,
+                wz as f32,
+                terrain.climate,
+                terrain.density,
+            ) as i16;
         }
     }
 
@@ -212,16 +203,13 @@ fn sample_halo_heights(
 /// fine cells it covers to at least the macro lake's rim elevation. Both
 /// trunk and lake operations are combined in a single traversal over the
 /// overlapping macro regions to avoid re-fetching the same cached tiles.
-#[allow(clippy::too_many_arguments)]
 fn stamp_macro_into_fine(
     grid: &mut Grid,
     seed: u64,
     n: usize,
     origin_x: i32,
     origin_z: i32,
-    heightmap: &HeightmapNoise,
-    climate: &crate::worldgen::config::ClimateConfig,
-    density: &crate::worldgen::config::DensityConfig,
+    terrain: TerrainRef<'_>,
     macro_cache: &MacroCache,
 ) {
     let macro_unit = MACRO_CELL;
@@ -237,7 +225,7 @@ fn stamp_macro_into_fine(
         for mrx in mr_min.x..=mr_max.x {
             let mr_coord = MacroRegionCoord { x: mrx, z: mrz };
             let mr = crate::worldgen::region::get_macro(macro_cache, mr_coord, || {
-                build_macro_region(seed, mr_coord, heightmap, climate, density)
+                build_macro_region(seed, mr_coord, terrain)
             });
             let mr_origin = mr_coord.origin();
             for miz in 0..(MACRO_CELLS_PER_REGION as usize) {

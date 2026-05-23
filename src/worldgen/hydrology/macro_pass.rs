@@ -8,8 +8,8 @@
 //! See `docs/book/content/part-3-region-build/3.4-hydrology.mdx`.
 
 use super::grid::{DIR_NONE, Grid};
-use crate::worldgen::density::HeightmapNoise;
 use crate::worldgen::region::{MacroRegion, MacroRegionCoord, bitset_set};
+use crate::worldgen::terrain_ref::TerrainRef;
 use crate::worldgen::tuning::*;
 
 /// Build the macro region for `coord` from noise alone.
@@ -22,12 +22,10 @@ use crate::worldgen::tuning::*;
 ///
 /// Pure in `(seed, coord)` — the same key always rebuilds to the same
 /// result.
-pub fn build_macro_region(
+pub(crate) fn build_macro_region(
     seed: u64,
     coord: MacroRegionCoord,
-    heightmap: &HeightmapNoise,
-    climate: &crate::worldgen::config::ClimateConfig,
-    density: &crate::worldgen::config::DensityConfig,
+    terrain: TerrainRef<'_>,
 ) -> MacroRegion {
     let halo = MACRO_HALO_REGIONS;
     let inner = MACRO_CELLS_PER_REGION;
@@ -51,8 +49,13 @@ pub fn build_macro_region(
         for ix in 0..n {
             let wx = origin_x + (ix as i32) * MACRO_CELL + MACRO_CELL / 2;
             let wz = origin_z + (iz as i32) * MACRO_CELL + MACRO_CELL / 2;
-            grid.h[iz * n + ix] =
-                heightmap.h_pre(seed, wx as f32, wz as f32, climate, density) as i16;
+            grid.h[iz * n + ix] = terrain.heightmap.h_pre(
+                seed,
+                wx as f32,
+                wz as f32,
+                terrain.climate,
+                terrain.density,
+            ) as i16;
         }
     }
 

@@ -59,10 +59,10 @@ pub mod valley;
 
 // Re-export the public API so callers use `hydrology::build_fine_hydro`
 // rather than `hydrology::fine_pass::build_fine_hydro`.
-pub use fine_pass::{NeighbourEdges, build_fine_hydro, gather_neighbour_edges};
+pub(crate) use fine_pass::build_fine_hydro;
+pub use fine_pass::{NeighbourEdges, gather_neighbour_edges};
 pub use grid::{DIR_NONE, DIR_OFFSETS};
 pub use lakes::lake_rim_at;
-pub use macro_pass::build_macro_region;
 pub(crate) use valley::{for_each_segment, perpendicular_distance};
 pub use valley::{valley_carve, valley_grid};
 

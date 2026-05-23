@@ -2,6 +2,7 @@ use super::noise_carvers::CARVER_CELL_COUNT;
 use super::*;
 use crate::worldgen::density::HeightmapNoise;
 use crate::worldgen::region::{CaveSystem, FineRegion, RegionCoord};
+use crate::worldgen::terrain_ref::TerrainRef;
 use crate::worldgen::tuning::{
     CARVER_CELL_SIZE, CAVE_BAND_MIDDLE, CAVE_BAND_SHALLOW, CAVE_SYSTEMS_PER_REGION,
 };
@@ -36,20 +37,17 @@ fn vertical_connector_connects_adjacent_band_systems() {
     let mut cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
     cfg.cave.vertical_connector_prob = 1.0;
     let hm = HeightmapNoise::new(42, &cfg.climate);
+    let terrain = TerrainRef {
+        heightmap: &hm,
+        climate: &cfg.climate,
+        density: &cfg.density,
+    };
     let mut found_connector = false;
     'outer: for rx in 0..8_i32 {
         for rz in 0..8_i32 {
             let coord = RegionCoord { x: rx, z: rz };
             let mut region = FineRegion::empty(coord);
-            build_systems_for_region(
-                42,
-                coord,
-                &hm,
-                &cfg.climate,
-                &cfg.density,
-                &mut region,
-                &cfg.cave,
-            );
+            build_systems_for_region(42, coord, terrain, &mut region, &cfg.cave);
             let bands: Vec<DepthBand> = region
                 .cave_systems
                 .iter()
@@ -96,19 +94,16 @@ fn system_count_within_bounds() {
     // sit in `CAVE_SYSTEMS_PER_REGION` inclusive.
     let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
     let hm = HeightmapNoise::new(42, &cfg.climate);
+    let terrain = TerrainRef {
+        heightmap: &hm,
+        climate: &cfg.climate,
+        density: &cfg.density,
+    };
     for z in -3..=3 {
         for x in -3..=3 {
             let coord = RegionCoord { x, z };
             let mut region = FineRegion::empty(coord);
-            build_systems_for_region(
-                42,
-                coord,
-                &hm,
-                &cfg.climate,
-                &cfg.density,
-                &mut region,
-                &cfg.cave,
-            );
+            build_systems_for_region(42, coord, terrain, &mut region, &cfg.cave);
             let n = region.cave_systems.len();
             assert!(
                 (CAVE_SYSTEMS_PER_REGION.0 as usize..=CAVE_SYSTEMS_PER_REGION.1 as usize)
@@ -123,27 +118,16 @@ fn system_count_within_bounds() {
 fn system_is_pure_in_seed_and_coord() {
     let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
     let hm = HeightmapNoise::new(42, &cfg.climate);
+    let terrain = TerrainRef {
+        heightmap: &hm,
+        climate: &cfg.climate,
+        density: &cfg.density,
+    };
     let coord = RegionCoord { x: 2, z: -3 };
     let mut r1 = FineRegion::empty(coord);
     let mut r2 = FineRegion::empty(coord);
-    build_systems_for_region(
-        42,
-        coord,
-        &hm,
-        &cfg.climate,
-        &cfg.density,
-        &mut r1,
-        &cfg.cave,
-    );
-    build_systems_for_region(
-        42,
-        coord,
-        &hm,
-        &cfg.climate,
-        &cfg.density,
-        &mut r2,
-        &cfg.cave,
-    );
+    build_systems_for_region(42, coord, terrain, &mut r1, &cfg.cave);
+    build_systems_for_region(42, coord, terrain, &mut r2, &cfg.cave);
     assert_eq!(r1.cave_systems.len(), r2.cave_systems.len());
     for (a, b) in r1.cave_systems.iter().zip(&r2.cave_systems) {
         assert_eq!(a.chambers.len(), b.chambers.len());
@@ -158,17 +142,14 @@ fn mst_connects_all_chambers() {
     // makes them reachable via BFS over the chamber graph.
     let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
     let hm = HeightmapNoise::new(42, &cfg.climate);
+    let terrain = TerrainRef {
+        heightmap: &hm,
+        climate: &cfg.climate,
+        density: &cfg.density,
+    };
     let coord = RegionCoord { x: 0, z: 0 };
     let mut region = FineRegion::empty(coord);
-    build_systems_for_region(
-        42,
-        coord,
-        &hm,
-        &cfg.climate,
-        &cfg.density,
-        &mut region,
-        &cfg.cave,
-    );
+    build_systems_for_region(42, coord, terrain, &mut region, &cfg.cave);
     for sys in &region.cave_systems {
         if sys.chambers.len() < 2 {
             continue;
@@ -221,19 +202,16 @@ fn cave_air_returns_true_inside_chamber_center() {
     // CAVE_SYSTEMS_PER_REGION = (0, 3), so most regions have one.
     let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
     let hm = HeightmapNoise::new(42, &cfg.climate);
+    let terrain = TerrainRef {
+        heightmap: &hm,
+        climate: &cfg.climate,
+        density: &cfg.density,
+    };
     for rx in 0..4 {
         for rz in 0..4 {
             let coord = RegionCoord { x: rx, z: rz };
             let mut region = FineRegion::empty(coord);
-            build_systems_for_region(
-                42,
-                coord,
-                &hm,
-                &cfg.climate,
-                &cfg.density,
-                &mut region,
-                &cfg.cave,
-            );
+            build_systems_for_region(42, coord, terrain, &mut region, &cfg.cave);
             for sys in &region.cave_systems {
                 if let Some(c) = sys.chambers.first() {
                     let wx = c.center.x as i32;
@@ -660,6 +638,11 @@ fn trunk_links_nearest_neighbour_region_system() {
     let mut cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
     cfg.cave.trunk_prob = 1.0;
     let hm = HeightmapNoise::new(42, &cfg.climate);
+    let terrain = TerrainRef {
+        heightmap: &hm,
+        climate: &cfg.climate,
+        density: &cfg.density,
+    };
 
     // Build all systems in a 3×3 region grid (owned FineRegions).
     let mut regions: Vec<(RegionCoord, FineRegion)> = vec![];
@@ -667,15 +650,7 @@ fn trunk_links_nearest_neighbour_region_system() {
         for rz in 0..3_i32 {
             let coord = RegionCoord { x: rx, z: rz };
             let mut region = FineRegion::empty(coord);
-            build_systems_for_region(
-                42,
-                coord,
-                &hm,
-                &cfg.climate,
-                &cfg.density,
-                &mut region,
-                &cfg.cave,
-            );
+            build_systems_for_region(42, coord, terrain, &mut region, &cfg.cave);
             regions.push((coord, region));
         }
     }

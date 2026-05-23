@@ -63,7 +63,7 @@ pub use sdf::{
     any_system_y_in_range, cave_air, cave_sdf, entrance_air, entrance_sdf, smin, trunks_sdf,
 };
 pub use style::{CaveStyle, DepthBand, pick_style};
-pub use system::build_systems_for_region;
+pub(crate) use system::build_systems_for_region;
 
 #[cfg(test)]
 mod tests;

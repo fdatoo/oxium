@@ -7,13 +7,30 @@ use super::style::{
     CaveStyle, DepthBand, SALT_BB_ORIGIN_X, SALT_BB_ORIGIN_Z, SALT_CHAMBER_COUNT,
     SALT_ENTRANCE_PROB, SALT_EXTRA_LOOPS, SALT_SYSTEM_COUNT, pick_style,
 };
-use crate::worldgen::density::HeightmapNoise;
 use crate::worldgen::hash::{mix_range, mix_u32, mix_unit};
 use crate::worldgen::region::{
     CaveSystem, Chamber, Entrance, EntranceKind, FineRegion, RegionCoord, Tunnel,
 };
+use crate::worldgen::terrain_ref::TerrainRef;
 use crate::worldgen::tuning::*;
 use glam::{IVec3, Vec3};
+
+/// Identity of a single cave system — `(seed, region, index)` — passed by
+/// value throughout the private builder helpers.
+///
+/// All hash rolls inside the cave builder are namespaced by these three
+/// values, so this struct carries everything needed to reproduce any roll
+/// deterministically without re-threading `seed`, `coord`, and `system_idx`
+/// as three independent arguments.
+///
+/// `CaveCtx` is `Copy` (≈ 16 bytes) so it costs nothing to pass into
+/// closures or nested helpers.
+#[derive(Clone, Copy)]
+struct CaveCtx {
+    seed: u64,
+    coord: RegionCoord,
+    system_idx: i32,
+}
 
 /// Per-style parameter set extracted from the style table.
 pub(super) struct StyleParams {
@@ -63,12 +80,10 @@ pub(super) fn style_params(
 
 /// Build all cave systems for the given fine region. Each system is
 /// deterministically derived from `(seed, coord, system_idx)`.
-pub fn build_systems_for_region(
+pub(crate) fn build_systems_for_region(
     seed: u64,
     coord: RegionCoord,
-    heightmap: &HeightmapNoise,
-    climate: &crate::worldgen::config::ClimateConfig,
-    density: &crate::worldgen::config::DensityConfig,
+    terrain: TerrainRef<'_>,
     region: &mut FineRegion,
     cave_cfg: &crate::worldgen::config::CaveConfig,
 ) {
@@ -82,9 +97,12 @@ pub fn build_systems_for_region(
     let n = n_min + (mix_u32(seed, &[coord.x, coord.z, SALT_SYSTEM_COUNT]) % (n_max - n_min + 1));
     region.cave_systems.clear();
     for system_idx in 0..n as i32 {
-        let sys = build_system(
-            seed, coord, system_idx, heightmap, climate, density, cave_cfg,
-        );
+        let ctx = CaveCtx {
+            seed,
+            coord,
+            system_idx,
+        };
+        let sys = build_system(ctx, terrain, cave_cfg);
         region.cave_systems.push(sys);
     }
     build_vertical_connectors(seed, coord, cave_cfg, region);
@@ -97,13 +115,12 @@ pub fn build_systems_for_region(
 /// consult systems via the 3×3 region neighbourhood at chunk fill time.
 ///
 /// Returns `(bb_min, bb_max)` as world-space `IVec3` corners (inclusive).
-fn roll_bounding_box(
-    seed: u64,
-    coord: RegionCoord,
-    system_idx: i32,
-    y_min: i32,
-    y_max: i32,
-) -> (IVec3, IVec3) {
+fn roll_bounding_box(ctx: CaveCtx, y_min: i32, y_max: i32) -> (IVec3, IVec3) {
+    let CaveCtx {
+        seed,
+        coord,
+        system_idx,
+    } = ctx;
     let bb_size = IVec3::new(
         CAVE_SYSTEM_BB_HALF_EXTENT,
         (y_max - y_min).min(64),
@@ -131,17 +148,19 @@ fn roll_bounding_box(
 /// already-placed chamber. Sampling stops after `max_tries = 200` attempts
 /// regardless of whether the target count was reached — the system uses
 /// however many fit, down to a minimum of 1.
-#[allow(clippy::too_many_arguments)]
 fn sample_chambers(
-    seed: u64,
-    coord: RegionCoord,
-    system_idx: i32,
+    ctx: CaveCtx,
     bb_min: IVec3,
     bb_max: IVec3,
     style: CaveStyle,
     sp: &StyleParams,
     cave_cfg: &crate::worldgen::config::CaveConfig,
 ) -> Vec<Chamber> {
+    let CaveCtx {
+        seed,
+        coord,
+        system_idx,
+    } = ctx;
     // Chamber count — from style table.
     let (cn_min, cn_max) = sp.chamber_count;
     let chamber_count = cn_min
@@ -241,13 +260,12 @@ fn sample_chambers(
 /// Each edge becomes a 4-point Catmull-Rom-friendly control polyline with
 /// two domain-warped perpendicular offsets that break the otherwise straight
 /// line into a meander.
-fn connect_chambers_mst(
-    seed: u64,
-    coord: RegionCoord,
-    system_idx: i32,
-    chambers: &[Chamber],
-    sp: &StyleParams,
-) -> Vec<Tunnel> {
+fn connect_chambers_mst(ctx: CaveCtx, chambers: &[Chamber], sp: &StyleParams) -> Vec<Tunnel> {
+    let CaveCtx {
+        seed,
+        coord,
+        system_idx,
+    } = ctx;
     // MST via Kruskal.
     let mut tunnels: Vec<Tunnel> = Vec::new();
     if chambers.len() >= 2 {
@@ -364,17 +382,17 @@ fn connect_chambers_mst(
 /// if the chamber top is `SKYLIGHT_DEPTH_MIN–SKYLIGHT_DEPTH_MAX` below
 /// the surface. Exactly one entrance per chamber; priority Sinkhole →
 /// CliffMouth → Skylight.
-#[allow(clippy::too_many_arguments)]
 fn roll_entrances(
-    seed: u64,
-    coord: RegionCoord,
-    system_idx: i32,
+    ctx: CaveCtx,
     chambers: &[Chamber],
     band: DepthBand,
-    heightmap: &HeightmapNoise,
-    climate: &crate::worldgen::config::ClimateConfig,
-    density: &crate::worldgen::config::DensityConfig,
+    terrain: TerrainRef<'_>,
 ) -> Vec<Entrance> {
+    let CaveCtx {
+        seed,
+        coord,
+        system_idx,
+    } = ctx;
     // Entrance rolls.
     let mut entrances: Vec<Entrance> = Vec::new();
     for (ci, chamber) in chambers.iter().enumerate() {
@@ -388,8 +406,13 @@ fn roll_entrances(
         let cwx = chamber.center.x as i32;
         let cwy_top = (chamber.center.y + chamber.radii.y) as i32;
         let cwz = chamber.center.z as i32;
-        let surface_h =
-            heightmap.h_pre(seed, chamber.center.x, chamber.center.z, climate, density) as i32;
+        let surface_h = terrain.heightmap.h_pre(
+            seed,
+            chamber.center.x,
+            chamber.center.z,
+            terrain.climate,
+            terrain.density,
+        ) as i32;
         // 1. Sinkhole.
         if surface_h - cwy_top <= SINKHOLE_DEPTH_MAX && surface_h - cwy_top >= -2 {
             // Extend the shaft top by SURFACE_BAND so it carves through any
@@ -409,10 +432,16 @@ fn roll_entrances(
             let theta = step as f32 * std::f32::consts::TAU / 16.0;
             let cwx_f = chamber.center.x + theta.cos() * CLIFF_ENTRANCE_DIST as f32;
             let cwz_f = chamber.center.z + theta.sin() * CLIFF_ENTRANCE_DIST as f32;
-            if heightmap.is_cliff(seed, cwx_f, cwz_f, climate, density) {
+            if terrain
+                .heightmap
+                .is_cliff(seed, cwx_f, cwz_f, terrain.climate, terrain.density)
+            {
                 found_cliff = Some(IVec3::new(
                     cwx_f as i32,
-                    heightmap.h_pre(seed, cwx_f, cwz_f, climate, density) as i32,
+                    terrain
+                        .heightmap
+                        .h_pre(seed, cwx_f, cwz_f, terrain.climate, terrain.density)
+                        as i32,
                     cwz_f as i32,
                 ));
                 break;
@@ -514,14 +543,15 @@ fn finalize_aabb(
 /// graph is a tree and every room has exactly one entrance/exit, which
 /// feels unnatural.
 fn build_system(
-    seed: u64,
-    coord: RegionCoord,
-    system_idx: i32,
-    heightmap: &HeightmapNoise,
-    climate: &crate::worldgen::config::ClimateConfig,
-    density: &crate::worldgen::config::DensityConfig,
+    ctx: CaveCtx,
+    terrain: TerrainRef<'_>,
     cave_cfg: &crate::worldgen::config::CaveConfig,
 ) -> CaveSystem {
+    let CaveCtx {
+        seed,
+        coord,
+        system_idx,
+    } = ctx;
     let band = DepthBand::pick(seed, system_idx, coord);
     let (y_min, y_max) = band.range();
 
@@ -529,14 +559,10 @@ fn build_system(
     let style = pick_style(seed, coord, system_idx, band, cave_cfg);
     let sp = style_params(style, &cave_cfg.style_table);
 
-    let (bb_min, bb_max) = roll_bounding_box(seed, coord, system_idx, y_min, y_max);
-    let chambers = sample_chambers(
-        seed, coord, system_idx, bb_min, bb_max, style, &sp, cave_cfg,
-    );
-    let tunnels = connect_chambers_mst(seed, coord, system_idx, &chambers, &sp);
-    let entrances = roll_entrances(
-        seed, coord, system_idx, &chambers, band, heightmap, climate, density,
-    );
+    let (bb_min, bb_max) = roll_bounding_box(ctx, y_min, y_max);
+    let chambers = sample_chambers(ctx, bb_min, bb_max, style, &sp, cave_cfg);
+    let tunnels = connect_chambers_mst(ctx, &chambers, &sp);
+    let entrances = roll_entrances(ctx, &chambers, band, terrain);
     let (bb_min, bb_max) = finalize_aabb(bb_min, bb_max, &chambers, &tunnels, &entrances);
 
     CaveSystem {
