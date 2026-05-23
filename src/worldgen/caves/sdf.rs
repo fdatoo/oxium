@@ -4,11 +4,11 @@
 //! zero outside. The fill loop subtracts these from the per-voxel density
 //! via `smin` so cave walls have soft, chamfered edges instead of the
 //! pixel-sharp ellipsoid / capsule boundaries.
-use crate::worldgen::hash::{mix_unit};
+use super::style::{SALT_TRUNK_MID_OFFSET, SALT_TRUNK_PROB};
+use crate::worldgen::hash::mix_unit;
 use crate::worldgen::region::{CaveSystem, EntranceKind, RegionCoord};
 use crate::worldgen::tuning::*;
 use glam::Vec3;
-use super::style::{SALT_TRUNK_PROB, SALT_TRUNK_MID_OFFSET};
 
 /// Soft SDF: positive inside chambers / tunnels, 0 outside.
 /// Peak `CAVE_SDF_INTENSITY` deep inside; tapers smoothly to 0 at

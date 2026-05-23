@@ -100,8 +100,8 @@ pub use crate::worldgen::tuning::SEA_LEVEL;
 // Re-export Biome and TreeKind so callers at `worldgen::Biome` continue
 // to work after the type moved to `biome.rs`.
 pub use biome::Biome;
-pub use columns::ColumnData;
 use biome::TreeKind;
+pub use columns::ColumnData;
 use pipeline::ChunkRegions;
 use trees::{Tree, tree_hash, try_set_air};
 
@@ -121,8 +121,7 @@ pub mod heightmap {
 // below are imported into this module's scope for ergonomics.
 use crate::worldgen::tuning::{
     CAVE_BAND_MIDDLE, CAVE_BAND_SHALLOW, CAVE_FLOOR_Y, CAVE_SDF_INTENSITY, CAVE_SURFACE_BUFFER,
-    MAX_VERTICAL_AIR_RUN, MOUTH_FLARE_MULT, SNOW_LINE, SURFACE_BAND, SURFACE_SPREAD,
-    TREE_CELL_SIZE, TREE_MARGIN,
+    MAX_VERTICAL_AIR_RUN, SNOW_LINE, SURFACE_BAND, SURFACE_SPREAD, TREE_CELL_SIZE, TREE_MARGIN,
 };
 
 /// Pre-built noise fields for one world seed.
@@ -1861,7 +1860,6 @@ impl Generator {
         }
     }
 }
-
 
 #[cfg(test)]
 #[path = "mod_tests.rs"]

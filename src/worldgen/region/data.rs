@@ -6,9 +6,9 @@
 //! `MacroRegion::empty`; later PRs replace the placeholder builders with
 //! real population code.
 
+use super::coords::{MacroRegionCoord, RegionCoord};
 use crate::worldgen::fluid::FluidBodyKind;
 use crate::worldgen::tuning::{FINE_CELLS_PER_REGION, MACRO_CELLS_PER_REGION};
-use super::coords::{MacroRegionCoord, RegionCoord};
 
 // ── Fine region ───────────────────────────────────────────────────────
 
@@ -301,4 +301,3 @@ pub fn build_fine_region_placeholder(coord: RegionCoord) -> FineRegion {
 pub fn build_macro_region_placeholder(coord: MacroRegionCoord) -> MacroRegion {
     MacroRegion::empty(coord)
 }
-

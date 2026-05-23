@@ -1,10 +1,10 @@
 //! Vertical connectors between adjacent-band systems within a region, and
 //! cross-region trunk tunnels linking neighbouring region systems.
-use crate::worldgen::region::{FineRegion, RegionCoord, Tunnel};
+use super::style::{DepthBand, SALT_TRUNK_MID_OFFSET, SALT_TRUNK_PROB, SALT_VERTICAL_CONNECTOR};
 use crate::worldgen::hash::mix_unit;
-use super::style::{DepthBand, SALT_TRUNK_PROB, SALT_TRUNK_MID_OFFSET, SALT_VERTICAL_CONNECTOR};
-use crate::worldgen::tuning::CAVE_BAND_SHALLOW;
+use crate::worldgen::region::{FineRegion, RegionCoord, Tunnel};
 use crate::worldgen::tuning::CAVE_BAND_MIDDLE;
+use crate::worldgen::tuning::CAVE_BAND_SHALLOW;
 
 /// For each pair of systems in adjacent bands within `region`, roll
 /// `vertical_connector_prob`. If passing, push a `Tunnel` from the upper

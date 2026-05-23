@@ -167,8 +167,7 @@ fn noise_carvers_silent_above_underground_threshold() {
         42,
         crate::worldgen::config::ConfigHolder::new(cfg_permissive),
     );
-    let g_default =
-        Generator::with_config(42, crate::worldgen::config::ConfigHolder::new(base));
+    let g_default = Generator::with_config(42, crate::worldgen::config::ConfigHolder::new(base));
     // Chunk Y=4 → world Y in [128, 159]. MAX_TERRAIN_Y is 140
     // and the test seed has no plate seam pushing peaks above
     // that, so raw_density across this chunk stays comfortably

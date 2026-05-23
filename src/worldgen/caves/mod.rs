@@ -47,23 +47,23 @@
 //! `docs/book/content/part-3-region-build/3.6-cave-systems.mdx`, and
 //! `docs/book/content/part-4-chunk-fill/4.3-composing-caves.mdx`.
 
-pub mod style;
-pub mod pools;
 pub mod connectors;
-pub mod system;
-pub mod sdf;
 pub mod noise_carvers;
+pub mod pools;
+pub mod sdf;
+pub mod style;
+pub mod system;
 
 // Re-export the public API surface so external callers use `caves::*`.
+pub use connectors::{build_trunks, build_vertical_connectors};
+pub use noise_carvers::{
+    CarverEvaluator, NoiseCarvers, cheese_contribution, pillar_contribution, terasology_ambient,
+};
+pub use sdf::{
+    any_system_y_in_range, cave_air, cave_sdf, entrance_air, entrance_sdf, smin, trunks_sdf,
+};
 pub use style::{CaveStyle, DepthBand, pick_style};
 pub use system::build_systems_for_region;
-pub use connectors::{build_trunks, build_vertical_connectors};
-pub use sdf::{
-    cave_sdf, trunks_sdf, entrance_sdf, cave_air, entrance_air, smin, any_system_y_in_range,
-};
-pub use noise_carvers::{
-    NoiseCarvers, CarverEvaluator, cheese_contribution, pillar_contribution, terasology_ambient,
-};
 
 #[cfg(test)]
 mod tests;

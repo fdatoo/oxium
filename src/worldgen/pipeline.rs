@@ -77,10 +77,11 @@ impl ChunkRegions {
             for dx in -1..=1i32 {
                 let nx = wx + dx * FINE_CELL;
                 let nz = wz + dz * FINE_CELL;
-                if let Some(region) = self.region_at(nx, nz) {
-                    if let Some(rim) = hydrology::lake_rim_at(nx, nz, region) {
-                        best = Some(best.map_or(rim, |b| b.max(rim)));
-                    }
+                if let Some(rim) = self
+                    .region_at(nx, nz)
+                    .and_then(|region| hydrology::lake_rim_at(nx, nz, region))
+                {
+                    best = Some(best.map_or(rim, |b| b.max(rim)));
                 }
             }
         }
@@ -98,19 +99,13 @@ impl ChunkRegions {
         chunk_min: glam::IVec3,
         chunk_max: glam::IVec3,
     ) -> Vec<&region::CaveSystem> {
-        let mut out = Vec::new();
-        for row in &self.grid {
-            for slot in row {
-                if let Some(r) = slot {
-                    for sys in &r.cave_systems {
-                        if sys.overlaps_box(chunk_min, chunk_max) {
-                            out.push(sys);
-                        }
-                    }
-                }
-            }
-        }
-        out
+        self.grid
+            .iter()
+            .flatten()
+            .flatten()
+            .flat_map(|r| r.cave_systems.iter())
+            .filter(|sys| sys.overlaps_box(chunk_min, chunk_max))
+            .collect()
     }
 
     /// Cave pools whose ellipsoid AABB intersects `[chunk_min, chunk_max]`.
@@ -122,33 +117,28 @@ impl ChunkRegions {
         chunk_min: glam::IVec3,
         chunk_max: glam::IVec3,
     ) -> Vec<&region::CavePool> {
-        let mut out = Vec::new();
-        for row in &self.grid {
-            for slot in row {
-                if let Some(r) = slot {
-                    for pool in &r.cave_pools {
-                        // AABB derived from ellipsoid half-extents.
-                        let px = pool.center.x as i32;
-                        let py = pool.center.y as i32;
-                        let pz = pool.center.z as i32;
-                        let rx = pool.radii.x.ceil() as i32;
-                        let ry = pool.radii.y.ceil() as i32;
-                        let rz = pool.radii.z.ceil() as i32;
-                        if px + rx < chunk_min.x
-                            || px - rx > chunk_max.x
-                            || py + ry < chunk_min.y
-                            || py - ry > chunk_max.y
-                            || pz + rz < chunk_min.z
-                            || pz - rz > chunk_max.z
-                        {
-                            continue;
-                        }
-                        out.push(pool);
-                    }
-                }
-            }
-        }
-        out
+        self.grid
+            .iter()
+            .flatten()
+            .flatten()
+            .flat_map(|r| r.cave_pools.iter())
+            .filter(|pool| {
+                // AABB derived from ellipsoid half-extents; reject any pool
+                // whose AABB is fully outside the chunk on any axis.
+                let px = pool.center.x as i32;
+                let py = pool.center.y as i32;
+                let pz = pool.center.z as i32;
+                let rx = pool.radii.x.ceil() as i32;
+                let ry = pool.radii.y.ceil() as i32;
+                let rz = pool.radii.z.ceil() as i32;
+                px + rx >= chunk_min.x
+                    && px - rx <= chunk_max.x
+                    && py + ry >= chunk_min.y
+                    && py - ry <= chunk_max.y
+                    && pz + rz >= chunk_min.z
+                    && pz - rz <= chunk_max.z
+            })
+            .collect()
     }
 
     /// Valley carve depth at world column `(wx, wz)`.
@@ -180,12 +170,7 @@ impl ChunkRegions {
     /// Segment-first pass with AABB culling — much faster than calling
     /// `valley_carve` 1024 times per chunk. The hydrology module does
     /// the per-segment → per-cell projection work.
-    pub(crate) fn valley_grid(
-        &self,
-        origin_wx: i32,
-        origin_wz: i32,
-        seed: u64,
-    ) -> [[f32; 32]; 32] {
+    pub(crate) fn valley_grid(&self, origin_wx: i32, origin_wz: i32, seed: u64) -> [[f32; 32]; 32] {
         let c = region::RegionCoord::containing(origin_wx, origin_wz);
         let center_dx = c.x - self.center.x + 1;
         let center_dz = c.z - self.center.z + 1;
