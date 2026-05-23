@@ -31,7 +31,7 @@ pub mod splines;
 // find what they need without digging into submodules.
 
 pub use cell_evaluator::{CELL_COUNT, CELL_SIZE, CORNER_COUNT, CellEvaluator};
-pub use heightmap::{DensityNoise, HeightmapNoise};
+pub use heightmap::{DensityComposition, DensityNoise, HeightmapNoise};
 pub use math::{
     offset_to_world_y, peaks_and_valleys, plate_roughness_bias, signed_continentalness, slide,
     smooth_plate_contribution,

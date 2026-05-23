@@ -42,6 +42,35 @@ use crate::worldgen::plates::PlateLookup;
 use crate::worldgen::tuning::*;
 use noise::{Fbm, MultiFractal, NoiseFn, Simplex};
 
+/// Density-composition scalars derived from the climate splines at one column.
+///
+/// These three values are sampled once per column from [`ClimateConfig`]'s
+/// nested splines and broadcast across the entire vertical voxel loop:
+///
+/// - `offset` shifts the height-based y-gradient (positive → surface higher,
+///   negative → surface lower). Comes from `ClimateConfig::offset_spline`.
+/// - `factor` scales the shaped density term — controls how quickly density
+///   rises with depth and how pronounced overhangs are. Comes from
+///   `ClimateConfig::factor_spline`.
+/// - `jagged` blends 3D FBM noise into the density near the surface,
+///   producing overhangs and ledges. `0.0` = smooth surface; higher values
+///   = more 3D structure. Comes from `ClimateConfig::jaggedness_spline`.
+///
+/// All three always travel together from the climate-sample site to
+/// [`DensityNoise::evaluate`] / [`DensityNoise::topmost_solid`], so
+/// grouping them avoids repeating the triplet at every call site.
+///
+/// `DensityComposition` is `Copy` (three `f32`s).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DensityComposition {
+    /// Additive height-offset term from the climate offset spline.
+    pub offset: f32,
+    /// Multiplicative scale on the shaped density term.
+    pub factor: f32,
+    /// Amplitude of the per-voxel 3D FBM rider near the surface.
+    pub jagged: f32,
+}
+
 /// Bundle of noise fields needed for the spline pipeline. Built once
 /// per [`crate::worldgen::Generator`] from a snapshot of
 /// [`ClimateConfig`] — frequencies are baked at construction, so
@@ -255,26 +284,23 @@ impl DensityNoise {
     /// for tree placement; the chunk-fill hot path uses
     /// [`super::cell_evaluator::CellEvaluator`] which
     /// samples a 9×9×9 corner lattice and trilerps.
-    #[allow(clippy::too_many_arguments)]
     pub fn evaluate(
         &self,
         wx: i32,
         wy: i32,
         wz: i32,
-        offset: f32,
-        factor: f32,
-        jagged: f32,
+        comp: DensityComposition,
         density: &DensityConfig,
     ) -> f32 {
         let t = (wy - density.y_min) as f32 / (density.y_max - density.y_min) as f32;
         let y_gradient = density.y_gradient_amplitude * (1.0 - 2.0 * t);
-        let depth = y_gradient + offset;
-        let j_noise = if jagged.abs() > 1e-6 {
+        let depth = y_gradient + comp.offset;
+        let j_noise = if comp.jagged.abs() > 1e-6 {
             self.evaluate_base_3d(wx, wy, wz, density)
         } else {
             0.0
         };
-        let shaped_raw = (depth + jagged * j_noise) * factor;
+        let shaped_raw = (depth + comp.jagged * j_noise) * comp.factor;
         let shaped = if shaped_raw > 0.0 {
             shaped_raw
         } else {
@@ -289,22 +315,19 @@ impl DensityNoise {
     /// return the first voxel `wy` where `density > 0` (topmost
     /// solid). Used by tree placement to find anchor points under
     /// 3D-density surface jitter.
-    #[allow(clippy::too_many_arguments)]
     pub fn topmost_solid(
         &self,
         h_target: f32,
         wx: i32,
         wz: i32,
         search_top: i32,
-        offset: f32,
-        factor: f32,
-        jagged: f32,
+        comp: DensityComposition,
         density: &DensityConfig,
     ) -> Option<i32> {
         let top = search_top.min(h_target as i32 + SURFACE_BAND);
         let bottom = (h_target as i32 - SURFACE_BAND).max(CAVE_FLOOR_Y);
         for wy in (bottom..=top).rev() {
-            if self.evaluate(wx, wy, wz, offset, factor, jagged, density) > 0.0 {
+            if self.evaluate(wx, wy, wz, comp, density) > 0.0 {
                 return Some(wy);
             }
         }
@@ -407,7 +430,17 @@ mod tests {
         let mut sum = 0.0_f32;
         for wx in 0..16 {
             for wz in 0..16 {
-                sum += d.evaluate(wx, mid_y, wz, 0.0, 4.0, 0.0, &cfg.density);
+                sum += d.evaluate(
+                    wx,
+                    mid_y,
+                    wz,
+                    DensityComposition {
+                        offset: 0.0,
+                        factor: 4.0,
+                        jagged: 0.0,
+                    },
+                    &cfg.density,
+                );
             }
         }
         let avg = sum / 256.0;
@@ -423,7 +456,17 @@ mod tests {
         let d = DensityNoise::new(42, &cfg.density);
         // 30 blocks below midpoint with offset=0 → depth strongly positive → solid.
         let mid_y = (cfg.density.y_min + cfg.density.y_max) / 2;
-        let v = d.evaluate(0, mid_y - 30, 0, 0.0, 4.0, 0.0, &cfg.density);
+        let v = d.evaluate(
+            0,
+            mid_y - 30,
+            0,
+            DensityComposition {
+                offset: 0.0,
+                factor: 4.0,
+                jagged: 0.0,
+            },
+            &cfg.density,
+        );
         assert!(v > 1.0, "density below surface should be > 1 (got {v})");
     }
 
@@ -432,7 +475,17 @@ mod tests {
         let cfg = test_cfg();
         let d = DensityNoise::new(42, &cfg.density);
         let mid_y = (cfg.density.y_min + cfg.density.y_max) / 2;
-        let v = d.evaluate(0, mid_y + 30, 0, 0.0, 4.0, 0.0, &cfg.density);
+        let v = d.evaluate(
+            0,
+            mid_y + 30,
+            0,
+            DensityComposition {
+                offset: 0.0,
+                factor: 4.0,
+                jagged: 0.0,
+            },
+            &cfg.density,
+        );
         assert!(v < 0.0, "density above surface should be < 0 (got {v})");
     }
 
@@ -440,7 +493,17 @@ mod tests {
     fn density_at_world_top_pulled_to_air() {
         let cfg = test_cfg();
         let d = DensityNoise::new(42, &cfg.density);
-        let v = d.evaluate(0, cfg.density.y_max, 0, 0.0, 4.0, 0.0, &cfg.density);
+        let v = d.evaluate(
+            0,
+            cfg.density.y_max,
+            0,
+            DensityComposition {
+                offset: 0.0,
+                factor: 4.0,
+                jagged: 0.0,
+            },
+            &cfg.density,
+        );
         assert!(
             (v - cfg.density.slide_top_target).abs() < 0.5,
             "at y_max density should be near slide_top_target ({}), got {v}",
@@ -452,7 +515,17 @@ mod tests {
     fn density_at_world_bottom_pulled_to_solid() {
         let cfg = test_cfg();
         let d = DensityNoise::new(42, &cfg.density);
-        let v = d.evaluate(0, cfg.density.y_min, 0, 0.0, 4.0, 0.0, &cfg.density);
+        let v = d.evaluate(
+            0,
+            cfg.density.y_min,
+            0,
+            DensityComposition {
+                offset: 0.0,
+                factor: 4.0,
+                jagged: 0.0,
+            },
+            &cfg.density,
+        );
         assert!(
             (v - cfg.density.slide_bottom_target).abs() < 0.5,
             "at y_min density should be near slide_bottom_target ({}), got {v}",

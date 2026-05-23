@@ -14,6 +14,7 @@ use crate::voxel::block::Block;
 use crate::voxel::chunk::DenseChunk;
 use crate::voxel::coords::ChunkCoord;
 use crate::worldgen::biome::TreeKind;
+use crate::worldgen::density::DensityComposition;
 use crate::worldgen::pipeline::ChunkRegions;
 use crate::worldgen::trees::{Tree, tree_hash, try_set_air};
 use crate::worldgen::tuning::{SEA_LEVEL, SNOW_LINE, SURFACE_BAND, TREE_CELL_SIZE, TREE_MARGIN};
@@ -116,9 +117,11 @@ impl Generator {
         let (cc, sc, rc, _) = self
             .heightmap
             .climate(self.seed, wx as f32, wz as f32, &cfg.climate);
-        let offset = cfg.climate.offset_spline.evaluate(cc, sc, rc);
-        let factor = cfg.climate.factor_spline.evaluate(cc, sc, rc);
-        let jagged = cfg.climate.jaggedness_spline.evaluate(cc, sc, rc);
+        let comp = DensityComposition {
+            offset: cfg.climate.offset_spline.evaluate(cc, sc, rc),
+            factor: cfg.climate.factor_spline.evaluate(cc, sc, rc),
+            jagged: cfg.climate.jaggedness_spline.evaluate(cc, sc, rc),
+        };
         let height = self
             .density
             .topmost_solid(
@@ -126,9 +129,7 @@ impl Generator {
                 wx,
                 wz,
                 col.height + SURFACE_BAND + 2,
-                offset,
-                factor,
-                jagged,
+                comp,
                 &cfg.density,
             )
             .unwrap_or(col.height);
