@@ -9,7 +9,7 @@ use super::style::{
 };
 use crate::worldgen::hash::{mix_range, mix_u32, mix_unit};
 use crate::worldgen::region::{
-    CaveSystem, Chamber, Entrance, EntranceKind, FineRegion, RegionCoord, Tunnel,
+    CaveSystem, Chamber, Entrance, EntranceKind, FineRegion, RegionCoord, SystemBoundingBox, Tunnel,
 };
 use crate::worldgen::terrain_ref::TerrainRef;
 use crate::worldgen::tuning::*;
@@ -114,8 +114,8 @@ pub(crate) fn build_systems_for_region(
 /// The box is allowed to straddle the region boundary — neighbouring regions
 /// consult systems via the 3×3 region neighbourhood at chunk fill time.
 ///
-/// Returns `(bb_min, bb_max)` as world-space `IVec3` corners (inclusive).
-fn roll_bounding_box(ctx: CaveCtx, y_min: i32, y_max: i32) -> (IVec3, IVec3) {
+/// Returns a `SystemBoundingBox` with world-space inclusive corners.
+fn roll_bounding_box(ctx: CaveCtx, y_min: i32, y_max: i32) -> SystemBoundingBox {
     let CaveCtx {
         seed,
         coord,
@@ -136,9 +136,11 @@ fn roll_bounding_box(ctx: CaveCtx, y_min: i32, y_max: i32) -> (IVec3, IVec3) {
             % (FINE_REGION_SIZE - bb_size.z).max(1) as u32) as i32
         - (bb_size.z / 2);
     let bb_origin_y = y_min;
-    let bb_min = IVec3::new(bb_origin_x, bb_origin_y, bb_origin_z);
-    let bb_max = bb_min + bb_size;
-    (bb_min, bb_max)
+    let min = IVec3::new(bb_origin_x, bb_origin_y, bb_origin_z);
+    SystemBoundingBox {
+        min,
+        max: min + bb_size,
+    }
 }
 
 /// Poisson-disk rejection sampling for chamber centers within the bounding box.
@@ -150,8 +152,7 @@ fn roll_bounding_box(ctx: CaveCtx, y_min: i32, y_max: i32) -> (IVec3, IVec3) {
 /// however many fit, down to a minimum of 1.
 fn sample_chambers(
     ctx: CaveCtx,
-    bb_min: IVec3,
-    bb_max: IVec3,
+    bb: SystemBoundingBox,
     style: CaveStyle,
     sp: &StyleParams,
     cave_cfg: &crate::worldgen::config::CaveConfig,
@@ -168,8 +169,8 @@ fn sample_chambers(
             % (cn_max - cn_min + 1));
 
     // Pre-compute Sump bb_center_y / bb_half_y for the bias formula.
-    let bb_center_y = (bb_min.y + bb_max.y) as f32 * 0.5;
-    let bb_half_y = (bb_max.y - bb_min.y) as f32 * 0.5;
+    let bb_center_y = (bb.min.y + bb.max.y) as f32 * 0.5;
+    let bb_half_y = (bb.max.y - bb.min.y) as f32 * 0.5;
 
     // Poisson-disk-like rejection sampling for chamber centers.
     let mut chambers: Vec<Chamber> = Vec::with_capacity(chamber_count as usize);
@@ -181,23 +182,23 @@ fn sample_chambers(
             seed,
             &[coord.x, coord.z, system_idx, 30, attempt],
             0.0,
-            (bb_max.x - bb_min.x) as f32,
+            (bb.max.x - bb.min.x) as f32,
         );
         let sy = mix_range(
             seed,
             &[coord.x, coord.z, system_idx, 31, attempt],
             0.0,
-            (bb_max.y - bb_min.y) as f32,
+            (bb.max.y - bb.min.y) as f32,
         );
         let sz = mix_range(
             seed,
             &[coord.x, coord.z, system_idx, 32, attempt],
             0.0,
-            (bb_max.z - bb_min.z) as f32,
+            (bb.max.z - bb.min.z) as f32,
         );
 
         // Depth multiplier: deeper = larger chambers.
-        let cy_raw = bb_min.y as f32 + sy;
+        let cy_raw = bb.min.y as f32 + sy;
         let depth_mult = 1.0
             + cave_cfg.depth_scale * ((DEPTH_SCALE_PIVOT_Y - cy_raw).max(0.0) / DEPTH_SCALE_RANGE);
 
@@ -235,7 +236,7 @@ fn sample_chambers(
             cy_raw
         };
 
-        let center = Vec3::new(bb_min.x as f32 + sx, cy_final, bb_min.z as f32 + sz);
+        let center = Vec3::new(bb.min.x as f32 + sx, cy_final, bb.min.z as f32 + sz);
         let radii = Vec3::new(rx_final, ry, rz_final);
         let mean_r = (rx_final + ry + rz_final) / 3.0;
         let min_spacing = mean_r * POISSON_MIN_SPACING_MULT;
@@ -474,48 +475,47 @@ fn roll_entrances(
 /// The AABB must conservatively cover everything the SDF functions might
 /// carve, so the chunk-side intersection test never misses a carve.
 fn finalize_aabb(
-    bb_min: IVec3,
-    bb_max: IVec3,
+    initial: SystemBoundingBox,
     chambers: &[Chamber],
     tunnels: &[Tunnel],
     entrances: &[Entrance],
-) -> (IVec3, IVec3) {
-    // Compute the system's actual bounding box including chambers,
-    // tunnels, and any entrance shafts so the chunk-side AABB
-    // intersection test catches everything we might carve.
-    let mut bb_min = bb_min;
-    let mut bb_max = bb_max;
+) -> SystemBoundingBox {
+    // Expand the initial rolled box to conservatively cover everything the SDF
+    // functions might carve: chamber ellipsoids, tunnel capsule control points,
+    // and entrance shaft footprints. The chunk-side AABB intersection test must
+    // never miss a carve.
+    let mut min = initial.min;
+    let mut max = initial.max;
     for c in chambers {
         let cmin = (c.center - c.radii - Vec3::splat(1.0)).floor();
         let cmax = (c.center + c.radii + Vec3::splat(1.0)).ceil();
-        bb_min.x = bb_min.x.min(cmin.x as i32);
-        bb_min.y = bb_min.y.min(cmin.y as i32);
-        bb_min.z = bb_min.z.min(cmin.z as i32);
-        bb_max.x = bb_max.x.max(cmax.x as i32);
-        bb_max.y = bb_max.y.max(cmax.y as i32);
-        bb_max.z = bb_max.z.max(cmax.z as i32);
+        min.x = min.x.min(cmin.x as i32);
+        min.y = min.y.min(cmin.y as i32);
+        min.z = min.z.min(cmin.z as i32);
+        max.x = max.x.max(cmax.x as i32);
+        max.y = max.y.max(cmax.y as i32);
+        max.z = max.z.max(cmax.z as i32);
     }
     for t in tunnels {
         for p in &t.control_points {
-            bb_min.x = bb_min.x.min((p.x - t.radius - 1.0) as i32);
-            bb_min.y = bb_min.y.min((p.y - t.radius - 1.0) as i32);
-            bb_min.z = bb_min.z.min((p.z - t.radius - 1.0) as i32);
-            bb_max.x = bb_max.x.max((p.x + t.radius + 1.0) as i32);
-            bb_max.y = bb_max.y.max((p.y + t.radius + 1.0) as i32);
-            bb_max.z = bb_max.z.max((p.z + t.radius + 1.0) as i32);
+            min.x = min.x.min((p.x - t.radius - 1.0) as i32);
+            min.y = min.y.min((p.y - t.radius - 1.0) as i32);
+            min.z = min.z.min((p.z - t.radius - 1.0) as i32);
+            max.x = max.x.max((p.x + t.radius + 1.0) as i32);
+            max.y = max.y.max((p.y + t.radius + 1.0) as i32);
+            max.z = max.z.max((p.z + t.radius + 1.0) as i32);
         }
     }
     for e in entrances {
-        // Vertical shaft extent — clip downward to chamber, upward to
-        // surface.
-        bb_min.y = bb_min.y.min(e.surface.y);
-        bb_max.y = bb_max.y.max(e.surface.y + 1);
-        bb_min.x = bb_min.x.min(e.surface.x - ENTRANCE_BB_EXPAND);
-        bb_max.x = bb_max.x.max(e.surface.x + ENTRANCE_BB_EXPAND);
-        bb_min.z = bb_min.z.min(e.surface.z - ENTRANCE_BB_EXPAND);
-        bb_max.z = bb_max.z.max(e.surface.z + ENTRANCE_BB_EXPAND);
+        // Vertical shaft extent — clip downward to chamber, upward to surface.
+        min.y = min.y.min(e.surface.y);
+        max.y = max.y.max(e.surface.y + 1);
+        min.x = min.x.min(e.surface.x - ENTRANCE_BB_EXPAND);
+        max.x = max.x.max(e.surface.x + ENTRANCE_BB_EXPAND);
+        min.z = min.z.min(e.surface.z - ENTRANCE_BB_EXPAND);
+        max.z = max.z.max(e.surface.z + ENTRANCE_BB_EXPAND);
     }
-    (bb_min, bb_max)
+    SystemBoundingBox { min, max }
 }
 
 /// Build one cave system inside region `coord`.
@@ -559,15 +559,14 @@ fn build_system(
     let style = pick_style(seed, coord, system_idx, band, cave_cfg);
     let sp = style_params(style, &cave_cfg.style_table);
 
-    let (bb_min, bb_max) = roll_bounding_box(ctx, y_min, y_max);
-    let chambers = sample_chambers(ctx, bb_min, bb_max, style, &sp, cave_cfg);
+    let bb = roll_bounding_box(ctx, y_min, y_max);
+    let chambers = sample_chambers(ctx, bb, style, &sp, cave_cfg);
     let tunnels = connect_chambers_mst(ctx, &chambers, &sp);
     let entrances = roll_entrances(ctx, &chambers, band, terrain);
-    let (bb_min, bb_max) = finalize_aabb(bb_min, bb_max, &chambers, &tunnels, &entrances);
+    let bbox = finalize_aabb(bb, &chambers, &tunnels, &entrances);
 
     CaveSystem {
-        bb_min,
-        bb_max,
+        bbox,
         chambers,
         tunnels,
         entrances,

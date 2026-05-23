@@ -55,6 +55,54 @@ impl From<f32> for RiverWidth {
     }
 }
 
+// ── SystemBoundingBox ─────────────────────────────────────────────────
+
+/// Axis-aligned bounding box for a cave system, stored as world-space
+/// inclusive min / max corners.
+///
+/// Extracted from the raw `(IVec3, IVec3)` tuples that previously appeared
+/// wherever cave systems were rolled, stored, and queried, so that the
+/// bounding-box invariants and helper methods live in one place.
+///
+/// `min` and `max` are both **inclusive** — a point exactly on an edge
+/// is inside the box. This matches the convention used by the SDF culling
+/// loop and the chunk-overlap test in `pipeline.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SystemBoundingBox {
+    /// Inclusive world-space minimum corner.
+    pub min: glam::IVec3,
+    /// Inclusive world-space maximum corner.
+    pub max: glam::IVec3,
+}
+
+impl SystemBoundingBox {
+    /// True when world point `(wx, wy, wz)` is inside this box (inclusive
+    /// on both ends). Used as a fast early-exit before evaluating the full
+    /// chamber / tunnel SDF.
+    #[inline]
+    pub fn contains_point(&self, wx: i32, wy: i32, wz: i32) -> bool {
+        wx >= self.min.x
+            && wx <= self.max.x
+            && wy >= self.min.y
+            && wy <= self.max.y
+            && wz >= self.min.z
+            && wz <= self.max.z
+    }
+
+    /// True when this box overlaps the axis-aligned box `[box_min, box_max)`.
+    /// Used in `pipeline.rs` to pre-filter cave systems before the per-voxel
+    /// inner loop.
+    #[inline]
+    pub fn overlaps_box(&self, box_min: glam::IVec3, box_max: glam::IVec3) -> bool {
+        self.max.x >= box_min.x
+            && self.min.x <= box_max.x
+            && self.max.y >= box_min.y
+            && self.min.y <= box_max.y
+            && self.max.z >= box_min.z
+            && self.min.z <= box_max.z
+    }
+}
+
 // ── Fine region ───────────────────────────────────────────────────────
 
 /// What the fine cache stores for one 512×512 region.
@@ -236,15 +284,14 @@ pub struct CavePool {
 /// Stored in the fine region cache (immutable behind `Arc`). Carving
 /// happens at chunk fill time: the SDF functions in `caves.rs` query
 /// `chambers`, `tunnels`, `entrances`, and `vertical_connectors` to
-/// decide which voxels are air. The `bb_min`/`bb_max` bounding box lets
-/// `fill_chunk` cull the list to only the systems that overlap the chunk
-/// before entering the per-voxel inner loop.
+/// decide which voxels are air. The `bbox` bounding box lets `fill_chunk`
+/// cull the list to only the systems that overlap the chunk before
+/// entering the per-voxel inner loop.
 #[derive(Debug, Clone)]
 pub struct CaveSystem {
-    /// World-space axis-aligned bounding box (inclusive min, inclusive max).
-    pub bb_min: glam::IVec3,
-    /// World-space axis-aligned bounding box (inclusive min, inclusive max).
-    pub bb_max: glam::IVec3,
+    /// World-space axis-aligned bounding box (inclusive on both ends).
+    /// Used for fast chunk-overlap culling before the per-voxel SDF loop.
+    pub bbox: SystemBoundingBox,
     pub chambers: Vec<Chamber>,
     pub tunnels: Vec<Tunnel>,
     pub entrances: Vec<Entrance>,
@@ -261,32 +308,17 @@ pub struct CaveSystem {
 
 impl CaveSystem {
     /// True when world point `(wx, wy, wz)` is inside this system's
-    /// axis-aligned bounding box (inclusive on both ends).
-    ///
-    /// Used as a fast early-exit in the per-voxel carve inner loop:
-    /// if the voxel isn't inside the BB there is no need to evaluate
-    /// the full chamber/tunnel SDF.
+    /// axis-aligned bounding box. Delegates to [`SystemBoundingBox::contains_point`].
     #[inline]
     pub fn contains_point(&self, wx: i32, wy: i32, wz: i32) -> bool {
-        wx >= self.bb_min.x
-            && wx <= self.bb_max.x
-            && wy >= self.bb_min.y
-            && wy <= self.bb_max.y
-            && wz >= self.bb_min.z
-            && wz <= self.bb_max.z
+        self.bbox.contains_point(wx, wy, wz)
     }
 
-    /// True when this system's bounding box overlaps the axis-aligned
-    /// box `[chunk_min, chunk_max)`. Used in `gather_chunk_regions` to
-    /// pre-filter cave systems before the per-voxel inner loop.
+    /// True when this system's bounding box overlaps `[box_min, box_max)`.
+    /// Delegates to [`SystemBoundingBox::overlaps_box`].
     #[inline]
     pub fn overlaps_box(&self, box_min: glam::IVec3, box_max: glam::IVec3) -> bool {
-        self.bb_max.x >= box_min.x
-            && self.bb_min.x <= box_max.x
-            && self.bb_max.y >= box_min.y
-            && self.bb_min.y <= box_max.y
-            && self.bb_max.z >= box_min.z
-            && self.bb_min.z <= box_max.z
+        self.bbox.overlaps_box(box_min, box_max)
     }
 }
 

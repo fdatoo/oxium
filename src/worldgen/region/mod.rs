@@ -69,7 +69,7 @@ pub use coords::{MacroRegionCoord, RegionCoord};
 // data
 pub use data::{
     CavePool, CaveSystem, Chamber, Entrance, EntranceKind, FineRegion, MacroRegion, RiverSegment,
-    RiverSegmentKind, RiverWidth, Tunnel, build_fine_region_placeholder,
+    RiverSegmentKind, RiverWidth, SystemBoundingBox, Tunnel, build_fine_region_placeholder,
     build_macro_region_placeholder,
 };
 

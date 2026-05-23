@@ -71,7 +71,7 @@ fn vertical_connector_connects_adjacent_band_systems() {
 }
 
 fn infer_band_for_test(sys: &CaveSystem) -> DepthBand {
-    let cy = (sys.bb_min.y + sys.bb_max.y) / 2;
+    let cy = (sys.bbox.min.y + sys.bbox.max.y) / 2;
     if cy >= CAVE_BAND_SHALLOW.0 {
         DepthBand::Shallow
     } else if cy >= CAVE_BAND_MIDDLE.0 {
@@ -132,7 +132,7 @@ fn system_is_pure_in_seed_and_coord() {
     for (a, b) in r1.cave_systems.iter().zip(&r2.cave_systems) {
         assert_eq!(a.chambers.len(), b.chambers.len());
         assert_eq!(a.tunnels.len(), b.tunnels.len());
-        assert_eq!(a.bb_min, b.bb_min);
+        assert_eq!(a.bbox.min, b.bbox.min);
     }
 }
 

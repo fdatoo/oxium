@@ -23,7 +23,7 @@ pub fn build_vertical_connectors(
         .cave_systems
         .iter()
         .map(|s| {
-            let cy = (s.bb_min.y + s.bb_max.y) / 2;
+            let cy = (s.bbox.min.y + s.bbox.max.y) / 2;
             if cy >= CAVE_BAND_SHALLOW.0 {
                 DepthBand::Shallow
             } else if cy >= CAVE_BAND_MIDDLE.0 {

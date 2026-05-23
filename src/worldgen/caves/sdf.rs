@@ -468,7 +468,9 @@ pub fn entrance_air(wx: i32, wy: i32, wz: i32, systems: &[&CaveSystem]) -> bool 
 /// rejection — only check the expensive ellipsoid / capsule SDFs if
 /// at least one system's Y extent covers the column.
 pub fn any_system_y_in_range(wy: i32, systems: &[&CaveSystem]) -> bool {
-    systems.iter().any(|s| wy >= s.bb_min.y && wy <= s.bb_max.y)
+    systems
+        .iter()
+        .any(|s| wy >= s.bbox.min.y && wy <= s.bbox.max.y)
 }
 
 /// Polynomial smooth-min (Inigo Quilez's C1 smooth-min).

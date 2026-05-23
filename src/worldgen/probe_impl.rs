@@ -99,10 +99,10 @@ impl Generator {
                 for sys in &r.cave_systems {
                     // Check only the XZ plane — count systems
                     // that *might* touch this column regardless of Y.
-                    if sys.bb_min.x <= wx
-                        && wx <= sys.bb_max.x
-                        && sys.bb_min.z <= wz
-                        && wz <= sys.bb_max.z
+                    if sys.bbox.min.x <= wx
+                        && wx <= sys.bbox.max.x
+                        && sys.bbox.min.z <= wz
+                        && wz <= sys.bbox.max.z
                     {
                         n += 1;
                     }
@@ -394,7 +394,7 @@ impl Generator {
                     caves::CaveStyle::Sump => "Sump",
                     caves::CaveStyle::Karst => "Karst",
                 };
-                let cy = (sys.bb_min.y + sys.bb_max.y) / 2;
+                let cy = (sys.bbox.min.y + sys.bbox.max.y) / 2;
                 let band: &'static str = if cy >= CAVE_BAND_SHALLOW.0 {
                     "shallow"
                 } else if cy >= CAVE_BAND_MIDDLE.0 {

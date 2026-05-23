@@ -115,7 +115,6 @@ pub fn gather_neighbour_edges(
 /// peek) so existing cardinal-neighbour regions can stitch their edge
 /// flow fields into the new region, preventing rivers from snapping to
 /// new directions at region seams.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_fine_hydro(
     seed: u64,
     coord: RegionCoord,
