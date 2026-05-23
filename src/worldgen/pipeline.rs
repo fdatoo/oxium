@@ -263,9 +263,9 @@ impl ChunkRegions {
                 return;
             }
             let width = if seg.mouth {
-                seg.width * MOUTH_FLARE_MULT
+                seg.width.0 * MOUTH_FLARE_MULT
             } else {
-                seg.width
+                seg.width.0
             }
             .max(MIN_VISIBLE_RIVER_WIDTH);
             let d = hydrology::perpendicular_distance(wx, wz, seg, seed);

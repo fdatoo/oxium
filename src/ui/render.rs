@@ -109,7 +109,7 @@ fn draw_chat_open(
         let t = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
-        (t.as_millis() / 500) % 2 == 0
+        (t.as_millis() / 500).is_multiple_of(2)
     };
     if blink_on {
         let prefix_chars = 2 + input.buf[..input.cursor].chars().count();

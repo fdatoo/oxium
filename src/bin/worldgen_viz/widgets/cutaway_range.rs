@@ -13,6 +13,7 @@ pub struct CutawayRangeResponse {
     pub response: Response,
     /// True if either clamp moved this frame. The caller uses this
     /// to know when to forward changes to debounced regen, etc.
+    #[allow(dead_code)]
     pub clamps_changed: bool,
 }
 
@@ -29,7 +30,7 @@ pub fn cutaway_range(
     playhead: Option<f32>,
     range: std::ops::RangeInclusive<f32>,
 ) -> CutawayRangeResponse {
-    let desired = vec2(ui.available_width().min(260.0).max(160.0), 26.0);
+    let desired = vec2(ui.available_width().clamp(160.0, 260.0), 26.0);
     let (rect, mut response) = ui.allocate_exact_size(desired, Sense::click_and_drag());
 
     let track_y = rect.center().y;
@@ -49,34 +50,34 @@ pub fn cutaway_range(
     // feels broken.
     let id = response.id;
     let mut clamps_changed = false;
-    if response.drag_started() {
-        if let Some(p) = response.interact_pointer_pos() {
-            let d_min = (p.x - to_x(*min)).abs();
-            let d_max = (p.x - to_x(*max)).abs();
-            ui.memory_mut(|m| {
-                m.data
-                    .insert_temp::<bool>(id.with("dragging_max"), d_max <= d_min);
-            });
-        }
+    if response.drag_started()
+        && let Some(p) = response.interact_pointer_pos()
+    {
+        let d_min = (p.x - to_x(*min)).abs();
+        let d_max = (p.x - to_x(*max)).abs();
+        ui.memory_mut(|m| {
+            m.data
+                .insert_temp::<bool>(id.with("dragging_max"), d_max <= d_min);
+        });
     }
-    if response.dragged() {
-        if let Some(p) = response.interact_pointer_pos() {
-            let dragging_max = ui
-                .memory(|m| m.data.get_temp::<bool>(id.with("dragging_max")))
-                .unwrap_or(true);
-            let v = to_v(p.x);
-            if dragging_max {
-                let nv = v.max(*min);
-                if (nv - *max).abs() > f32::EPSILON {
-                    *max = nv;
-                    clamps_changed = true;
-                }
-            } else {
-                let nv = v.min(*max);
-                if (nv - *min).abs() > f32::EPSILON {
-                    *min = nv;
-                    clamps_changed = true;
-                }
+    if response.dragged()
+        && let Some(p) = response.interact_pointer_pos()
+    {
+        let dragging_max = ui
+            .memory(|m| m.data.get_temp::<bool>(id.with("dragging_max")))
+            .unwrap_or(true);
+        let v = to_v(p.x);
+        if dragging_max {
+            let nv = v.max(*min);
+            if (nv - *max).abs() > f32::EPSILON {
+                *max = nv;
+                clamps_changed = true;
+            }
+        } else {
+            let nv = v.min(*max);
+            if (nv - *min).abs() > f32::EPSILON {
+                *min = nv;
+                clamps_changed = true;
             }
         }
     }

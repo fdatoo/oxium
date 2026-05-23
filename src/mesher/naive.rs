@@ -42,7 +42,7 @@ pub fn mesh_chunk_no_neighbors(chunk: &DenseChunk, reg: &BlockRegistry) -> Chunk
             }
         }
     }
-    mesh.has_water = chunk.blocks.iter().any(|b| *b == Block::Water);
+    mesh.has_water = chunk.blocks.contains(&Block::Water);
     mesh
 }
 
@@ -202,7 +202,7 @@ pub fn mesh_chunk_with_neighbors(
             }
         }
     }
-    mesh.has_water = chunk.blocks.iter().any(|b| *b == Block::Water);
+    mesh.has_water = chunk.blocks.contains(&Block::Water);
     mesh
 }
 

@@ -1,6 +1,9 @@
 use super::*;
-use crate::voxel::chunk::CHUNK_VOL;
-use glam::IVec3;
+use crate::voxel::block::Block;
+use crate::voxel::chunk::{CHUNK_VOL, DenseChunk};
+use crate::voxel::coords::{CHUNK_DIM_U, LocalPos};
+use crate::worldgen::tuning::SNOW_LINE;
+use glam::{IVec3, UVec3};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -484,11 +487,11 @@ fn above_sea_river_segment_generates_water_blocks() {
                 coord.z * (FINE_REGION_SIZE / 32),
             ));
             let regions = g.gather_chunk_regions(chunk_origin);
-            if let Some(cell) = regions.river_cell_at(wx, wz, g.seed()) {
-                if cell.surface_y > SEA_LEVEL + 2 {
-                    found = Some((wx, wz, cell.surface_y));
-                    break 'outer;
-                }
+            if let Some(cell) = regions.river_cell_at(wx, wz, g.seed())
+                && cell.surface_y > SEA_LEVEL + 2
+            {
+                found = Some((wx, wz, cell.surface_y));
+                break 'outer;
             }
         }
     }
@@ -539,19 +542,19 @@ fn seed42_region_has_visible_surface_rivers_and_lakes() {
                             if chunk.get(LocalPos(UVec3::new(x, y, z))) != Block::Water {
                                 continue;
                             }
-                            if let Some(cell) = river {
-                                if cell.surface_y > SEA_LEVEL
-                                    && wy >= cell.bed_y
-                                    && wy <= cell.surface_y
-                                {
-                                    river_water += 1;
-                                }
+                            if let Some(cell) = river
+                                && cell.surface_y > SEA_LEVEL
+                                && wy >= cell.bed_y
+                                && wy <= cell.surface_y
+                            {
+                                river_water += 1;
                             }
                             // Count lake + ocean water via the unified water_surface_y.
-                            if let Some(wsurf) = col.water_surface_y {
-                                if wy >= col.height && wy <= wsurf {
-                                    surface_water += 1;
-                                }
+                            if let Some(wsurf) = col.water_surface_y
+                                && wy >= col.height
+                                && wy <= wsurf
+                            {
+                                surface_water += 1;
                             }
                         }
                     }

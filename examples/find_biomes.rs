@@ -3,6 +3,7 @@ use oxium::voxel::block::Block;
 use oxium::voxel::chunk::DenseChunk;
 use oxium::voxel::coords::{ChunkCoord, LocalPos};
 use oxium::worldgen::Generator;
+use std::cmp::Reverse;
 
 fn main() {
     let g = Generator::new(42);
@@ -38,7 +39,7 @@ fn main() {
             }
         }
     }
-    by_height.sort_by(|a, b| b.0.cmp(&a.0));
+    by_height.sort_by_key(|&(h, _, _)| Reverse(h));
     println!("Total mountain peaks (stone > y=75): {}", by_height.len());
     for &(h, x, z) in by_height.iter().take(5) {
         println!("  peak: y={} at ({}, {})", h, x, z);

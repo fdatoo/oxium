@@ -191,6 +191,7 @@ impl CrossSection {
     }
 
     /// Map a pixel in the cross-section image to a world `(wx, wy, wz)`.
+    #[allow(dead_code)]
     fn pixel_to_world(&self, px: f32, py: f32) -> (i32, i32, i32) {
         let (w, h) = self.orientation.dimensions();
         let a = self.center_a + (px - w as f32 * 0.5) * self.blocks_per_pixel;
@@ -303,7 +304,7 @@ impl CrossSection {
         let mut dirty = false;
         ui.horizontal(|ui| {
             ui.label("Orientation:");
-            egui::ComboBox::from_id_source("cross_orient_combo")
+            egui::ComboBox::from_id_salt("cross_orient_combo")
                 .selected_text(self.orientation.label())
                 .show_ui(ui, |ui| {
                     for o in [Orientation::Xz, Orientation::Xy, Orientation::Yz] {
@@ -318,7 +319,7 @@ impl CrossSection {
                 });
             ui.separator();
             ui.label("Layer:");
-            egui::ComboBox::from_id_source("cross_layer_combo")
+            egui::ComboBox::from_id_salt("cross_layer_combo")
                 .selected_text(self.layer.label())
                 .show_ui(ui, |ui| {
                     for &l in Layer::ALL {
@@ -332,10 +333,10 @@ impl CrossSection {
 
         // If the orientation changed and we have a pin, re-snap to
         // it under the new axes (otherwise sliders look stale).
-        if self.orientation != prev_orient {
-            if let Some((wx, h, wz)) = pin {
-                self.focus_on(wx, h, wz);
-            }
+        if self.orientation != prev_orient
+            && let Some((wx, h, wz)) = pin
+        {
+            self.focus_on(wx, h, wz);
         }
 
         // Only two sliders left now that the pin drives the centre:
@@ -399,21 +400,21 @@ impl CrossSection {
             // world-Y, so paint a horizontal line at the cutaway plane
             // so the user can see at a glance which band of the cross
             // section is the chunk of geometry currently visible in 3D.
-            if let Some(cy) = cutaway_y {
-                if matches!(self.orientation, Orientation::Xy | Orientation::Yz) {
-                    let bpp = self.blocks_per_pixel;
-                    // pixel_to_world inverse: b = center_b - (py - h/2) * bpp,
-                    // so py = h/2 - (b - center_b) / bpp.
-                    let py_image = h_px as f32 * 0.5 - (cy - self.center_b) / bpp;
-                    let rect = img_resp.rect;
-                    let y = rect.top() + py_image * scale;
-                    if y >= rect.top() && y <= rect.bottom() {
-                        ui.painter().hline(
-                            rect.left()..=rect.right(),
-                            y,
-                            egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 180, 60)),
-                        );
-                    }
+            if let Some(cy) = cutaway_y
+                && matches!(self.orientation, Orientation::Xy | Orientation::Yz)
+            {
+                let bpp = self.blocks_per_pixel;
+                // pixel_to_world inverse: b = center_b - (py - h/2) * bpp,
+                // so py = h/2 - (b - center_b) / bpp.
+                let py_image = h_px as f32 * 0.5 - (cy - self.center_b) / bpp;
+                let rect = img_resp.rect;
+                let y = rect.top() + py_image * scale;
+                if y >= rect.top() && y <= rect.bottom() {
+                    ui.painter().hline(
+                        rect.left()..=rect.right(),
+                        y,
+                        egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 180, 60)),
+                    );
                 }
             }
         } else {

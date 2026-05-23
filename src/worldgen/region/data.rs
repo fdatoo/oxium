@@ -8,7 +8,52 @@
 
 use super::coords::{MacroRegionCoord, RegionCoord};
 use crate::worldgen::fluid::FluidBodyKind;
-use crate::worldgen::tuning::{FINE_CELLS_PER_REGION, MACRO_CELLS_PER_REGION};
+use crate::worldgen::tuning::{
+    FINE_CELLS_PER_REGION, MACRO_CELLS_PER_REGION, MAX_RIVER_WIDTH, MIN_RIVER_WIDTH,
+};
+
+// ── RiverWidth ────────────────────────────────────────────────────────
+
+/// A river-width value in voxels, clamped to `[MIN_RIVER_WIDTH,
+/// MAX_RIVER_WIDTH]` at construction time.
+///
+/// Wrapping the bare `f32` makes the clamp invariant visible in type
+/// signatures: any `RiverWidth` the caller receives is guaranteed to be
+/// in the valid range, eliminating ad-hoc clamping at read sites.
+///
+/// Use `.0` to extract the inner `f32` for arithmetic. Smaller values
+/// produce narrower rivers; larger values widen them. The effective range
+/// is controlled by [`MIN_RIVER_WIDTH`] and [`MAX_RIVER_WIDTH`] in
+/// `tuning.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct RiverWidth(pub f32);
+
+impl RiverWidth {
+    /// Wrap `v` and clamp it to `[MIN_RIVER_WIDTH, MAX_RIVER_WIDTH]`.
+    /// This is the canonical constructor — prefer it over the tuple-struct
+    /// literal to ensure the invariant is enforced at every entry point.
+    #[inline]
+    pub fn new(v: f32) -> Self {
+        Self(v.clamp(MIN_RIVER_WIDTH, MAX_RIVER_WIDTH))
+    }
+
+    /// Zero-width placeholder used to initialise the per-cell width buffer
+    /// before river tagging. Not a valid river width (it is below
+    /// `MIN_RIVER_WIDTH`), but no code reads these cells as rivers because
+    /// `is_river` is false for them.
+    #[inline]
+    pub const fn zero() -> Self {
+        Self(0.0)
+    }
+}
+
+impl From<f32> for RiverWidth {
+    /// Clamp and wrap `v` into a `RiverWidth`.
+    #[inline]
+    fn from(v: f32) -> Self {
+        Self::new(v)
+    }
+}
 
 // ── Fine region ───────────────────────────────────────────────────────
 
@@ -36,9 +81,10 @@ pub struct FineRegion {
     /// Bit set: true if the fine cell is a lake interior. Populated by
     /// PR 3.
     pub is_lake: Box<[u8]>,
-    /// River width per fine cell (0.0 if not a river). Populated by
-    /// PR 3.
-    pub width: Box<[f32]>,
+    /// River width per fine cell. `RiverWidth::zero()` if the cell is not
+    /// a river; otherwise guaranteed to be in `[MIN_RIVER_WIDTH,
+    /// MAX_RIVER_WIDTH]`. Populated by PR 3.
+    pub width: Box<[RiverWidth]>,
     /// Lake rim elevation per fine cell (only meaningful where
     /// `is_lake` is true). Populated by PR 3.
     pub lake_rim: Box<[i16]>,
@@ -72,7 +118,7 @@ impl FineRegion {
             flow_acc: vec![0u32; n].into_boxed_slice(),
             is_river: vec![0u8; bitset_bytes].into_boxed_slice(),
             is_lake: vec![0u8; bitset_bytes].into_boxed_slice(),
-            width: vec![0.0f32; n].into_boxed_slice(),
+            width: vec![RiverWidth::zero(); n].into_boxed_slice(),
             lake_rim: vec![0i16; n].into_boxed_slice(),
             lake_bed_depth: vec![0i16; n].into_boxed_slice(),
             segments: Vec::new(),
@@ -86,8 +132,8 @@ impl FineRegion {
     /// FINE_CELLS_PER_REGION`.
     #[inline]
     pub fn cell_index(ix: i32, iz: i32) -> usize {
-        debug_assert!(ix >= 0 && ix < FINE_CELLS_PER_REGION);
-        debug_assert!(iz >= 0 && iz < FINE_CELLS_PER_REGION);
+        debug_assert!((0..FINE_CELLS_PER_REGION).contains(&ix));
+        debug_assert!((0..FINE_CELLS_PER_REGION).contains(&iz));
         (iz * FINE_CELLS_PER_REGION + ix) as usize
     }
 }
@@ -127,8 +173,8 @@ impl MacroRegion {
 
     #[inline]
     pub fn cell_index(ix: i32, iz: i32) -> usize {
-        debug_assert!(ix >= 0 && ix < MACRO_CELLS_PER_REGION);
-        debug_assert!(iz >= 0 && iz < MACRO_CELLS_PER_REGION);
+        debug_assert!((0..MACRO_CELLS_PER_REGION).contains(&ix));
+        debug_assert!((0..MACRO_CELLS_PER_REGION).contains(&iz));
         (iz * MACRO_CELLS_PER_REGION + ix) as usize
     }
 }
@@ -144,7 +190,7 @@ pub struct RiverSegment {
     /// Centerline endpoints in world coordinates.
     pub from: (i32, i32),
     pub to: (i32, i32),
-    pub width: f32,
+    pub width: RiverWidth,
     /// Voxel Y of the static generated river surface.
     pub water_y: i32,
     /// Voxel Y of the carved bed below the water surface.

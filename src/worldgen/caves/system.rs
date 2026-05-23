@@ -131,6 +131,7 @@ fn roll_bounding_box(
 /// already-placed chamber. Sampling stops after `max_tries = 200` attempts
 /// regardless of whether the target count was reached — the system uses
 /// however many fit, down to a minimum of 1.
+#[allow(clippy::too_many_arguments)]
 fn sample_chambers(
     seed: u64,
     coord: RegionCoord,
@@ -363,6 +364,7 @@ fn connect_chambers_mst(
 /// if the chamber top is `SKYLIGHT_DEPTH_MIN–SKYLIGHT_DEPTH_MAX` below
 /// the surface. Exactly one entrance per chamber; priority Sinkhole →
 /// CliffMouth → Skylight.
+#[allow(clippy::too_many_arguments)]
 fn roll_entrances(
     seed: u64,
     coord: RegionCoord,
@@ -393,7 +395,7 @@ fn roll_entrances(
             entrances.push(Entrance {
                 chamber_idx: ci as u32,
                 kind: EntranceKind::Sinkhole,
-                surface: IVec3::new(cwx, surface_h + SURFACE_BAND as i32, cwz),
+                surface: IVec3::new(cwx, surface_h + SURFACE_BAND, cwz),
             });
             continue;
         }
@@ -427,7 +429,7 @@ fn roll_entrances(
             entrances.push(Entrance {
                 chamber_idx: ci as u32,
                 kind: EntranceKind::Skylight,
-                surface: IVec3::new(cwx, surface_h + SURFACE_BAND as i32, cwz),
+                surface: IVec3::new(cwx, surface_h + SURFACE_BAND, cwz),
             });
         }
     }

@@ -190,7 +190,7 @@ pub fn atlas_h() -> u32 {
 /// than panicking.
 pub fn slot_for(c: char) -> u32 {
     let cp = c as u32;
-    if cp >= FIRST && cp <= LAST {
+    if (FIRST..=LAST).contains(&cp) {
         cp - FIRST
     } else {
         0 // fall back to space (slot 0)

@@ -55,11 +55,8 @@
 //! for the architectural spec, and `docs/superpowers/specs/2026-05-19-worldgen-3d-design.md`
 //! for the 3D density + climate multi-noise design.
 
-use crate::voxel::block::Block;
-use crate::voxel::chunk::{ChunkLightInputs, DenseChunk};
-use crate::voxel::coords::{CHUNK_DIM_U, ChunkCoord, LocalPos};
+use crate::voxel::coords::ChunkCoord;
 use crate::worldgen::tuning::{FINE_REGION_SIZE, MAX_TERRAIN_Y};
-use glam::UVec3;
 use noise::{Fbm, MultiFractal, NoiseFn, Simplex};
 
 // New worldgen modules. Most of them are PR 1 stubs that get filled
@@ -103,10 +100,8 @@ pub use crate::worldgen::tuning::SEA_LEVEL;
 // Re-export Biome and TreeKind so callers at `worldgen::Biome` continue
 // to work after the type moved to `biome.rs`.
 pub use biome::Biome;
-use biome::TreeKind;
 pub use columns::ColumnData;
 use pipeline::ChunkRegions;
-use trees::{Tree, tree_hash, try_set_air};
 
 // Compatibility shim: `oxium::worldgen::heightmap::HeightmapNoise` is
 // used by `tests/worldgen_fingerprint.rs`. Keep this alias until
@@ -120,12 +115,7 @@ pub mod heightmap {
     };
 }
 
-// All other tuning constants live in `worldgen::tuning`. The names
-// below are imported into this module's scope for ergonomics.
-use crate::worldgen::tuning::{
-    CAVE_BAND_MIDDLE, CAVE_BAND_SHALLOW, CAVE_FLOOR_Y, CAVE_SDF_INTENSITY, CAVE_SURFACE_BUFFER,
-    MAX_VERTICAL_AIR_RUN, SNOW_LINE, SURFACE_BAND, SURFACE_SPREAD, TREE_CELL_SIZE, TREE_MARGIN,
-};
+use crate::worldgen::tuning::CAVE_FLOOR_Y;
 
 /// Pre-built noise fields for one world seed.
 ///

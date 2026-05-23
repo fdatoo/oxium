@@ -296,47 +296,49 @@ fn walk(
 
         // Branch at the split point — only the parent (with the
         // original `split`) branches; child walks have `split = None`.
-        if let Some(sp) = split {
-            if step == sp && thickness > 1.0 && branch_depth < MAX_BRANCH_DEPTH {
-                let branch_id_a = branch_id.wrapping_mul(7) ^ step as u32;
-                let branch_id_b = branch_id_a.wrapping_add(1);
-                let new_thickness_a = rng.next_f32() * 0.5 + 0.5;
-                let new_thickness_b = rng.next_f32() * 0.5 + 0.5;
-                walk(
-                    rng,
-                    tunnels,
-                    chunk_center,
-                    pos,
-                    h_rot - FRAC_PI_2,
-                    v_rot / 3.0,
-                    new_thickness_a,
-                    y_scale,
-                    floor_level,
-                    step,
-                    dist,
-                    None,
-                    branch_depth + 1,
-                    branch_id_a,
-                );
-                walk(
-                    rng,
-                    tunnels,
-                    chunk_center,
-                    pos,
-                    h_rot + FRAC_PI_2,
-                    v_rot / 3.0,
-                    new_thickness_b,
-                    y_scale,
-                    floor_level,
-                    step,
-                    dist,
-                    None,
-                    branch_depth + 1,
-                    branch_id_b,
-                );
-                // Parent stops after branching (matches MC: return).
-                break;
-            }
+        if let Some(sp) = split
+            && step == sp
+            && thickness > 1.0
+            && branch_depth < MAX_BRANCH_DEPTH
+        {
+            let branch_id_a = branch_id.wrapping_mul(7) ^ step as u32;
+            let branch_id_b = branch_id_a.wrapping_add(1);
+            let new_thickness_a = rng.next_f32() * 0.5 + 0.5;
+            let new_thickness_b = rng.next_f32() * 0.5 + 0.5;
+            walk(
+                rng,
+                tunnels,
+                chunk_center,
+                pos,
+                h_rot - FRAC_PI_2,
+                v_rot / 3.0,
+                new_thickness_a,
+                y_scale,
+                floor_level,
+                step,
+                dist,
+                None,
+                branch_depth + 1,
+                branch_id_a,
+            );
+            walk(
+                rng,
+                tunnels,
+                chunk_center,
+                pos,
+                h_rot + FRAC_PI_2,
+                v_rot / 3.0,
+                new_thickness_b,
+                y_scale,
+                floor_level,
+                step,
+                dist,
+                None,
+                branch_depth + 1,
+                branch_id_b,
+            );
+            // Parent stops after branching (matches MC: return).
+            break;
         }
 
         // MC: 1-in-4 chance to skip this step entirely. Adds spatial

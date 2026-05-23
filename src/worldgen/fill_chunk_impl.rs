@@ -207,24 +207,26 @@ impl Generator {
                     // Negate and smin so a positive SDF pulls density
                     // toward (or below) zero. smin(k>0) additionally
                     // blends nearly-touching cave volumes together.
-                    if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y && wy <= height {
-                        if approx_depth > CAVE_SURFACE_BUFFER {
-                            let sdf = caves::cave_sdf(wx, wy, wz, &cave_systems);
-                            if sdf > 0.0 {
-                                composed = caves::smin(composed, -sdf, cfg.cave.smin_k);
-                            }
-                            let trunk_sdf = caves::trunks_sdf(
-                                wx,
-                                wy,
-                                wz,
-                                &cave_systems,
-                                self.seed,
-                                cfg.cave.trunk_r,
-                                cfg.cave.trunk_prob,
-                            );
-                            if trunk_sdf > 0.0 {
-                                composed = caves::smin(composed, -trunk_sdf, cfg.cave.smin_k);
-                            }
+                    if !cave_systems.is_empty()
+                        && wy > CAVE_FLOOR_Y
+                        && wy <= height
+                        && approx_depth > CAVE_SURFACE_BUFFER
+                    {
+                        let sdf = caves::cave_sdf(wx, wy, wz, &cave_systems);
+                        if sdf > 0.0 {
+                            composed = caves::smin(composed, -sdf, cfg.cave.smin_k);
+                        }
+                        let trunk_sdf = caves::trunks_sdf(
+                            wx,
+                            wy,
+                            wz,
+                            &cave_systems,
+                            self.seed,
+                            cfg.cave.trunk_r,
+                            cfg.cave.trunk_prob,
+                        );
+                        if trunk_sdf > 0.0 {
+                            composed = caves::smin(composed, -trunk_sdf, cfg.cave.smin_k);
                         }
                     }
                     // Entrance SDF (sinkholes, skylights, cliff mouths) gets its
@@ -289,12 +291,13 @@ impl Generator {
                     // through water" and "covered rivers / lakes" by removing
                     // any solid density that density evaluation placed inside
                     // the intended water column.
-                    if let Some(wsurf) = col.water_surface_y {
-                        if wy > col.height && wy <= wsurf {
-                            depth_below_surface = None;
-                            out.set(local, Block::Air);
-                            continue;
-                        }
+                    if let Some(wsurf) = col.water_surface_y
+                        && wy > col.height
+                        && wy <= wsurf
+                    {
+                        depth_below_surface = None;
+                        out.set(local, Block::Air);
+                        continue;
                     }
 
                     let block = if !solid {
@@ -345,10 +348,10 @@ impl Generator {
         // effective run of up to (MAX_VERTICAL_AIR_RUN * 2) across the
         // boundary. This is accepted as rare and harmless; the test only
         // verifies within a single chunk.
-        for x in 0..CHUNK_DIM_U as u32 {
-            for z in 0..CHUNK_DIM_U as u32 {
+        for x in 0..CHUNK_DIM_U {
+            for z in 0..CHUNK_DIM_U {
                 let mut run = 0i32;
-                for y in 0..CHUNK_DIM_U as u32 {
+                for y in 0..CHUNK_DIM_U {
                     let pos = LocalPos(UVec3::new(x, y, z));
                     if out.get(pos) == Block::Air {
                         run += 1;
@@ -385,7 +388,7 @@ impl Generator {
         //     Spreads laterally by SURFACE_SPREAD blocks for naturalistic
         //     cave mouths.
         {
-            let dim = CHUNK_DIM_U as u32;
+            let dim = CHUNK_DIM_U;
             let chunk_origin = origin;
 
             // ── Pass A: remove ceiling grass ──────────────────────────

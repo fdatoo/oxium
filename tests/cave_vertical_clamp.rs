@@ -16,7 +16,7 @@ fn chunk_respects_configured_vertical_air_run_clamp() {
     let mut chunk = DenseChunk::empty();
     generator.fill_chunk(coord, &mut chunk);
 
-    let dim = CHUNK_DIM_U as u32;
+    let dim = CHUNK_DIM_U;
     for x in 0..dim {
         for z in 0..dim {
             let mut run = 0i32;

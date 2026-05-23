@@ -95,20 +95,16 @@ impl Generator {
         // 3×3 region neighbourhood.
         let cave_systems_count = {
             let mut n = 0usize;
-            for row in &regions.grid {
-                for slot in row {
-                    if let Some(r) = slot {
-                        for sys in &r.cave_systems {
-                            // Check only the XZ plane — count systems
-                            // that *might* touch this column regardless of Y.
-                            if sys.bb_min.x <= wx
-                                && wx <= sys.bb_max.x
-                                && sys.bb_min.z <= wz
-                                && wz <= sys.bb_max.z
-                            {
-                                n += 1;
-                            }
-                        }
+            for r in regions.grid.iter().flatten().flatten() {
+                for sys in &r.cave_systems {
+                    // Check only the XZ plane — count systems
+                    // that *might* touch this column regardless of Y.
+                    if sys.bb_min.x <= wx
+                        && wx <= sys.bb_max.x
+                        && sys.bb_min.z <= wz
+                        && wz <= sys.bb_max.z
+                    {
+                        n += 1;
                     }
                 }
             }
@@ -366,19 +362,21 @@ impl Generator {
         // Graph-cave SDF + entrance SDF. Chambers/trunks gated at wy <= height;
         // entrance SDF extended by SURFACE_BAND to match fill_chunk logic.
         let mut cave_sdf_val = 0.0_f32;
-        if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y && wy <= height {
-            if approx_depth > CAVE_SURFACE_BUFFER {
-                cave_sdf_val = cave_sdf_val.max(caves::cave_sdf(wx, wy, wz, &cave_systems));
-                cave_sdf_val = cave_sdf_val.max(caves::trunks_sdf(
-                    wx,
-                    wy,
-                    wz,
-                    &cave_systems,
-                    self.seed,
-                    cfg.cave.trunk_r,
-                    cfg.cave.trunk_prob,
-                ));
-            }
+        if !cave_systems.is_empty()
+            && wy > CAVE_FLOOR_Y
+            && wy <= height
+            && approx_depth > CAVE_SURFACE_BUFFER
+        {
+            cave_sdf_val = cave_sdf_val.max(caves::cave_sdf(wx, wy, wz, &cave_systems));
+            cave_sdf_val = cave_sdf_val.max(caves::trunks_sdf(
+                wx,
+                wy,
+                wz,
+                &cave_systems,
+                self.seed,
+                cfg.cave.trunk_r,
+                cfg.cave.trunk_prob,
+            ));
         }
         if !cave_systems.is_empty() && wy > CAVE_FLOOR_Y && wy <= height + SURFACE_BAND {
             cave_sdf_val = cave_sdf_val.max(caves::entrance_sdf(wx, wy, wz, &cave_systems));
@@ -569,7 +567,7 @@ impl Generator {
                 depth_below_surface: depth,
                 water_surface_y: col.water_surface_y,
                 seed: self.seed,
-                cfg: &cfg,
+                cfg,
                 sea_level: SEA_LEVEL,
             };
             cfg.surface.apply(&surf_ctx).unwrap_or(Block::Stone)

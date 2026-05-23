@@ -255,6 +255,7 @@ impl DensityNoise {
     /// for tree placement; the chunk-fill hot path uses
     /// [`super::cell_evaluator::CellEvaluator`] which
     /// samples a 9×9×9 corner lattice and trilerps.
+    #[allow(clippy::too_many_arguments)]
     pub fn evaluate(
         &self,
         wx: i32,
@@ -288,6 +289,7 @@ impl DensityNoise {
     /// return the first voxel `wy` where `density > 0` (topmost
     /// solid). Used by tree placement to find anchor points under
     /// 3D-density surface jitter.
+    #[allow(clippy::too_many_arguments)]
     pub fn topmost_solid(
         &self,
         h_target: f32,
@@ -401,7 +403,7 @@ mod tests {
         let d = DensityNoise::new(42, &cfg.density);
         // At y = midpoint, with offset=0 / factor=4 / jagged=0,
         // the depth term is exactly 0 so density = base_3d_noise.
-        let mid_y = ((cfg.density.y_min + cfg.density.y_max) / 2) as i32;
+        let mid_y = (cfg.density.y_min + cfg.density.y_max) / 2;
         let mut sum = 0.0_f32;
         for wx in 0..16 {
             for wz in 0..16 {

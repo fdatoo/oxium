@@ -53,7 +53,7 @@ fn vertical_connector_connects_adjacent_band_systems() {
             let bands: Vec<DepthBand> = region
                 .cave_systems
                 .iter()
-                .map(|s| infer_band_for_test(s))
+                .map(infer_band_for_test)
                 .collect();
             if !pair_is_adjacent_for_test(&bands) {
                 continue;

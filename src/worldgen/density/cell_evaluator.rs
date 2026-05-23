@@ -194,7 +194,7 @@ mod tests {
         let d = DensityNoise::new(42, &cfg.density);
         let g = DensityFn::QuarterNegative(Box::new(DensityFn::Constant(-1.0)));
         let v = g.evaluate(0, 0, 0, test_climate(), &d, &cfg.density);
-        assert!((v - (-1.0 * cfg.density.above_surface_softening)).abs() < 1e-5);
+        assert!((v - (-cfg.density.above_surface_softening)).abs() < 1e-5);
     }
 
     #[test]

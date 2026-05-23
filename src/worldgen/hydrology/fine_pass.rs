@@ -24,7 +24,7 @@ use super::macro_pass::build_macro_region;
 use super::rivers::build_segments_from_fine;
 use crate::worldgen::density::HeightmapNoise;
 use crate::worldgen::region::{
-    FineRegion, MacroCache, MacroRegionCoord, RegionCoord, bitset_get, bitset_set,
+    FineRegion, MacroCache, MacroRegionCoord, RegionCoord, RiverWidth, bitset_get, bitset_set,
 };
 use crate::worldgen::tuning::*;
 
@@ -115,6 +115,7 @@ pub fn gather_neighbour_edges(
 /// peek) so existing cardinal-neighbour regions can stitch their edge
 /// flow fields into the new region, preventing rivers from snapping to
 /// new directions at region seams.
+#[allow(clippy::too_many_arguments)]
 pub fn build_fine_hydro(
     seed: u64,
     coord: RegionCoord,
@@ -267,8 +268,8 @@ fn stamp_macro_into_fine(
                         // fine cells covered by this macro cell.
                         for dz in 0..fine_per_macro_axis {
                             for dx in 0..fine_per_macro_axis {
-                                let cx = fix as i32 + dx - fine_per_macro_axis / 2;
-                                let cz = fiz as i32 + dz - fine_per_macro_axis / 2;
+                                let cx = fix + dx - fine_per_macro_axis / 2;
+                                let cz = fiz + dz - fine_per_macro_axis / 2;
                                 if cx < 0 || cz < 0 || cx as usize >= n || cz as usize >= n {
                                     continue;
                                 }
@@ -382,7 +383,7 @@ fn extract_and_tag_interior(grid: &Grid, region: &mut FineRegion, halo: i32, inn
     for b in region.is_lake.iter_mut() {
         *b = 0;
     }
-    region.width.fill(0.0);
+    region.width.fill(RiverWidth::zero());
     region.lake_rim.fill(0);
 
     for iz in 0..inner_u {
@@ -396,7 +397,7 @@ fn extract_and_tag_interior(grid: &Grid, region: &mut FineRegion, halo: i32, inn
                 bitset_set(&mut region.is_river, dst, true);
                 let w = ((grid.flow_acc[src] as f32).sqrt() * RIVER_WIDTH_SCALE)
                     .clamp(MIN_RIVER_WIDTH, MAX_RIVER_WIDTH);
-                region.width[dst] = w;
+                region.width[dst] = RiverWidth::new(w);
             }
             // Tag as lake only when the sink-fill raised the cell by at
             // least LAKE_MIN_NATURAL_DEPTH blocks AND the cell's natural

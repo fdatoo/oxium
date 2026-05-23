@@ -243,6 +243,7 @@ impl Jobs {
     /// — that marks lighting dirty and requires the chunk's voxel
     /// light arrays to be regenerated before the next mesh job picks up
     /// fresh `light` bytes for the vertex format.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_relight(
         &self,
         coord: ChunkCoord,

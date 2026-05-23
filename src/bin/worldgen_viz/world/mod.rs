@@ -30,7 +30,9 @@ use crate::render::scene::Vertex;
 /// One filled + meshed chunk in the region.
 pub struct ChunkEntry {
     pub chunk: Arc<DenseChunk>,
+    #[allow(dead_code)]
     pub vertices: Arc<Vec<Vertex>>,
+    #[allow(dead_code)]
     pub indices: Arc<Vec<u32>>,
 }
 
@@ -211,6 +213,7 @@ impl World {
     /// the SceneRenderer). Results whose coord is no longer in
     /// `in_flight` (e.g., another regen happened mid-flight) are
     /// dropped silently.
+    #[allow(clippy::type_complexity)]
     pub fn drain_results(&mut self) -> Vec<(ChunkCoord, Arc<Vec<Vertex>>, Arc<Vec<u32>>)> {
         let mut out = Vec::new();
         while let Ok(r) = self.rx.try_recv() {
@@ -239,6 +242,7 @@ impl World {
         out
     }
 
+    #[allow(dead_code)]
     pub fn entries_len(&self) -> usize {
         self.entries.len()
     }
@@ -300,7 +304,7 @@ mod tests {
     #[test]
     fn region_chunk_count_matches_box() {
         let r = Region::new(0, 0, 2, 1);
-        let expected = (2 * 2 + 1) * (2 * 2 + 1) * (2 * 1 + 1);
+        let expected = (2 * 2 + 1) * (2 * 2 + 1) * (2 + 1);
         assert_eq!(r.chunk_count(), expected as usize);
         assert_eq!(r.coords().count(), expected as usize);
     }

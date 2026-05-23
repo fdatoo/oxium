@@ -148,8 +148,7 @@ impl Grid {
         while let Some(Item { h, ix, iz }) = heap.pop() {
             let ix = ix as i32;
             let iz = iz as i32;
-            for d in 0..8 {
-                let (dx, dz) = DIR_OFFSETS[d];
+            for (dx, dz) in DIR_OFFSETS {
                 let nx = ix + dx;
                 let nz = iz + dz;
                 if !self.in_bounds(nx, nz) {

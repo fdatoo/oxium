@@ -1,3 +1,6 @@
+// `row * ncols + col` index arithmetic (e.g. `1 * 3 + 1`) is intentional
+// — it documents the 2D-to-1D indexing formula in place.
+#![allow(clippy::identity_op)]
 use super::grid::Grid;
 use super::*;
 
@@ -183,10 +186,10 @@ fn river_width_monotonic_downstream() {
                 continue;
             }
             assert!(
-                region.width[ni] >= region.width[idx] - 1e-3,
+                region.width[ni].0 >= region.width[idx].0 - 1e-3,
                 "width decreased downstream at ({ix},{iz}) → ({nx},{nz}): {} → {}",
-                region.width[idx],
-                region.width[ni]
+                region.width[idx].0,
+                region.width[ni].0
             );
         }
     }

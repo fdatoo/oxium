@@ -83,10 +83,11 @@ pub enum ConditionSource {
         temp_min: f32,
         probability: f32,
     },
-    /// True when `ctx.water_surface_y` is set and `ctx.wy ≤ water_surface_y
-    /// - offset`. Use `offset: 0` to match any submerged voxel, or a
-    /// positive offset to match voxels that are at least `offset` blocks
-    /// below the water surface (useful for transition layers).
+    /// True when `ctx.water_surface_y` is set and `ctx.wy ≤ water_surface_y - offset`.
+    ///
+    /// Use `offset: 0` to match any submerged voxel, or a positive offset to match
+    /// voxels that are at least `offset` blocks below the water surface (useful for
+    /// transition layers).
     BelowWaterSurface {
         offset: i32,
     },
@@ -123,7 +124,7 @@ impl ConditionSource {
                 roll < *probability
             }
             ConditionSource::BelowWaterSurface { offset } => {
-                ctx.water_surface_y.map_or(false, |w| ctx.wy <= w - offset)
+                ctx.water_surface_y.is_some_and(|w| ctx.wy <= w - offset)
             }
         }
     }

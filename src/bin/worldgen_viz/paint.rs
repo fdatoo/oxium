@@ -14,9 +14,10 @@ use oxium::worldgen::Generator;
 use oxium::worldgen::probe::PaintColumn;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PaintMode {
     /// Block-type colour. Default.
+    #[default]
     Block,
     /// Categorical hue keyed on column biome.
     Biome,
@@ -27,12 +28,6 @@ pub enum PaintMode {
     HeightDelta,
     /// Hot gradient on `|∇h_pre|` magnitude.
     Slope,
-}
-
-impl Default for PaintMode {
-    fn default() -> Self {
-        PaintMode::Block
-    }
 }
 
 impl PaintMode {
@@ -123,6 +118,7 @@ impl PaintContext {
     /// valid for modes where `needs_column_data()` is false (currently
     /// only `Block`). Used by tests that don't want to spin up a
     /// Generator just to mesh a synthetic chunk.
+    #[allow(dead_code)]
     pub fn without_columns(mode: PaintMode, origin_x: i32, origin_z: i32) -> Self {
         debug_assert!(!mode.needs_column_data(), "{:?} requires column data", mode);
         Self {

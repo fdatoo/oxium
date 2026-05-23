@@ -294,7 +294,7 @@ fn draw_and_edit_curve(ui: &mut Ui, spline: &mut NestedSpline) -> (bool, Option<
             let mut best: Option<(DragTarget, f32)> = None;
             for (i, &p) in knot_px.iter().enumerate() {
                 let d = (hp - p).length();
-                if d <= KNOT_HIT_RADIUS_PX && best.map_or(true, |(_, bd)| d < bd) {
+                if d <= KNOT_HIT_RADIUS_PX && best.is_none_or(|(_, bd)| d < bd) {
                     best = Some((DragTarget::Knot(i), d));
                 }
             }
@@ -305,7 +305,7 @@ fn draw_and_edit_curve(ui: &mut Ui, spline: &mut NestedSpline) -> (bool, Option<
                     .chain(right_handle_px.iter().enumerate())
                 {
                     let d = (hp - p).length();
-                    if d <= HANDLE_HIT_RADIUS_PX && best.map_or(true, |(_, bd)| d < bd) {
+                    if d <= HANDLE_HIT_RADIUS_PX && best.is_none_or(|(_, bd)| d < bd) {
                         best = Some((DragTarget::Tangent(i), d));
                     }
                 }
@@ -350,20 +350,20 @@ fn draw_and_edit_curve(ui: &mut Ui, spline: &mut NestedSpline) -> (bool, Option<
             let mut best: Option<(DragTarget, f32)> = None;
             for (i, &p) in knot_px.iter().enumerate() {
                 let d = (pos - p).length();
-                if d <= KNOT_HIT_RADIUS_PX && best.map_or(true, |(_, bd)| d < bd) {
+                if d <= KNOT_HIT_RADIUS_PX && best.is_none_or(|(_, bd)| d < bd) {
                     best = Some((DragTarget::Knot(i), d));
                 }
             }
             if best.is_none() {
                 for (i, &p) in left_handle_px.iter().enumerate() {
                     let d = (pos - p).length();
-                    if d <= HANDLE_HIT_RADIUS_PX && best.map_or(true, |(_, bd)| d < bd) {
+                    if d <= HANDLE_HIT_RADIUS_PX && best.is_none_or(|(_, bd)| d < bd) {
                         best = Some((DragTarget::Tangent(i), d));
                     }
                 }
                 for (i, &p) in right_handle_px.iter().enumerate() {
                     let d = (pos - p).length();
-                    if d <= HANDLE_HIT_RADIUS_PX && best.map_or(true, |(_, bd)| d < bd) {
+                    if d <= HANDLE_HIT_RADIUS_PX && best.is_none_or(|(_, bd)| d < bd) {
                         best = Some((DragTarget::Tangent(i), d));
                     }
                 }
@@ -410,37 +410,37 @@ fn draw_and_edit_curve(ui: &mut Ui, spline: &mut NestedSpline) -> (bool, Option<
         }
 
         // During drag → mutate.
-        if response.dragged() {
-            if let (Some(target), Some(pos)) = (drag_target, response.interact_pointer_pos()) {
-                match target {
-                    DragTarget::Knot(idx) if idx < knots.len() => {
-                        let new_loc = x_to_input(pos.x).clamp(INPUT_RANGE.0, INPUT_RANGE.1);
-                        let new_val = y_to_value(pos.y).clamp(VALUE_RANGE.0, VALUE_RANGE.1);
-                        let current_val = knots[idx].val.evaluate(0.0, 0.0, 0.0);
-                        let delta = new_val - current_val;
-                        if (knots[idx].loc - new_loc).abs() > 1e-6 || delta.abs() > 1e-6 {
-                            knots[idx].loc = new_loc;
-                            offset_nested(&mut knots[idx].val, delta);
+        if response.dragged()
+            && let (Some(target), Some(pos)) = (drag_target, response.interact_pointer_pos())
+        {
+            match target {
+                DragTarget::Knot(idx) if idx < knots.len() => {
+                    let new_loc = x_to_input(pos.x).clamp(INPUT_RANGE.0, INPUT_RANGE.1);
+                    let new_val = y_to_value(pos.y).clamp(VALUE_RANGE.0, VALUE_RANGE.1);
+                    let current_val = knots[idx].val.evaluate(0.0, 0.0, 0.0);
+                    let delta = new_val - current_val;
+                    if (knots[idx].loc - new_loc).abs() > 1e-6 || delta.abs() > 1e-6 {
+                        knots[idx].loc = new_loc;
+                        offset_nested(&mut knots[idx].val, delta);
+                        dirty = true;
+                    }
+                }
+                DragTarget::Tangent(idx) if idx < knots.len() => {
+                    // Pixel vector from knot to drag pos → slope.
+                    let kp = knot_px[idx];
+                    let dx_px = pos.x - kp.x;
+                    let dy_px = pos.y - kp.y;
+                    if dx_px.abs() > 1.0 {
+                        let input_dx = dx_px / pixel_per_input;
+                        let value_dy = -dy_px / pixel_per_value;
+                        let new_slope = (value_dy / input_dx).clamp(-8.0, 8.0);
+                        if (knots[idx].slope - new_slope).abs() > 1e-4 {
+                            knots[idx].slope = new_slope;
                             dirty = true;
                         }
                     }
-                    DragTarget::Tangent(idx) if idx < knots.len() => {
-                        // Pixel vector from knot to drag pos → slope.
-                        let kp = knot_px[idx];
-                        let dx_px = pos.x - kp.x;
-                        let dy_px = pos.y - kp.y;
-                        if dx_px.abs() > 1.0 {
-                            let input_dx = dx_px / pixel_per_input;
-                            let value_dy = -dy_px / pixel_per_value;
-                            let new_slope = (value_dy / input_dx).clamp(-8.0, 8.0);
-                            if (knots[idx].slope - new_slope).abs() > 1e-4 {
-                                knots[idx].slope = new_slope;
-                                dirty = true;
-                            }
-                        }
-                    }
-                    _ => {}
                 }
+                _ => {}
             }
         }
 

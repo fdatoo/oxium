@@ -329,7 +329,7 @@ pub fn surface_panel(ui: &mut Ui, cfg: &mut WorldgenConfig) -> bool {
     let mut id_counter: u32 = 0;
     let mut changed = false;
     egui::ScrollArea::vertical()
-        .id_source("surface_rule_tree")
+        .id_salt("surface_rule_tree")
         .show(ui, |ui| {
             changed |= render_rule(ui, &mut cfg.surface, 0, &mut id_counter);
         });
@@ -345,7 +345,7 @@ pub fn surface_panel(ui: &mut Ui, cfg: &mut WorldgenConfig) -> bool {
                     indent_label(ui, depth, "→");
                     *id_counter += 1;
                     let prev = *b;
-                    egui::ComboBox::from_id_source(format!("surf_blk_{id_counter}"))
+                    egui::ComboBox::from_id_salt(format!("surf_blk_{id_counter}"))
                         .selected_text(format!("{b:?}"))
                         .width(110.0)
                         .show_ui(ui, |ui| {

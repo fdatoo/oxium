@@ -7,18 +7,13 @@ use oxium::worldgen::config::WorldgenConfig;
 use std::time::Instant;
 
 /// Which visualisation tab is active in the right-panel header.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RightTab {
     /// 2D top-down map with stage-selector + legend.
+    #[default]
     Map,
     /// Cut-plane cross-section.
     CrossSection,
-}
-
-impl Default for RightTab {
-    fn default() -> Self {
-        RightTab::Map
-    }
 }
 
 pub struct AppState {

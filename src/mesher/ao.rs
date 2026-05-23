@@ -124,7 +124,7 @@ mod tests {
         // sit one step along the air side (y=+1) in -x and -z.
         let solids: [(i32, i32, i32); 2] = [(-1, 1, 0), (0, 1, -1)];
         let ao = corner_ao_at(Face::PosY, |x, y, z| {
-            if solids.iter().any(|s| *s == (x, y, z)) {
+            if solids.contains(&(x, y, z)) {
                 Some(Block::Stone)
             } else {
                 Some(Block::Air)
@@ -172,7 +172,7 @@ mod tests {
         };
 
         // Cell A at (0, 0, 0). Its corner 1 is at world (1, 1, 0).
-        let ao_a = corner_ao_at(Face::PosY, |dx, dy, dz| q(dx, dy, dz));
+        let ao_a = corner_ao_at(Face::PosY, q);
         // Cell B at (1, 0, 0). Its corner 0 is at world (1, 1, 0).
         let ao_b = corner_ao_at(Face::PosY, |dx, dy, dz| q(1 + dx, dy, dz));
 
@@ -198,7 +198,7 @@ mod tests {
                 Some(Block::Air)
             }
         };
-        let ao_a = corner_ao_at(Face::PosX, |dx, dy, dz| q(dx, dy, dz));
+        let ao_a = corner_ao_at(Face::PosX, q);
         let ao_b = corner_ao_at(Face::PosX, |dx, dy, dz| q(dx, 1 + dy, dz));
         assert_eq!(
             ao_a[3], ao_b[0],

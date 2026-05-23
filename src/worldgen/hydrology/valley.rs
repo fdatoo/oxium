@@ -27,9 +27,9 @@ pub fn valley_carve(
     for_each_segment(region, neighbours, |seg| {
         let d = perpendicular_distance(wx, wz, seg, seed);
         let width = if seg.mouth {
-            seg.width * MOUTH_FLARE_MULT
+            seg.width.0 * MOUTH_FLARE_MULT
         } else {
-            seg.width
+            seg.width.0
         };
         let half_w = width * 0.5;
         let half_valley = width * VALLEY_HALF_WIDTH_MULT;
@@ -57,6 +57,7 @@ pub fn valley_carve(
 ///
 /// `origin_wx` and `origin_wz` are the world-space X/Z of the chunk's
 /// (0,0) column (i.e. `chunk_coord.x * 32` and `chunk_coord.z * 32`).
+#[allow(clippy::needless_range_loop)]
 pub fn valley_grid(
     origin_wx: i32,
     origin_wz: i32,
@@ -69,9 +70,9 @@ pub fn valley_grid(
 
     for_each_segment(region, neighbours, |seg| {
         let width = if seg.mouth {
-            seg.width * MOUTH_FLARE_MULT
+            seg.width.0 * MOUTH_FLARE_MULT
         } else {
-            seg.width
+            seg.width.0
         };
         let half_w = width * 0.5;
         let half_valley = width * VALLEY_HALF_WIDTH_MULT;
@@ -161,11 +162,9 @@ pub(crate) fn for_each_segment<F: FnMut(&RiverSegment)>(
     for s in &region.segments {
         f(s);
     }
-    for opt in neighbours {
-        if let Some(r) = opt {
-            for s in &r.segments {
-                f(s);
-            }
+    for r in neighbours.iter().flatten() {
+        for s in &r.segments {
+            f(s);
         }
     }
 }
@@ -196,7 +195,7 @@ pub(crate) fn perpendicular_distance(wx: i32, wz: i32, seg: &RiverSegment, seed:
     // projected point — substitute for a real Simplex meander to
     // avoid pulling another noise field per query. Same shape /
     // smoothness as a hash-noise interpolation.
-    let amp = (seg.width * MEANDER_AMP_PER_WIDTH).min(MAX_MEANDER_AMP);
+    let amp = (seg.width.0 * MEANDER_AMP_PER_WIDTH).min(MAX_MEANDER_AMP);
     // Sample a smooth 1D noise along the segment's parametric `t`:
     // hash adjacent buckets and linearly interpolate.
     //
