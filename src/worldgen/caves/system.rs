@@ -1,7 +1,7 @@
 //! Cave system builder — Poisson-disk chamber placement, Kruskal MST tunnel
 //! graph, entrance rolling, and the public `build_systems_for_region` entry
 //! point.
-use crate::worldgen::hash::{mix_range, mix_u32};
+use crate::worldgen::hash::{mix_range, mix_u32, mix_unit};
 use crate::worldgen::heightmap::HeightmapNoise;
 use crate::worldgen::region::{CaveSystem, Chamber, Entrance, EntranceKind, FineRegion, RegionCoord, Tunnel};
 use crate::worldgen::tuning::*;
@@ -10,7 +10,7 @@ use super::style::{
     CaveStyle, DepthBand, pick_style,
     SALT_BB_ORIGIN_X, SALT_BB_ORIGIN_Z, SALT_CHAMBER_COUNT, SALT_EXTRA_LOOPS, SALT_SYSTEM_COUNT,
 };
-use super::connectors::{build_vertical_connectors};
+use super::connectors::build_vertical_connectors;
 use super::pools::derive_cave_pools;
 
 /// Per-style parameter set extracted from the style table.
@@ -86,49 +86,19 @@ pub fn build_systems_for_region(
     derive_cave_pools(seed, region);
 }
 
-/// Build one cave system inside region `coord`.
+/// Roll the system bounding box X/Z/Y within the region.
 ///
-/// ### Chamber placement (Poisson-disk rejection sampling)
+/// The box is allowed to straddle the region boundary — neighbouring regions
+/// consult systems via the 3×3 region neighbourhood at chunk fill time.
 ///
-/// Candidate chamber centers are drawn uniformly at random inside the
-/// system bounding box. A candidate is rejected if it lies within
-/// `mean_radius × POISSON_MIN_SPACING_MULT` of any already-placed
-/// chamber. This minimum-distance constraint prevents rooms from
-/// overlapping or crowding into impenetrable clusters. Each attempt
-/// increments an independent counter; after `max_tries` attempts the
-/// sampling stops — if a target chamber count can't be reached, the
-/// system uses however many fit, down to a minimum of 1.
-///
-/// ### Tunnel graph (Kruskal's MST)
-///
-/// After all chambers are placed, every pair of chambers becomes a
-/// candidate edge weighted by their 3D Euclidean distance. Kruskal's
-/// minimum spanning tree algorithm selects the subset of edges that
-/// connects all chambers with the smallest total tunnel length. Path-
-/// compression union-find gives near-O(α(n)) per edge, amortised over
-/// the whole system. Additionally `MST_EXTRA_LOOPS.0..=1` short non-MST
-/// edges are added back to introduce cycles — without loops the cave
-/// graph is a tree and every room has exactly one entrance/exit, which
-/// feels unnatural.
-fn build_system(
+/// Returns `(bb_min, bb_max)` as world-space `IVec3` corners (inclusive).
+fn roll_bounding_box(
     seed: u64,
     coord: RegionCoord,
     system_idx: i32,
-    heightmap: &HeightmapNoise,
-    climate: &crate::worldgen::config::ClimateConfig,
-    density: &crate::worldgen::config::DensityConfig,
-    cave_cfg: &crate::worldgen::config::CaveConfig,
-) -> CaveSystem {
-    let band = DepthBand::pick(seed, system_idx, coord);
-    let (y_min, y_max) = band.range();
-
-    // Roll the style for this system.
-    let style = pick_style(seed, coord, system_idx, band, cave_cfg);
-    let sp = style_params(style, &cave_cfg.style_table);
-
-    // Bounding-box footprint inside the region. The box is allowed to
-    // straddle the region boundary — neighbouring regions consult our
-    // systems via the 3 × 3 region neighbourhood at chunk fill time.
+    y_min: i32,
+    y_max: i32,
+) -> (IVec3, IVec3) {
     let bb_size = IVec3::new(
         CAVE_SYSTEM_BB_HALF_EXTENT,
         (y_max - y_min).min(64),
@@ -146,7 +116,26 @@ fn build_system(
     let bb_origin_y = y_min;
     let bb_min = IVec3::new(bb_origin_x, bb_origin_y, bb_origin_z);
     let bb_max = bb_min + bb_size;
+    (bb_min, bb_max)
+}
 
+/// Poisson-disk rejection sampling for chamber centers within the bounding box.
+///
+/// Candidate centers are drawn uniformly at random; a candidate is rejected
+/// if it lies within `mean_radius × POISSON_MIN_SPACING_MULT` of any
+/// already-placed chamber. Sampling stops after `max_tries = 200` attempts
+/// regardless of whether the target count was reached — the system uses
+/// however many fit, down to a minimum of 1.
+fn sample_chambers(
+    seed: u64,
+    coord: RegionCoord,
+    system_idx: i32,
+    bb_min: IVec3,
+    bb_max: IVec3,
+    style: CaveStyle,
+    sp: &StyleParams,
+    cave_cfg: &crate::worldgen::config::CaveConfig,
+) -> Vec<Chamber> {
     // Chamber count — from style table.
     let (cn_min, cn_max) = sp.chamber_count;
     let chamber_count = cn_min
@@ -237,7 +226,22 @@ fn build_system(
         }
         chambers.push(Chamber { center, radii });
     }
+    chambers
+}
 
+/// Build a tunnel graph connecting all chambers via Kruskal's MST, then
+/// add `extra_loop_count` short non-MST edges to introduce cycles.
+///
+/// Each edge becomes a 4-point Catmull-Rom-friendly control polyline with
+/// two domain-warped perpendicular offsets that break the otherwise straight
+/// line into a meander.
+fn connect_chambers_mst(
+    seed: u64,
+    coord: RegionCoord,
+    system_idx: i32,
+    chambers: &[Chamber],
+    sp: &StyleParams,
+) -> Vec<Tunnel> {
     // MST via Kruskal.
     let mut tunnels: Vec<Tunnel> = Vec::new();
     if chambers.len() >= 2 {
@@ -342,11 +346,32 @@ fn build_system(
             });
         }
     }
+    tunnels
+}
 
+/// Roll Sinkhole / CliffMouth / Skylight entrances for each chamber that
+/// passes the band-weighted probability gate.
+///
+/// Sinkhole wins if the chamber top is within `SINKHOLE_DEPTH_MAX` of the
+/// surface. CliffMouth wins if a cliff column is reachable within
+/// `CLIFF_ENTRANCE_DIST` in any of 16 radial directions. Skylight wins
+/// if the chamber top is `SKYLIGHT_DEPTH_MIN–SKYLIGHT_DEPTH_MAX` below
+/// the surface. Exactly one entrance per chamber; priority Sinkhole →
+/// CliffMouth → Skylight.
+fn roll_entrances(
+    seed: u64,
+    coord: RegionCoord,
+    system_idx: i32,
+    chambers: &[Chamber],
+    band: DepthBand,
+    heightmap: &HeightmapNoise,
+    climate: &crate::worldgen::config::ClimateConfig,
+    density: &crate::worldgen::config::DensityConfig,
+) -> Vec<Entrance> {
     // Entrance rolls.
     let mut entrances: Vec<Entrance> = Vec::new();
     for (ci, chamber) in chambers.iter().enumerate() {
-        let try_roll = crate::worldgen::hash::mix_unit(seed, &[coord.x, coord.z, system_idx, 70, ci as i32]);
+        let try_roll = mix_unit(seed, &[coord.x, coord.z, system_idx, 70, ci as i32]);
         if try_roll >= band.entrance_prob() {
             continue;
         }
@@ -401,13 +426,27 @@ fn build_system(
             });
         }
     }
+    entrances
+}
 
+/// Expand the initial bounding box to include all chamber ellipsoids, tunnel
+/// capsule control points, and entrance shaft footprints.
+///
+/// The AABB must conservatively cover everything the SDF functions might
+/// carve, so the chunk-side intersection test never misses a carve.
+fn finalize_aabb(
+    bb_min: IVec3,
+    bb_max: IVec3,
+    chambers: &[Chamber],
+    tunnels: &[Tunnel],
+    entrances: &[Entrance],
+) -> (IVec3, IVec3) {
     // Compute the system's actual bounding box including chambers,
     // tunnels, and any entrance shafts so the chunk-side AABB
     // intersection test catches everything we might carve.
     let mut bb_min = bb_min;
     let mut bb_max = bb_max;
-    for c in &chambers {
+    for c in chambers {
         let cmin = (c.center - c.radii - Vec3::splat(1.0)).floor();
         let cmax = (c.center + c.radii + Vec3::splat(1.0)).ceil();
         bb_min.x = bb_min.x.min(cmin.x as i32);
@@ -417,7 +456,7 @@ fn build_system(
         bb_max.y = bb_max.y.max(cmax.y as i32);
         bb_max.z = bb_max.z.max(cmax.z as i32);
     }
-    for t in &tunnels {
+    for t in tunnels {
         for p in &t.control_points {
             bb_min.x = bb_min.x.min((p.x - t.radius - 1.0) as i32);
             bb_min.y = bb_min.y.min((p.y - t.radius - 1.0) as i32);
@@ -427,7 +466,7 @@ fn build_system(
             bb_max.z = bb_max.z.max((p.z + t.radius + 1.0) as i32);
         }
     }
-    for e in &entrances {
+    for e in entrances {
         // Vertical shaft extent — clip downward to chamber, upward to
         // surface.
         bb_min.y = bb_min.y.min(e.surface.y);
@@ -437,6 +476,54 @@ fn build_system(
         bb_min.z = bb_min.z.min(e.surface.z - ENTRANCE_BB_EXPAND);
         bb_max.z = bb_max.z.max(e.surface.z + ENTRANCE_BB_EXPAND);
     }
+    (bb_min, bb_max)
+}
+
+/// Build one cave system inside region `coord`.
+///
+/// ### Chamber placement (Poisson-disk rejection sampling)
+///
+/// Candidate chamber centers are drawn uniformly at random inside the
+/// system bounding box. A candidate is rejected if it lies within
+/// `mean_radius × POISSON_MIN_SPACING_MULT` of any already-placed
+/// chamber. This minimum-distance constraint prevents rooms from
+/// overlapping or crowding into impenetrable clusters. Each attempt
+/// increments an independent counter; after `max_tries` attempts the
+/// sampling stops — if a target chamber count can't be reached, the
+/// system uses however many fit, down to a minimum of 1.
+///
+/// ### Tunnel graph (Kruskal's MST)
+///
+/// After all chambers are placed, every pair of chambers becomes a
+/// candidate edge weighted by their 3D Euclidean distance. Kruskal's
+/// minimum spanning tree algorithm selects the subset of edges that
+/// connects all chambers with the smallest total tunnel length. Path-
+/// compression union-find gives near-O(α(n)) per edge, amortised over
+/// the whole system. Additionally `MST_EXTRA_LOOPS.0..=1` short non-MST
+/// edges are added back to introduce cycles — without loops the cave
+/// graph is a tree and every room has exactly one entrance/exit, which
+/// feels unnatural.
+fn build_system(
+    seed: u64,
+    coord: RegionCoord,
+    system_idx: i32,
+    heightmap: &HeightmapNoise,
+    climate: &crate::worldgen::config::ClimateConfig,
+    density: &crate::worldgen::config::DensityConfig,
+    cave_cfg: &crate::worldgen::config::CaveConfig,
+) -> CaveSystem {
+    let band = DepthBand::pick(seed, system_idx, coord);
+    let (y_min, y_max) = band.range();
+
+    // Roll the style for this system.
+    let style = pick_style(seed, coord, system_idx, band, cave_cfg);
+    let sp = style_params(style, &cave_cfg.style_table);
+
+    let (bb_min, bb_max) = roll_bounding_box(seed, coord, system_idx, y_min, y_max);
+    let chambers = sample_chambers(seed, coord, system_idx, bb_min, bb_max, style, &sp, cave_cfg);
+    let tunnels = connect_chambers_mst(seed, coord, system_idx, &chambers, &sp);
+    let entrances = roll_entrances(seed, coord, system_idx, &chambers, band, heightmap, climate, density);
+    let (bb_min, bb_max) = finalize_aabb(bb_min, bb_max, &chambers, &tunnels, &entrances);
 
     CaveSystem {
         bb_min,
