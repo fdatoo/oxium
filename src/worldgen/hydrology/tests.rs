@@ -1,13 +1,14 @@
 use super::*;
+use super::grid::Grid;
 
 fn make_grid(n: usize, h: Vec<i16>) -> Grid {
     Grid {
         n,
         h_fill: vec![0i16; n * n],
-        flow_dir: vec![DIR_NONE; n * n],
+        flow_dir: vec![grid::DIR_NONE; n * n],
         flow_acc: vec![0u32; n * n],
         trunk_injection: vec![0u32; n * n],
-        inbound_dir: vec![DIR_NONE; n * n],
+        inbound_dir: vec![grid::DIR_NONE; n * n],
         inbound_acc: vec![0u32; n * n],
         h,
     }
@@ -79,6 +80,9 @@ fn flow_acc_concentrates_on_lowest_path() {
 
 #[test]
 fn build_macro_region_is_deterministic() {
+    use super::macro_pass::build_macro_region;
+    use crate::worldgen::heightmap::HeightmapNoise;
+    use crate::worldgen::region::MacroRegionCoord;
     let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
     let hm = HeightmapNoise::new(42, &cfg.climate);
     let coord = MacroRegionCoord { x: 0, z: 0 };
@@ -95,6 +99,10 @@ fn fine_hydro_produces_some_river_cells() {
     // Scan a 5 × 5 grid of regions around the origin. At least one
     // should produce river cells. Some regions are pure ocean and
     // won't have any; we just need one with land + drainage.
+    use super::fine_pass::build_fine_hydro;
+    use crate::worldgen::heightmap::HeightmapNoise;
+    use crate::worldgen::region::{RegionCoord, bitset_get};
+    use crate::worldgen::tuning::FINE_CELLS_PER_REGION;
     let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
     let hm = HeightmapNoise::new(42, &cfg.climate);
     let macro_cache = crate::worldgen::region::fresh_macro_cache();
@@ -131,6 +139,11 @@ fn river_width_monotonic_downstream() {
     // (which is monotone in acc) should too. Pick any river cell
     // in a built region and chase its flow_dir; widths must be
     // non-decreasing.
+    use super::fine_pass::build_fine_hydro;
+    use super::grid::{DIR_NONE, DIR_OFFSETS};
+    use crate::worldgen::heightmap::HeightmapNoise;
+    use crate::worldgen::region::{RegionCoord, bitset_get};
+    use crate::worldgen::tuning::FINE_CELLS_PER_REGION;
     let cfg = crate::worldgen::config::WorldgenConfig::bundled_default().unwrap();
     let hm = HeightmapNoise::new(42, &cfg.climate);
     let macro_cache = crate::worldgen::region::fresh_macro_cache();
