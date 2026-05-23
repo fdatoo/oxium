@@ -58,7 +58,7 @@
 use crate::voxel::block::Block;
 use crate::voxel::chunk::{ChunkLightInputs, DenseChunk};
 use crate::voxel::coords::{CHUNK_DIM_U, ChunkCoord, LocalPos};
-use crate::worldgen::tuning::{FINE_REGION_SIZE, MAX_TERRAIN_Y, TREE_RATE_TROPICAL};
+use crate::worldgen::tuning::{FINE_REGION_SIZE, MAX_TERRAIN_Y};
 use glam::UVec3;
 use noise::{Fbm, MultiFractal, NoiseFn, Simplex};
 
@@ -72,6 +72,7 @@ use noise::{Fbm, MultiFractal, NoiseFn, Simplex};
 //   * `hash`    — deterministic mixer used by plates / trees / caves.
 //   * `region`  — LRU caches + region data structs.
 pub mod aquifer;
+pub mod biome;
 pub mod carver;
 pub mod caves;
 pub mod climate;
@@ -94,6 +95,10 @@ pub mod tuning;
 /// callers outside the worldgen module (renderer, persistence, tests)
 /// don't have to import `tuning::SEA_LEVEL` directly.
 pub use crate::worldgen::tuning::SEA_LEVEL;
+// Re-export Biome and TreeKind so callers at `worldgen::Biome` continue
+// to work after the type moved to `biome.rs`.
+pub use biome::Biome;
+use biome::TreeKind;
 
 // Compatibility re-exports: external callers that import
 // `oxium::worldgen::heightmap::HeightmapNoise` (e.g. integration
@@ -127,7 +132,7 @@ pub mod density_graph {
 use crate::worldgen::tuning::{
     CAVE_BAND_MIDDLE, CAVE_BAND_SHALLOW, CAVE_FLOOR_Y, CAVE_SDF_INTENSITY, CAVE_SURFACE_BUFFER,
     MAX_VERTICAL_AIR_RUN, MOUTH_FLARE_MULT, SNOW_LINE, SURFACE_BAND, SURFACE_SPREAD,
-    TREE_CELL_SIZE, TREE_MARGIN, TREE_RATE_FOREST, TREE_RATE_PLAINS,
+    TREE_CELL_SIZE, TREE_MARGIN,
 };
 
 /// Pre-built noise fields for one world seed.
@@ -1877,60 +1882,6 @@ pub struct ColumnData {
     pub water_surface_y: Option<i32>,
 }
 
-/// Discrete biome label assigned to each column. The set is small on
-/// purpose — every variant has a distinct visual signature (different
-/// surface block or noticeably different tree density), so the
-/// difference between biomes reads from a screenshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub enum Biome {
-    /// Cold column. Snow on the surface; no trees grow here.
-    Tundra,
-    /// Cold *and* humid. Same Snow surface as Tundra but trees do
-    /// grow (taiga / boreal forest analogue).
-    SnowyForest,
-    /// Temperate, dry. Grass surface, very sparse trees — open
-    /// rolling fields.
-    Plains,
-    /// Temperate, humid. Grass surface, dense tree cover.
-    Forest,
-    /// Hot, dry. Sand surface, no trees.
-    Desert,
-    /// Hot, humid (new in PR 5). Grass surface, denser tree cover
-    /// than Forest — placeholder for the future palm/jungle pass.
-    /// Palm-shape trees are stamped here via `TreeKind::Palm`.
-    Tropical,
-}
-
-impl Biome {
-    /// Probability (0..100) that a `TREE_CELL_SIZE × TREE_CELL_SIZE`
-    /// patch in this biome rolls a tree. `None` for biomes that
-    /// don't host trees at all.
-    fn tree_rate_percentile(self) -> Option<u32> {
-        match self {
-            Biome::Tundra | Biome::Desert => None,
-            Biome::Plains => Some(TREE_RATE_PLAINS),
-            Biome::Forest | Biome::SnowyForest => Some(TREE_RATE_FOREST),
-            Biome::Tropical => Some(TREE_RATE_TROPICAL),
-        }
-    }
-
-    /// Which tree shape to stamp in this biome's cells. Oak for
-    /// temperate / boreal, Palm for tropical.
-    fn tree_kind(self) -> TreeKind {
-        match self {
-            Biome::Tropical => TreeKind::Palm,
-            _ => TreeKind::Oak,
-        }
-    }
-}
-
-/// Tree shape selector. PR 5 introduces palms for `Tropical`;
-/// follow-up PRs may add jungle / pine / palm-specific blocks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TreeKind {
-    Oak,
-    Palm,
-}
 
 /// 3 × 3 grid of fine regions centered on a chunk's origin region.
 /// Pre-fetched at the start of `fill_chunk` so the per-column
