@@ -6,20 +6,15 @@
 //! Hidden flag `--screenshot-and-exit <path>` is still here: it renders one
 //! offscreen frame from the live camera state and saves a PNG.
 
-// Pure engine modules live in the `oxium` library crate so integration
-// tests can drive them headlessly. Re-export them at the binary's crate
-// root so `crate::voxel::…` references in our `app` / `ecs` / `render`
-// submodules continue to resolve without rewriting paths everywhere.
-pub use oxium::{command, jobs, lighting, mesher, persistence, physics, voxel, worldgen};
-
-// Binary-only modules — they import `winit`/`wgpu` directly and so
-// aren't part of the library surface.
-mod app;
-mod ecs;
-mod input_engine;
-mod profiler;
-mod render;
-mod ui;
+// All engine modules now live in the `oxium` library crate. Re-export them
+// at the binary's crate root so `crate::*` paths in main.rs itself continue
+// to resolve (e.g. `crate::ecs::GameEcs` in `camera_from_ecs`). The windowed
+// modules (app/ecs/render/…) were moved from `mod X;` declarations here to
+// `pub mod X;` in lib.rs; pure modules were already there.
+pub use oxium::{
+    app, command, ecs, input_engine, jobs, lighting, mesher, persistence, physics, profiler,
+    render, ui, voxel, worldgen,
+};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -594,87 +589,10 @@ impl ApplicationHandler for App {
     }
 }
 
-/// Pull `(eye, yaw, pitch)` from the player entity in the ECS.
-fn camera_from_ecs(ecs: &crate::ecs::GameEcs) -> (Vec3, f32, f32) {
-    use crate::ecs::components::{Camera, Position};
-    let mut q = ecs
-        .world
-        .query_one::<(&Position, &Camera)>(ecs.player)
-        .unwrap();
-    let (pos, cam) = q.get().unwrap();
-    (pos.0 + cam.eye_offset, cam.yaw, cam.pitch)
-}
-
-/// Render one frame to an offscreen texture matching the surface format
-/// and save it as a PNG.
-#[allow(clippy::too_many_arguments)]
-fn capture_offscreen(
-    renderer: &render::Renderer,
-    path: &std::path::Path,
-    eye: Vec3,
-    yaw: f32,
-    pitch: f32,
-    sun_dir: [f32; 3],
-    sun_intensity: f32,
-    time: f32,
-    ui: Option<&crate::ui::Ui>,
-) -> anyhow::Result<()> {
-    let width = renderer.gpu.surface_cfg.width;
-    let height = renderer.gpu.surface_cfg.height;
-    let format = renderer.gpu.surface_cfg.format;
-
-    let texture = renderer
-        .gpu
-        .device
-        .create_texture(&wgpu::TextureDescriptor {
-            label: Some("screenshot-target"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    let aspect = width as f32 / height.max(1) as f32;
-    // Capture the HUD too so screenshots can verify HUD layout.
-    // Build a representative HudFrame using a fixed-ish FPS readout
-    // (the real metric requires multiple live frames; the screenshot
-    // path runs in one shot after warmup).
-    let registry = crate::voxel::block::BlockRegistry::new();
-    let perf = crate::app::PerfSnapshot::default();
-    let mut hud =
-        crate::render::hud::build_hud((width, height), 60.0, eye, 0, &registry, &perf, None);
-    if let Some(ui) = ui {
-        ui.draw_overlay((width, height), &mut hud);
-    }
-    renderer.render_to_view(
-        &view,
-        eye,
-        yaw,
-        pitch,
-        aspect,
-        sun_dir,
-        sun_intensity,
-        time,
-        Some(&hud),
-    );
-
-    render::screenshot::capture_texture_to_png(
-        &renderer.gpu.device,
-        &renderer.gpu.queue,
-        &texture,
-        format,
-        width,
-        height,
-        path,
-    )
-}
+// camera_from_ecs and capture_offscreen have moved to `src/app.rs` (pub) so
+// `oxium-probe capture` can share the same implementation. Forward here so
+// call sites in main.rs don't need to change.
+use app::{camera_from_ecs, capture_offscreen};
 
 fn grab_cursor(window: &winit::window::Window) {
     // Prefer Locked (cursor is pinned, doesn't move at all). If the

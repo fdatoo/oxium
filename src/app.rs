@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::window::Window;
+use wgpu;
 
 use crate::ecs::GameEcs;
 use crate::jobs::Jobs;
@@ -924,4 +925,108 @@ impl Drop for AppState {
     fn drop(&mut self) {
         self.flush_modified();
     }
+}
+
+// ── Capture helpers ───────────────────────────────────────────────────────────
+//
+// Shared between the main binary's `--screenshot-and-exit` path and the
+// `oxium-probe capture` subcommand.
+
+/// Pull `(eye, yaw, pitch)` from the player entity in the ECS.
+///
+/// Eye is in world space (position + camera eye offset).
+/// Yaw and pitch are in radians, matching the convention used by
+/// [`Renderer::render_to_view`].
+pub fn camera_from_ecs(ecs: &crate::ecs::GameEcs) -> (glam::Vec3, f32, f32) {
+    use crate::ecs::components::{Camera, Position};
+    let mut q = ecs
+        .world
+        .query_one::<(&Position, &Camera)>(ecs.player)
+        .unwrap();
+    let (pos, cam) = q.get().unwrap();
+    (pos.0 + cam.eye_offset, cam.yaw, cam.pitch)
+}
+
+/// Apply a look direction to the player's camera component in the ECS.
+///
+/// `yaw` and `pitch` are in radians. This is the programmatic counterpart
+/// of mouse-look; use it from capture tools that need to point the camera at
+/// a specific target without going through `InputEngine`.
+pub fn set_camera_look(ecs: &mut crate::ecs::GameEcs, yaw: f32, pitch: f32) {
+    use crate::ecs::components::Camera;
+    for (_, cam) in ecs.world.query::<&mut Camera>().iter() {
+        cam.yaw = yaw;
+        cam.pitch = pitch.clamp(-1.553, 1.553);
+    }
+}
+
+/// Render one frame to an offscreen texture matching the surface format
+/// and save it as a PNG.
+///
+/// The shader animation clock (`time`) should be zeroed for deterministic
+/// captures so cloud/water/caustic animation phases don't vary between runs.
+#[allow(clippy::too_many_arguments)]
+pub fn capture_offscreen(
+    renderer: &crate::render::Renderer,
+    path: &std::path::Path,
+    eye: glam::Vec3,
+    yaw: f32,
+    pitch: f32,
+    sun_dir: [f32; 3],
+    sun_intensity: f32,
+    time: f32,
+    ui: Option<&crate::ui::Ui>,
+) -> anyhow::Result<()> {
+    use crate::render::hud::build_hud;
+    use crate::render::screenshot::capture_texture_to_png;
+
+    let width = renderer.gpu.surface_cfg.width;
+    let height = renderer.gpu.surface_cfg.height;
+    let format = renderer.gpu.surface_cfg.format;
+
+    let texture = renderer
+        .gpu
+        .device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("screenshot-target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let aspect = width as f32 / height.max(1) as f32;
+    let registry = crate::voxel::block::BlockRegistry::new();
+    let perf = PerfSnapshot::default();
+    let mut hud = build_hud((width, height), 60.0, eye, 0, &registry, &perf, None);
+    if let Some(ui) = ui {
+        ui.draw_overlay((width, height), &mut hud);
+    }
+    renderer.render_to_view(
+        &view,
+        eye,
+        yaw,
+        pitch,
+        aspect,
+        sun_dir,
+        sun_intensity,
+        time,
+        Some(&hud),
+    );
+    capture_texture_to_png(
+        &renderer.gpu.device,
+        &renderer.gpu.queue,
+        &texture,
+        format,
+        width,
+        height,
+        path,
+    )
 }

@@ -1,16 +1,21 @@
 //! oxium — single-player voxel sandbox.
 //!
-//! This file exposes the *pure* engine modules — those that don't depend on
-//! `winit` or a live `wgpu` device — as a library so integration tests and
-//! external tools can construct a World, run lighting, mesh chunks, etc.,
-//! without bringing up a window.
+//! This crate is split into two surfaces:
 //!
-//! The binary side of the crate (windowing, ECS scheduling, GPU rendering)
-//! lives in `src/main.rs` plus the `app`, `ecs`, and `render` modules and
-//! is **not** re-exported here. Those modules pull in the entire
-//! `winit`/`wgpu` stack and we deliberately keep the library footprint
-//! small.
+//! **Pure engine modules** (no `winit`/`wgpu` dependency at the module level):
+//! `command`, `jobs`, `lighting`, `mesher`, `persistence`, `physics`,
+//! `viz_render`, `voxel`, `worldgen`. Integration tests and pure tooling
+//! (e.g. `oxium-probe inspect`) can import only these without bringing up a
+//! window or GPU device.
+//!
+//! **Windowed engine modules** (depend on `winit`/`wgpu`): `app`, `ecs`,
+//! `input_engine`, `profiler`, `render`, `ui`. Exposed here so the
+//! `oxium-probe capture` subcommand can drive the renderer without
+//! duplicating the modules. These modules must not be imported by pure
+//! library consumers — bring them in only from binaries or integration tests
+//! that boot a full render context.
 
+// ── Pure modules (no windowing dependency) ────────────────────────────────────
 pub mod command;
 pub mod jobs;
 pub mod lighting;
@@ -20,3 +25,13 @@ pub mod physics;
 pub mod viz_render;
 pub mod voxel;
 pub mod worldgen;
+
+// ── Windowed modules (winit + wgpu) ──────────────────────────────────────────
+// These are re-exported from main.rs via `pub use oxium::{app, ecs, …}` so
+// that `crate::*` paths inside those modules continue to resolve correctly.
+pub mod app;
+pub mod ecs;
+pub mod input_engine;
+pub mod profiler;
+pub mod render;
+pub mod ui;

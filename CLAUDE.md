@@ -58,6 +58,19 @@ cargo run --release --bin worldgen_viz -- --seed 42 --radius-xz 3
 
 # Generate documentation images
 cargo run --release --bin doc_render -- --help
+
+# LLM testing harness — inspect world state as JSON (no renderer)
+cargo run --release --bin oxium-probe -- inspect --column 0,0
+cargo run --release --bin oxium-probe -- inspect --find cave --max-radius 2048 --count 3
+cargo run --release --bin oxium-probe -- inspect --at 100,64,-200
+
+# oxium-probe inspect modes:
+#   --column WX,WZ          ColumnData JSON (biome, height, water_surface_y, …)
+#   --at WX,WY,WZ           DensityBreakdown JSON (per-voxel density decomposition)
+#   --find <kind>           Nearest feature JSON; kinds: water, lava, cave, river,
+#                           forest, tropical, desert, tundra, plains, snowy_forest
+#   --max-radius N          Search radius in blocks (default 8192)
+#   --count N               Number of results (default 1)
 ```
 
 ---
@@ -201,3 +214,41 @@ Unit tests are inline (`#[cfg(test)]` blocks) or in sibling `tests.rs` / `*_test
 - **Docs can lead code** - design plans may describe future systems. Inspect the runtime module before treating a plan as implemented.
 
 For package-specific conventions, see the local `CLAUDE.md` files under `src/worldgen/`, `src/voxel/`, `src/mesher/`, and `src/persistence/`.
+
+---
+
+## Performance Metrics
+
+All per-frame performance data flows through a single struct pipeline so the HUD overlay, the `--profile <path>` CSV output, and (future) `oxium-probe capture` metrics CSV all see the same numbers.
+
+### How metrics flow
+
+| Layer | File | Role |
+|---|---|---|
+| `FrameCounters` | `src/profiler.rs:35` | Named integer counters gathered once per frame |
+| `PerfSnapshot` | `src/app.rs:111` | Runtime copy read by HUD and perf CSV |
+| `Profiler::finish_frame` | `src/profiler.rs` | Writes one CSV row (base counters + per-span µs columns) |
+| HUD overlay | `src/render/hud.rs:355` | Renders on-screen line from `PerfSnapshot` |
+| `oxium-probe` sidecar JSON | `src/bin/oxium-probe/` | Embeds `perf` object in each `<frame>.png.json` |
+
+### Adding a new counter
+
+1. **Add a field** to `FrameCounters` (`src/profiler.rs`) and `PerfSnapshot` (`src/app.rs:~111`).
+2. **Populate it** in `AppState::step` where the existing counters are gathered — chunk counts at `src/app.rs:~497–506`, draw calls at `src/render/mod.rs:~1567`.
+3. **Add a CSV column** in `Profiler::open` (header) and `Profiler::finish_frame` (value).
+4. **Append to the HUD line** in `src/render/hud.rs:355–451` if it should appear on screen.
+5. Re-run `cargo test --release` and the six visual baselines (`tests/screenshots/diff.py`) before merging — the CSV header change is observable in any test that diffs profiler output.
+
+### Adding a new span timer
+
+Wrap the work with `profiler::time(prof, "name", || ...)` in `AppState::step`. New span columns are auto-discovered the first frame they fire and appended to the CSV. No CSV header or struct changes needed — spans are dynamic.
+
+### Counters not yet tracked (follow-up work)
+
+The following are not currently instrumented and would need new `FrameCounters` fields:
+
+- GPU work time — requires `wgpu::QuerySet` timestamps.
+- Per-frame vertex / triangle counts — only `chunk_mesh_count` exists today (`src/render/mod.rs:877`).
+- Jobs queue depth (gen / mesh / relight in-flight) — currently inferred via `ChunkSlot::Pending` walk.
+- Persistence bytes written / read, queue depth.
+- Lighting BFS nodes visited per relight.

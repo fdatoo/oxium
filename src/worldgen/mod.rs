@@ -79,6 +79,7 @@ pub mod columns;
 pub mod columns_impl;
 pub mod config;
 pub mod density;
+pub mod features;
 pub mod fill_chunk_impl;
 pub mod flat_cache;
 pub mod fluid;
