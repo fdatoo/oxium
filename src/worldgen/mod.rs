@@ -56,17 +56,20 @@
 //! for the 3D density + climate multi-noise design.
 
 use crate::voxel::coords::ChunkCoord;
-use noise::{Fbm, MultiFractal, Simplex};
+use noise::{Fbm, Simplex};
 
-// New worldgen modules. Most of them are PR 1 stubs that get filled
-// in by later PRs (PR 2 implements heightmap, PR 3 hydrology, PR 4
-// caves, PR 5 biomes/surface/trees). Two are fully implemented now
-// because everything else builds on them:
+// ── Module declarations ───────────────────────────────────────────────────
 //
-//   * `tuning`  — central constants table.
-//   * `plates`  — Voronoi plate decomposition.
-//   * `hash`    — deterministic mixer used by plates / trees / caves.
-//   * `region`  — LRU caches + region data structs.
+// Leaf modules (small, no further splits): hash, spline, flat_cache,
+// noise_channel, config, plates, climate, carver, aquifer.
+//
+// Submodule directories: density/, region/, hydrology/, caves/.
+// Each directory has a mod.rs //! header that orients readers.
+//
+// Generator impl modules: each adds an `impl Generator { ... }` block.
+// Child modules can see parent-module private items (including private
+// methods and pub(crate) fields on Generator), so helpers stay accessible
+// without widening visibility.
 pub mod aquifer;
 pub mod biome;
 pub mod carver;
@@ -79,6 +82,7 @@ pub mod density;
 pub mod fill_chunk_impl;
 pub mod flat_cache;
 pub mod fluid;
+pub mod generator_impl;
 pub mod hash;
 pub mod hydrology;
 pub mod noise_channel;
@@ -103,7 +107,6 @@ pub use crate::worldgen::tuning::SEA_LEVEL;
 // to work after the type moved to `biome.rs`.
 pub use biome::Biome;
 pub use columns::ColumnData;
-use pipeline::ChunkRegions;
 
 // Compatibility shim: `oxium::worldgen::heightmap::HeightmapNoise` is
 // used by `tests/worldgen_fingerprint.rs`. Keep this alias until
@@ -182,244 +185,20 @@ pub struct Generator {
     pub(crate) config: config::ConfigHolder,
 }
 
-// ── §1 Generator construction ─────────────────────────────────────────────
-impl Generator {
-    /// Build a `Generator` with the given world seed and the bundled
-    /// default config. Equivalent to [`Self::with_config`] passing a
-    /// freshly-constructed `ConfigHolder` from
-    /// [`config::WorldgenConfig::bundled_default`].
-    pub fn new(seed: u64) -> Self {
-        let cfg =
-            config::WorldgenConfig::bundled_default().expect("bundled default.ron must parse");
-        let holder = config::ConfigHolder::new(cfg);
-        Self::with_config(seed, holder)
-    }
-
-    /// Build a `Generator` with the given world seed and an externally
-    /// owned `ConfigHolder`. The application typically owns the holder
-    /// (and the file watcher); the Generator reads from it via
-    /// [`Self::config_snapshot`].
-    pub fn with_config(seed: u64, config: config::ConfigHolder) -> Self {
-        let mut g = Self::new_internal(seed);
-        g.config = config;
-        g
-    }
-
-    /// Cheap atomic read of the current config. Holds an
-    /// `Arc<WorldgenConfig>` snapshot — call once per chunk and reuse
-    /// across the chunk's lifetime to avoid mid-chunk drift if a
-    /// hot-reload races chunk gen.
-    pub fn config_snapshot(&self) -> std::sync::Arc<config::WorldgenConfig> {
-        self.config.load()
-    }
-
-    /// Internal constructor. Builds all the noise fields but leaves
-    /// `config` set to the bundled default; [`Self::with_config`]
-    /// overwrites it.
-    ///
-    /// Each noise field is seeded with a different per-axis salt so they
-    /// don't produce correlated patterns (mountain-noise lining up with
-    /// height-noise would just amplify existing hills instead of adding
-    /// new geographic features).
-    fn new_internal(seed: u64) -> Self {
-        // Heightmap noise: 4 octaves, ~96-block period at octave 0.
-        // PR 2: the plate-driven heightmap owns its own FBM + warp
-        // noise fields. The old `height_noise`, `mountain_noise`, and
-        // `mountainness_map` are gone — plate geometry replaces them.
-        // Load the bundled default once so all noise fields share a
-        // consistent initial config (the file watcher can later swap
-        // values, but the noise *frequencies* baked here stay).
-        let bundled =
-            config::WorldgenConfig::bundled_default().expect("bundled default.ron must parse");
-        let heightmap = density::heightmap::HeightmapNoise::new(seed, &bundled.climate);
-        let density = density::heightmap::DensityNoise::new(seed, &bundled.density);
-        // Climate maps. Large period so a
-        // single climate cell covers many chunks — players walk for
-        // a while between biome bands instead of crossing one every
-        // few steps. Independently seeded so temperature and
-        // humidity drift apart and combine into all four corners of
-        // the cold/warm × dry/wet square.
-        let temperature_map = Fbm::<Simplex>::new(seed.wrapping_add(8) as u32)
-            .set_octaves(2)
-            .set_frequency(1.0 / 512.0)
-            .set_persistence(0.5);
-        let humidity_map = Fbm::<Simplex>::new(seed.wrapping_add(9) as u32)
-            .set_octaves(2)
-            .set_frequency(1.0 / 512.0)
-            .set_persistence(0.5);
-        // PR 4: weirdness noise — mid-frequency 2D Fbm. Used as the
-        // 6th biome-lookup axis (variant biomes within the same
-        // T/H/C region).
-        let weirdness_noise = Fbm::<Simplex>::new(seed.wrapping_add(501) as u32)
-            .set_octaves(2)
-            .set_frequency(1.0 / bundled.biomes.weirdness_period as f64)
-            .set_persistence(0.5);
-        // Build the biome R-tree once from the bundled entries.
-        let biome_list =
-            std::sync::Arc::new(climate::ParameterList::new(bundled.biomes.entries.clone()));
-        // Legacy aquifer diagnostics. Fluid generation itself is handled
-        // by `fluid::FluidPlanner` after terrain and caves are resolved.
-        let aquifer = aquifer::AquiferSystem::new(seed, bundled.aquifer.clone());
-        // PR 8: noise carvers (cheese / pillar Fbm channels) built
-        // from the bundled cave config. Channel topology is fixed in
-        // Rust; only tunable values re-read live.
-        let noise_carvers = caves::NoiseCarvers::new(seed, &bundled.cave);
-        // Carver cache: cap chosen so a chunk-fill's 11×5×11
-        // neighbour query has comfortable headroom for adjacent
-        // chunks' fills to reuse hot entries.
-        let carver_cache = std::sync::Arc::new(std::sync::Mutex::new(lru::LruCache::new(
-            std::num::NonZeroUsize::new(2048).unwrap(),
-        )));
-        Self {
-            heightmap,
-            density,
-            temperature_map,
-            humidity_map,
-            weirdness_noise,
-            biome_list,
-            aquifer,
-            noise_carvers,
-            carver_cache,
-            seed,
-            fine_cache: region::fresh_fine_cache(),
-            macro_cache: region::fresh_macro_cache(),
-            config: config::ConfigHolder::new(bundled),
-        }
-    }
-
-    // ── §2 Region / carver helpers ────────────────────────────────────────
-
-    /// Fetch (build if missing) the carver tunnels rooted at the
-    /// given chunk. Pure in `(seed, coord)`; cached so neighbour
-    /// chunk fills don't rebuild it.
-    fn get_carver_tunnels(&self, coord: ChunkCoord) -> std::sync::Arc<Vec<carver::CarverTunnel>> {
-        let mut cache = self.carver_cache.lock().unwrap();
-        if let Some(t) = cache.get(&coord) {
-            return t.clone();
-        }
-        let t = std::sync::Arc::new(carver::build_tunnels_for_chunk(self.seed, coord));
-        cache.put(coord, t.clone());
-        t
-    }
-
-    /// Build the per-chunk carver mask by rasterising every tunnel
-    /// from neighbour chunks within reach. Returned as a flat
-    /// `CHUNK_DIM³` bool array indexed `lx + DIM·ly + DIM²·lz`.
-    fn build_carver_mask(&self, coord: ChunkCoord) -> Vec<bool> {
-        let dim = crate::voxel::coords::CHUNK_DIM as usize;
-        let mut mask = vec![false; dim * dim * dim];
-        let origin = coord.0 * crate::voxel::coords::CHUNK_DIM;
-        // Carver max reach is ~130 blocks horizontally — that's 5
-        // chunks at 32 each. Vertical extent is much smaller
-        // (tunnels rarely drift more than ±15 blocks in Y), but
-        // give a small margin.
-        let r_xz: i32 = 5;
-        let r_y: i32 = 2;
-        for dx in -r_xz..=r_xz {
-            for dy in -r_y..=r_y {
-                for dz in -r_xz..=r_xz {
-                    let nc = ChunkCoord(glam::IVec3::new(
-                        coord.0.x + dx,
-                        coord.0.y + dy,
-                        coord.0.z + dz,
-                    ));
-                    let tunnels = self.get_carver_tunnels(nc);
-                    if tunnels.is_empty() {
-                        continue;
-                    }
-                    for tunnel in tunnels.iter() {
-                        carver::rasterize_into_mask(tunnel, origin, &mut mask);
-                    }
-                }
-            }
-        }
-        mask
-    }
-
-    /// Build the fine region at `coord` from noise (heightmap +
-    /// hydrology). The result is byte-deterministic in
-    /// `(seed, coord)`; this method is invoked at most once per
-    /// region per cache lifetime (rebuilds happen on eviction).
-    fn build_fine_region(&self, coord: region::RegionCoord) -> region::FineRegion {
-        let mut r = region::FineRegion::empty(coord);
-        r.coord = coord;
-        let cfg = self.config.load();
-        let terrain = terrain_ref::TerrainRef {
-            heightmap: &self.heightmap,
-            climate: &cfg.climate,
-            density: &cfg.density,
-        };
-        hydrology::build_fine_hydro(
-            self.seed,
-            coord,
-            terrain,
-            &self.macro_cache,
-            &self.fine_cache,
-            &mut r,
-        );
-        caves::build_systems_for_region(self.seed, coord, terrain, &mut r, &cfg.cave);
-        r
-    }
-
-    /// Pre-fetch the 3 × 3 grid of regions centered on the chunk's
-    /// origin region. Used by `fill_chunk` so the per-column hot path
-    /// doesn't hammer the cache mutex 9 × 1024 times.
-    fn gather_chunk_regions(&self, coord: ChunkCoord) -> ChunkRegions {
-        let origin = coord.origin().0;
-        let center = region::RegionCoord::containing(origin.x, origin.z);
-        let mut grid: [[Option<std::sync::Arc<region::FineRegion>>; 3]; 3] = Default::default();
-        for dz in -1..=1i32 {
-            for dx in -1..=1i32 {
-                let c = region::RegionCoord {
-                    x: center.x + dx,
-                    z: center.z + dz,
-                };
-                grid[(dz + 1) as usize][(dx + 1) as usize] =
-                    Some(region::get_fine(&self.fine_cache, c, || {
-                        self.build_fine_region(c)
-                    }));
-            }
-        }
-        ChunkRegions { center, grid }
-    }
-
-    // ── §3 Column data (terrain + biome per (wx, wz)) ────────────────────
-    // column_data and column_data_with live in columns_impl.rs.
-    // Defined there via `impl Generator`; `column_data_with` is
-    // `pub(super)` so sibling child modules can call it through `self`.
-    //
-    // See also: src/worldgen/columns_impl.rs
-
-    // ── §4 Probe / visualizer debug methods ─────────────────────────────────
-    // Moved to probe_impl.rs (probe_column, paint_column, sample_stage,
-    // evaluate_density_breakdown). Defined there via `impl Generator` in the
-    // probe_impl child module; Generator fields are pub(crate) so the child
-    // module can access them directly.
-    //
-    // See also: src/worldgen/probe_impl.rs
-
-    // ── §5 Chunk fill pipeline & lighting inputs ─────────────────────────────
-
-    /// Return the world seed this generator was constructed with.
-    pub fn seed(&self) -> u64 {
-        self.seed
-    }
-
-    // fill_chunk and light_inputs_for_chunk are in fill_chunk_impl.rs.
-    // Defined there via `impl Generator` in a child module;
-    // Generator fields are pub(crate) so the child module accesses them
-    // directly. Private helpers (gather_chunk_regions, column_data_with,
-    // build_carver_mask, add_trees) are accessible because child modules can
-    // see parent-module private items in Rust.
-    //
-    // See also: src/worldgen/fill_chunk_impl.rs
-
-    // ── §6 Tree placement ─────────────────────────────────────────────────────
-    // add_trees, tree_in_cell_with_regions, and stamp_tree are in trees_impl.rs.
-    // Static helpers (Tree struct, tree_hash, try_set_air) remain in trees.rs.
-    //
-    // See also: src/worldgen/trees_impl.rs
-}
+// ── Generator impl modules ────────────────────────────────────────────────
+//
+// Each `*_impl.rs` file adds an `impl Generator { ... }` block. They are
+// declared as child modules here so the Rust module system makes them part
+// of the worldgen module tree. Child modules can access every item in this
+// file (including private ones on Generator) without widening visibility.
+//
+//   generator_impl.rs — new/with_config/config_snapshot, build_fine_region,
+//                        gather_chunk_regions, build_carver_mask
+//   columns_impl.rs   — column_data, column_data_with
+//   fill_chunk_impl.rs — fill_chunk, light_inputs_for_chunk
+//   trees_impl.rs     — add_trees, tree_in_cell_with_regions, stamp_tree
+//   probe_impl.rs     — probe_column, paint_column, sample_stage,
+//                        evaluate_density_breakdown
 
 #[cfg(test)]
 #[path = "mod_tests.rs"]
