@@ -4,6 +4,13 @@
 //! a chunk. Used to amortize expensive 2D field evaluations
 //! (continentalness, erosion, offset, factor, jaggedness) across
 //! the ~1000 voxels in each 4×4 column quarter.
+//!
+//! A "quart" is a 4×4 block column cell, matching Minecraft's `QuartPos`
+//! coordinate space. Within a 32-block chunk there are 8×8 = 64 quarts.
+//! Expensive 2D noise channels (those driven by `FlatCache` markers in
+//! the density graph) are evaluated once per quart and shared across all
+//! 16 block-columns and 32 vertical slices in that quart — a 512×
+//! amortisation factor per channel relative to per-voxel evaluation.
 
 use crate::voxel::coords::CHUNK_DIM_U;
 

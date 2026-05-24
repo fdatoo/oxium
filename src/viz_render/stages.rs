@@ -50,9 +50,7 @@ pub fn pixel(stage: Stage, raw: f32) -> [u8; 4] {
             Stage::AquiferY => colormap::divergent(t),
             // Categorical stages are handled by the outer else branch;
             // these arms are unreachable here but required for exhaustiveness.
-            Stage::PlateId | Stage::BiomeId | Stage::AquiferSubstance => {
-                [0, 0, 0, 255]
-            }
+            Stage::PlateId | Stage::BiomeId | Stage::AquiferSubstance => [0, 0, 0, 255],
         }
     } else {
         match stage {

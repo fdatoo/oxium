@@ -224,10 +224,10 @@ impl Ui {
                     }
                     KeyCode::Enter | KeyCode::NumpadEnter => Some(input.submit()),
                     _ => {
-                        if let Some(t) = text {
-                            if !t.chars().any(|c| c.is_control()) {
-                                input.insert_text(t);
-                            }
+                        if let Some(t) = text
+                            && !t.chars().any(|c| c.is_control())
+                        {
+                            input.insert_text(t);
                         }
                         None
                     }

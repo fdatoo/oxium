@@ -15,6 +15,9 @@
 //! deep inside a plate; downstream modules use `t` to interpolate
 //! between adjacent plates' base elevations (continental shelf taper)
 //! and to gate the mountain-ridge lift.
+//!
+//! See `docs/book/content/part-3-region-build/3.1-plates.mdx` and
+//! `docs/superpowers/specs/2026-05-19-worldgen-overhaul-design.md`.
 
 use crate::worldgen::hash::{mix_range, mix_unit};
 use crate::worldgen::tuning::*;
@@ -25,7 +28,9 @@ use glam::Vec2;
 /// be recomputed from the ID alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PlateId {
+    /// Plate grid column (cell units, not block units).
     pub cell_x: i32,
+    /// Plate grid row (cell units, not block units).
     pub cell_z: i32,
 }
 
@@ -34,7 +39,9 @@ pub struct PlateId {
 /// boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PlateKind {
+    /// Thick, buoyant crust; sits above sea level in the spline output.
     Continental,
+    /// Thin, dense crust; biased toward ocean depths in the spline output.
     Oceanic,
 }
 
@@ -42,7 +49,9 @@ pub enum PlateKind {
 /// `(seed, plate_id)`.
 #[derive(Debug, Clone, Copy)]
 pub struct Plate {
+    /// Unique identifier; encodes the grid cell this plate belongs to.
     pub id: PlateId,
+    /// Continental or oceanic; determines elevation bias in the splines.
     pub kind: PlateKind,
     /// World-space seed point inside the cell. Distances are measured
     /// to this point when classifying a column's plate.
@@ -52,7 +61,7 @@ pub struct Plate {
     /// continent (post-PR-3; pre-PR-3 this was a multiplicative
     /// scale on the now-removed warped-FBM relief). Still raw
     /// `ROUGHNESS_RANGE` so other consumers (visualizer, debug)
-    /// can interpret it; the bias map lives in heightmap.rs.
+    /// can interpret it; the bias map lives in `density/heightmap.rs`.
     pub roughness: f32,
 }
 
@@ -97,7 +106,9 @@ impl Plate {
 /// plate, and the smooth boundary intensity between them.
 #[derive(Debug, Clone, Copy)]
 pub struct PlateLookup {
+    /// The plate whose seed is nearest to the query point.
     pub a: Plate,
+    /// The plate whose seed is second-nearest to the query point.
     pub b: Plate,
     /// Distance to `a`'s seed (blocks).
     pub d_a: f32,
@@ -157,7 +168,7 @@ pub fn plate_at(seed: u64, wx: i32, wz: i32) -> PlateLookup {
 
 // `ridge_peak_for_pair`, `ridge_lift`, and `shelf_base` were the
 // pre-PR-3 plate-mosaic heightmap primitives. Removed: the spline
-// pipeline in `heightmap.rs` replaces them. Plate Voronoi geometry
+// pipeline in `density/heightmap.rs` replaces them. Plate Voronoi geometry
 // is still used to derive `signed_continentalness` for the spline.
 
 #[cfg(test)]

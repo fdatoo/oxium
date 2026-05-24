@@ -255,7 +255,7 @@ pub fn relight_pump(
     for c in candidates.into_iter().take(RELIGHT_BUDGET) {
         dispatch_relight(world, jobs, registry, c);
     }
-    return total_dirty;
+    total_dirty
 }
 
 fn priority_key(coord: ChunkCoord, center: ChunkCoord) -> i64 {

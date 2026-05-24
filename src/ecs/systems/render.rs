@@ -20,6 +20,7 @@ use glam::{IVec3, UVec3};
 /// Push the cursor target into the renderer and then draw a frame.
 /// The renderer needs `&mut self` for the cursor write — the caller is
 /// expected to already hold a `&mut Renderer`.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     ecs: &GameEcs,
     renderer: &mut Renderer,

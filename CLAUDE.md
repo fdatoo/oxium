@@ -200,3 +200,5 @@ Unit tests are inline (`#[cfg(test)]` blocks) throughout the library modules.
 - **Mesh must be re-uploaded after lighting changes** — handled by system ordering, but matters if you bypass the normal pipeline.
 - **Config hot-reload is not retroactive** — existing chunks don't refresh when `default.ron` changes.
 - **Legacy lighting requires a feature flag** — `cargo build --features legacy-lighting`; the graph engine is the default authority.
+
+For worldgen-specific conventions (tuning.rs vs default.ron boundary, fingerprint test rules, common edit patterns, submodule layout), see `src/worldgen/CLAUDE.md`.

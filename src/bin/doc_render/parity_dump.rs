@@ -56,6 +56,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     // -- spline --
     {
         use oxium::worldgen::spline::{CubicSpline, Knot};
+        #[allow(clippy::type_complexity)]
         let spline_cases: &[(&str, &[(f32, f32, f32)], f32)] = &[
             // (name, knots [(loc, val, slope), ...], input)
             ("ramp", &[(0.0, 0.0, 1.0), (1.0, 1.0, 1.0)], 0.5),

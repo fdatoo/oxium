@@ -190,7 +190,7 @@ pub fn atlas_h() -> u32 {
 /// than panicking.
 pub fn slot_for(c: char) -> u32 {
     let cp = c as u32;
-    if cp >= FIRST && cp <= LAST {
+    if (FIRST..=LAST).contains(&cp) {
         cp - FIRST
     } else {
         0 // fall back to space (slot 0)
@@ -248,7 +248,11 @@ mod tests {
             (w * h * 4) as usize,
             "atlas byte count must match w × h × 4"
         );
-        assert_eq!(w, SLOT_COUNT * cell_w(), "atlas_w must equal SLOT_COUNT × cell_w");
+        assert_eq!(
+            w,
+            SLOT_COUNT * cell_w(),
+            "atlas_w must equal SLOT_COUNT × cell_w"
+        );
         assert_eq!(h, glyph_h(), "atlas_h must equal glyph_h");
     }
 

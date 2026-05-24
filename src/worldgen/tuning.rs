@@ -3,6 +3,32 @@
 //! The new worldgen has enough knobs that scattering them across modules
 //! would make tuning a treasure hunt. Anything you might want to nudge to
 //! reshape the world lives here.
+//!
+//! ### The tuning.rs / default.ron boundary
+//!
+//! Two configuration surfaces exist and they serve different audiences:
+//!
+//! - **`default.ron`** (`assets/worldgen/default.ron`) holds
+//!   *hot-reloadable world-character knobs*: terrain splines, biome
+//!   hyperbox entries, noise channel amplitudes, cave style weights.
+//!   A designer can edit this file while the engine is running; the file
+//!   watcher swaps the `Arc<WorldgenConfig>` and newly generated chunks
+//!   pick up the change. Put a new knob in `default.ron` if a designer
+//!   could tune it live without recompiling.
+//! - **`tuning.rs`** (this file) holds *compile-time architectural
+//!   invariants*: constants that size data structures, drive coordinate
+//!   calculations, or set hard physical limits. These values affect
+//!   cache layouts and algorithm correctness; changing them requires a
+//!   recompile and may invalidate the fingerprint hash. Put a value here
+//!   if changing it at runtime could cause undefined behaviour, cache
+//!   corruption, or determinism violations.
+//!
+//! When in doubt: if the value is "how many chunks fit in an LRU" or
+//! "how many blocks per region" it belongs here. If it's "how steep
+//! does a slope have to be to be a cliff" it belongs in `default.ron`.
+//!
+//! See `docs/superpowers/specs/2026-05-20-worldgen-docs-design.md` for
+//! the full rationale.
 
 // ── Plates ────────────────────────────────────────────────────────────
 
@@ -126,12 +152,66 @@ pub const MACRO_RIVER_THRESH: u32 = 500;
 /// Maximum consecutive vertical air voxels per XZ column before a stone
 /// "ledge" is inserted by the post-density-fill pass. Eliminates
 /// fall-to-death drops.
-// Temporarily raised from 6 to 256 to verify the clamp is the source of
-// the visible 8-block stone-ledge artifact. Restore to 6 (or retune) once
-// the over-carving causes are addressed.
+///
+/// **Temporary value:** raised from 6 to 256 to verify that the 8-block
+/// stone-ledge artifact seen in early cave testing was caused by this
+/// clamp (it was — the clamp was firing inside shallow cave entrances and
+/// pasting stone slabs across open chambers). The correct fix is to
+/// tighten the surface-buffer gating in the cave carver rather than
+/// disabling the safety net entirely. Once the over-carving root cause is
+/// confirmed fixed, this should be restored to a small value (6–16 blocks)
+/// so truly vertical free-fall shafts still get a ledge inserted.
 pub const MAX_VERTICAL_AIR_RUN: i32 = 256;
 
 // ── Caves ────────────────────────────────────────────────────────────
+
+/// Half-extent (blocks) of the XZ footprint when rolling a cave system's
+/// bounding box inside a fine region. Smaller → systems clustered toward
+/// region center; larger → systems can extend near region edges.
+pub const CAVE_SYSTEM_BB_HALF_EXTENT: i32 = 220;
+
+/// Y depth below which the per-chamber radius multiplier kicks in. Chambers
+/// whose center Y is below this depth get a bonus radius scaling.
+/// Higher → radius bonus starts deeper underground.
+pub const DEPTH_SCALE_PIVOT_Y: f32 = 40.0;
+/// Vertical range (blocks) over which the depth-scale multiplier ramps from
+/// 0 to 1. Smaller → the full bonus applies sooner below DEPTH_SCALE_PIVOT_Y.
+pub const DEPTH_SCALE_RANGE: f32 = 80.0;
+
+/// Magnitude scalar applied to the Terasology ambient cave output before
+/// compositing into the density sum. Higher → more aggressive Terasology
+/// carving; lower → subtler ambient caves.
+pub const TERA_OUTPUT_SCALE: f32 = 5.0;
+
+/// Base thickness offset in the MC-parity pillar cave formula. Appears as
+/// `(PILLAR_THICKNESS_BASE + PILLAR_THICKNESS_BASE * noise).powi(3)`.
+/// Higher → thicker pillar formations at a given noise value.
+pub const PILLAR_THICKNESS_BASE: f32 = 0.55;
+
+/// Amplitude multiplier on the cross-section warp applied along Catmull-Rom
+/// tunnel polylines. Higher → more sinuous, offset tunnel paths; lower →
+/// straighter tunnels connecting chamber centers.
+pub const TUNNEL_WARP_AMP: f32 = 4.0;
+
+/// Minimum depth below surface (blocks) for a Skylight entrance.
+/// Skylights connect the surface to chambers at least this deep.
+pub const SKYLIGHT_DEPTH_MIN: i32 = 30;
+/// Maximum depth below surface (blocks) for a Skylight entrance.
+/// Chambers deeper than this are too far from the surface for a
+/// convincing skylight shaft.
+pub const SKYLIGHT_DEPTH_MAX: i32 = 60;
+
+/// Lateral expansion (blocks) added to each side of a cave entrance's
+/// bounding box to include the shaft geometry. Larger → entrance shafts
+/// affect a wider area of the surface.
+pub const ENTRANCE_BB_EXPAND: i32 = 4;
+
+/// Edge length (blocks) of one cell in the corner-lattice trilerp cache
+/// for cave carvers. Must divide 32 evenly (chunk dim). Smaller → higher
+/// carve accuracy at the cost of more lattice evaluations per chunk.
+/// Current value of 4 gives 8×8×8 cells per chunk, each with 9×9×9
+/// corner evaluations → 5832 evaluations vs 32768 per-voxel.
+pub const CARVER_CELL_SIZE: i32 = 4;
 
 /// Inclusive range of cave systems rolled per fine region.
 /// Was: (0, 0) — graph caves disabled.
@@ -215,16 +295,36 @@ pub const SNOW_LINE: i32 = 110;
 
 // ── Trees ────────────────────────────────────────────────────────────
 
+/// Trees per 1000 cells in plains biome (sparse, open feel).
 pub const TREE_RATE_PLAINS: u32 = 12;
+/// Trees per 1000 cells in temperate forest (dense canopy).
 pub const TREE_RATE_FOREST: u32 = 55;
+/// Trees per 1000 cells in cold/snowy forest.
 pub const TREE_RATE_SNOWY_FOREST: u32 = 55;
+/// Trees per 1000 cells in tropical biome.
 pub const TREE_RATE_TROPICAL: u32 = 65;
+/// XZ edge length of one tree placement cell (blocks). Each cell
+/// independently rolls whether to host a tree; smaller → denser
+/// but also more hash queries per chunk fill.
 pub const TREE_CELL_SIZE: i32 = 8;
+/// Inset margin (blocks) from the cell boundary inside which the
+/// trunk position is jittered. Keeps trunks away from cell edges
+/// so cross-chunk leaf stampings don't extend farther than the
+/// scan radius accounts for.
 pub const TREE_MARGIN: i32 = 5;
 
 // ── Region cache caps ────────────────────────────────────────────────
 
+/// Maximum number of `FineRegion` entries retained in the LRU.
+/// At ~80 KB per entry this is ~20 MB peak fine-cache footprint. The
+/// cap is sized to cover the typical streaming radius (16 chunks ≈ 512
+/// blocks ≈ 1 fine region diameter) with comfortable headroom for the
+/// 3×3 neighbourhood each chunk fill prefetches.
 pub const FINE_CACHE_CAP: usize = 256;
+/// Maximum number of `MacroRegion` entries retained in the LRU.
+/// Macro regions are 16× larger in area but the cache only needs a
+/// handful of entries — the macro horizon is 1 halo (24 km), so a
+/// single player session rarely needs more than a few macro regions.
 pub const MACRO_CACHE_CAP: usize = 32;
 
 // ── Derived helpers ──────────────────────────────────────────────────

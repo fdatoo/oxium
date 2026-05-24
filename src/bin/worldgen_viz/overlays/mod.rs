@@ -130,7 +130,7 @@ impl MapView {
         self.regenerate(generator, ui.ctx(), revision);
 
         // Stage dropdown
-        egui::ComboBox::from_id_source("stage_combo")
+        egui::ComboBox::from_id_salt("stage_combo")
             .selected_text(self.stage.label())
             .show_ui(ui, |ui| {
                 for &s in Stage::ALL {
@@ -151,11 +151,11 @@ impl MapView {
             let size = egui::vec2(MAP_SIZE_PX as f32, MAP_SIZE_PX as f32);
             let resp =
                 ui.add(egui::Image::new((tex.id(), size)).sense(egui::Sense::click_and_drag()));
-            if resp.clicked() {
-                if let Some(pos) = resp.interact_pointer_pos() {
-                    let local = pos - resp.rect.left_top();
-                    clicked = Some(self.pixel_to_world(local.x, local.y));
-                }
+            if resp.clicked()
+                && let Some(pos) = resp.interact_pointer_pos()
+            {
+                let local = pos - resp.rect.left_top();
+                clicked = Some(self.pixel_to_world(local.x, local.y));
             }
             if resp.dragged_by(egui::PointerButton::Middle) {
                 let d = resp.drag_delta();
@@ -175,50 +175,50 @@ impl MapView {
 
             // Pinned-column crosshair: yellow lines bisecting the
             // pixel that the pinned column occupies.
-            if let Some((pwx, pwz)) = pinned {
-                if let Some((px, py)) = self.world_to_pixel(pwx, pwz) {
-                    let p = resp.rect.left_top() + egui::vec2(px, py);
-                    let painter = ui.painter_at(resp.rect);
-                    let pin_color = egui::Color32::from_rgb(255, 220, 70);
-                    painter.line_segment(
-                        [
-                            egui::pos2(resp.rect.left(), p.y),
-                            egui::pos2(resp.rect.right(), p.y),
-                        ],
-                        egui::Stroke::new(1.0, pin_color),
-                    );
-                    painter.line_segment(
-                        [
-                            egui::pos2(p.x, resp.rect.top()),
-                            egui::pos2(p.x, resp.rect.bottom()),
-                        ],
-                        egui::Stroke::new(1.0, pin_color),
-                    );
-                    painter.circle_stroke(p, 3.5, egui::Stroke::new(1.5, pin_color));
-                }
+            if let Some((pwx, pwz)) = pinned
+                && let Some((px, py)) = self.world_to_pixel(pwx, pwz)
+            {
+                let p = resp.rect.left_top() + egui::vec2(px, py);
+                let painter = ui.painter_at(resp.rect);
+                let pin_color = egui::Color32::from_rgb(255, 220, 70);
+                painter.line_segment(
+                    [
+                        egui::pos2(resp.rect.left(), p.y),
+                        egui::pos2(resp.rect.right(), p.y),
+                    ],
+                    egui::Stroke::new(1.0, pin_color),
+                );
+                painter.line_segment(
+                    [
+                        egui::pos2(p.x, resp.rect.top()),
+                        egui::pos2(p.x, resp.rect.bottom()),
+                    ],
+                    egui::Stroke::new(1.0, pin_color),
+                );
+                painter.circle_stroke(p, 3.5, egui::Stroke::new(1.5, pin_color));
             }
 
             // Hover-column cursor: thin cyan crosshair following the mouse.
-            if let (Some((hwx, hwz)), true) = (hover_world, resp.hovered()) {
-                if let Some((px, py)) = self.world_to_pixel(hwx, hwz) {
-                    let p = resp.rect.left_top() + egui::vec2(px, py);
-                    let painter = ui.painter_at(resp.rect);
-                    let hover_color = egui::Color32::from_rgba_premultiplied(120, 220, 240, 180);
-                    painter.line_segment(
-                        [
-                            egui::pos2(resp.rect.left(), p.y),
-                            egui::pos2(resp.rect.right(), p.y),
-                        ],
-                        egui::Stroke::new(0.5, hover_color),
-                    );
-                    painter.line_segment(
-                        [
-                            egui::pos2(p.x, resp.rect.top()),
-                            egui::pos2(p.x, resp.rect.bottom()),
-                        ],
-                        egui::Stroke::new(0.5, hover_color),
-                    );
-                }
+            if let (Some((hwx, hwz)), true) = (hover_world, resp.hovered())
+                && let Some((px, py)) = self.world_to_pixel(hwx, hwz)
+            {
+                let p = resp.rect.left_top() + egui::vec2(px, py);
+                let painter = ui.painter_at(resp.rect);
+                let hover_color = egui::Color32::from_rgba_premultiplied(120, 220, 240, 180);
+                painter.line_segment(
+                    [
+                        egui::pos2(resp.rect.left(), p.y),
+                        egui::pos2(resp.rect.right(), p.y),
+                    ],
+                    egui::Stroke::new(0.5, hover_color),
+                );
+                painter.line_segment(
+                    [
+                        egui::pos2(p.x, resp.rect.top()),
+                        egui::pos2(p.x, resp.rect.bottom()),
+                    ],
+                    egui::Stroke::new(0.5, hover_color),
+                );
             }
         }
 

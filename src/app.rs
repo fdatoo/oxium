@@ -803,11 +803,10 @@ impl AppState {
                     .ecs
                     .world
                     .query_one::<(&mut Position, &mut Velocity)>(self.ecs.player)
+                    && let Some((pos, vel)) = q.get()
                 {
-                    if let Some((pos, vel)) = q.get() {
-                        pos.0 = p;
-                        vel.0 = glam::Vec3::ZERO;
-                    }
+                    pos.0 = p;
+                    vel.0 = glam::Vec3::ZERO;
                 }
             }
             UiEffect::SetTime(t) => {
@@ -823,23 +822,23 @@ impl AppState {
             }
             UiEffect::ToggleFly => {
                 use crate::ecs::components::{Movement, MovementMode};
-                if let Ok(mut q) = self.ecs.world.query_one::<&mut Movement>(self.ecs.player) {
-                    if let Some(mv) = q.get() {
-                        mv.mode = match mv.mode {
-                            MovementMode::Walk => MovementMode::Fly,
-                            MovementMode::Fly => MovementMode::Walk,
-                        };
-                    }
+                if let Ok(mut q) = self.ecs.world.query_one::<&mut Movement>(self.ecs.player)
+                    && let Some(mv) = q.get()
+                {
+                    mv.mode = match mv.mode {
+                        MovementMode::Walk => MovementMode::Fly,
+                        MovementMode::Fly => MovementMode::Walk,
+                    };
                 }
             }
             UiEffect::ToggleNoclip => {
                 use crate::ecs::components::{Movement, MovementMode};
                 let mut new_state: Option<(bool, bool)> = None;
-                if let Ok(mut q) = self.ecs.world.query_one::<&mut Movement>(self.ecs.player) {
-                    if let Some(mv) = q.get() {
-                        mv.noclip = !mv.noclip;
-                        new_state = Some((mv.noclip, matches!(mv.mode, MovementMode::Fly)));
-                    }
+                if let Ok(mut q) = self.ecs.world.query_one::<&mut Movement>(self.ecs.player)
+                    && let Some(mv) = q.get()
+                {
+                    mv.noclip = !mv.noclip;
+                    new_state = Some((mv.noclip, matches!(mv.mode, MovementMode::Fly)));
                 }
                 if let Some((on, in_fly)) = new_state {
                     let msg = if on {

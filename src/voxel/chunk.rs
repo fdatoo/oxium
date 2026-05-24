@@ -234,7 +234,7 @@ fn sample_for_blob(
             // Bounds: -1..=32 inclusive. Index -1 reads the negative
             // face neighbour when available so chunk-edge negative faces
             // get the same air-side halo as +X/+Y/+Z faces.
-            if nx < -1 || nx > 32 || ny < -1 || ny > 32 || nz < -1 || nz > 32 {
+            if !(-1..=32).contains(&nx) || !(-1..=32).contains(&ny) || !(-1..=32).contains(&nz) {
                 continue;
             }
             let Some((ns, nlx, nly, nlz)) = resolve_cell_signed(dense, neighbors, nx, ny, nz)

@@ -67,7 +67,7 @@ impl Persistence {
                         PersistRequest::Shutdown => break,
                         PersistRequest::Save { coord, data } => {
                             let path = region_path(&saves_dir, coord);
-                            if let Err(e) = write_chunk(&path, coord, &*data) {
+                            if let Err(e) = write_chunk(&path, coord, &data) {
                                 log::warn!("save failed {coord:?}: {e:?}");
                             }
                             let _ = res_tx.send(PersistResult::Saved { coord });
@@ -96,6 +96,38 @@ impl Persistence {
             req_tx,
             result_rx: res_rx,
             handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for Persistence {
+    /// Wait for queued writes to complete before the thread is killed.
+    ///
+    /// When `main()` returns, the process exits and the OS reaps every
+    /// non-main thread immediately — anything still queued on this
+    /// channel (or mid-`write`) goes with it. That manifests in the
+    /// next launch as "the chunks where I modified terrain render
+    /// wrong":
+    ///
+    /// - Save request still in the queue → never on disk → next load
+    ///   returns `None` → fallback to procedural gen, player sees
+    ///   fresh terrain where their edit was.
+    /// - Save mid-blob-write → blob bytes lost, header still points
+    ///   at the old offset → next load returns OLD pre-edit data.
+    /// - Save mid-header-write → header partial → next load reads
+    ///   a garbage offset → zstd decode fails → fallback to gen.
+    ///
+    /// Sending `Shutdown` makes the worker loop break cleanly after
+    /// its current request finishes, and `join()` blocks until every
+    /// queued write has been handed back to the kernel. Field drop
+    /// order in [`crate::app::AppState`] runs the user-facing `Drop`
+    /// first (which calls `flush_modified` to enqueue any final
+    /// edits), so by the time this `Drop` fires every save the
+    /// session ever produced is in the channel.
+    fn drop(&mut self) {
+        let _ = self.req_tx.send(PersistRequest::Shutdown);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
         }
     }
 }
@@ -152,37 +184,5 @@ mod tests {
             Block::Torch,
             "save queued just before drop should still be on disk after drop returns"
         );
-    }
-}
-
-impl Drop for Persistence {
-    /// Wait for queued writes to complete before the thread is killed.
-    ///
-    /// When `main()` returns, the process exits and the OS reaps every
-    /// non-main thread immediately — anything still queued on this
-    /// channel (or mid-`write`) goes with it. That manifests in the
-    /// next launch as "the chunks where I modified terrain render
-    /// wrong":
-    ///
-    /// - Save request still in the queue → never on disk → next load
-    ///   returns `None` → fallback to procedural gen, player sees
-    ///   fresh terrain where their edit was.
-    /// - Save mid-blob-write → blob bytes lost, header still points
-    ///   at the old offset → next load returns OLD pre-edit data.
-    /// - Save mid-header-write → header partial → next load reads
-    ///   a garbage offset → zstd decode fails → fallback to gen.
-    ///
-    /// Sending `Shutdown` makes the worker loop break cleanly after
-    /// its current request finishes, and `join()` blocks until every
-    /// queued write has been handed back to the kernel. Field drop
-    /// order in [`crate::app::AppState`] runs the user-facing `Drop`
-    /// first (which calls `flush_modified` to enqueue any final
-    /// edits), so by the time this `Drop` fires every save the
-    /// session ever produced is in the channel.
-    fn drop(&mut self) {
-        let _ = self.req_tx.send(PersistRequest::Shutdown);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
     }
 }

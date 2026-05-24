@@ -14,7 +14,7 @@ fn surface_breakthrough_places_grass_on_cave_floor() {
     let mut found_floor_grass = false;
     let mut found_ceiling_grass = false;
 
-    let dim = CHUNK_DIM_U as u32;
+    let dim = CHUNK_DIM_U;
 
     // Scan an 8x8 grid of surface-level chunks across chunk Y 0..=3.
     // Cave breakthroughs are probabilistic; a wider scan provides more

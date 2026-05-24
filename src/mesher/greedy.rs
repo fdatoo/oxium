@@ -178,7 +178,7 @@ pub fn mesh_greedy(
     // The renderer reads it to decide whether the planar-reflection pass
     // can be skipped. Cost is negligible compared to the mesh itself, and
     // it only runs at mesh time — not per frame.
-    mesh.has_water = chunk.blocks.iter().any(|b| *b == Block::Water);
+    mesh.has_water = chunk.blocks.contains(&Block::Water);
     mesh
 }
 

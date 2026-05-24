@@ -20,10 +20,12 @@ impl<'a> SplineEditor<'a> {
             desired_size: Vec2::new(380.0, 220.0),
         }
     }
+    #[allow(dead_code)]
     pub fn x_range(mut self, lo: f32, hi: f32) -> Self {
         self.x_range = (lo, hi);
         self
     }
+    #[allow(dead_code)]
     pub fn y_range(mut self, lo: f32, hi: f32) -> Self {
         self.y_range = (lo, hi);
         self
@@ -98,21 +100,19 @@ impl<'a> Widget for SplineEditor<'a> {
                     drag_target = Some(i);
                 }
             }
-            if let Some(i) = drag_target {
-                if let Some(pos) = response.interact_pointer_pos() {
-                    let (lx, ly) = from_screen(pos);
-                    let new_loc = lx.clamp(self.x_range.0, self.x_range.1);
-                    let new_val = ly.clamp(self.y_range.0, self.y_range.1);
-                    if (knots[i].loc - new_loc).abs() > 1e-6
-                        || (knots[i].val - new_val).abs() > 1e-6
-                    {
-                        knots[i].loc = new_loc;
-                        knots[i].val = new_val;
-                        // Without this, callers see `response.changed()`
-                        // as false during drags and never trigger a
-                        // regen — silently broken spline tuning.
-                        response.mark_changed();
-                    }
+            if let Some(i) = drag_target
+                && let Some(pos) = response.interact_pointer_pos()
+            {
+                let (lx, ly) = from_screen(pos);
+                let new_loc = lx.clamp(self.x_range.0, self.x_range.1);
+                let new_val = ly.clamp(self.y_range.0, self.y_range.1);
+                if (knots[i].loc - new_loc).abs() > 1e-6 || (knots[i].val - new_val).abs() > 1e-6 {
+                    knots[i].loc = new_loc;
+                    knots[i].val = new_val;
+                    // Without this, callers see `response.changed()`
+                    // as false during drags and never trigger a
+                    // regen — silently broken spline tuning.
+                    response.mark_changed();
                 }
             }
         }

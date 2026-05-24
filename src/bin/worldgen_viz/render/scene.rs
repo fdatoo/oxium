@@ -225,6 +225,7 @@ impl SceneRenderer {
         self.chunks.remove(&coord);
     }
 
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.chunks.clear();
     }
@@ -233,6 +234,7 @@ impl SceneRenderer {
     /// the post-edit refill path: each gets re-requested so its mesh
     /// updates against the new config without the screen ever
     /// flashing blank.
+    #[allow(dead_code)]
     pub fn chunk_coords(&self) -> Vec<ChunkCoord> {
         self.chunks.keys().copied().collect()
     }

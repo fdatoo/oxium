@@ -326,13 +326,11 @@ impl ApplicationHandler for App {
                     state.ui.on_mouse_button(button, bstate);
                 }
             }
-            WindowEvent::CursorMoved { position, .. } => {
-                if !state.ui.is_playing() {
-                    let (w, h) = state.renderer.framebuffer_size();
-                    state
-                        .ui
-                        .on_mouse_move(position.x as f32, position.y as f32, (w, h));
-                }
+            WindowEvent::CursorMoved { position, .. } if !state.ui.is_playing() => {
+                let (w, h) = state.renderer.framebuffer_size();
+                state
+                    .ui
+                    .on_mouse_move(position.x as f32, position.y as f32, (w, h));
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 // winit reports either lines (mouse wheel) or pixels
@@ -441,7 +439,6 @@ impl ApplicationHandler for App {
                         Err(e) => log::error!("screenshot failed: {e:?}"),
                     }
                     event_loop.exit();
-                    return;
                 }
 
                 // Frame pacing is driven from `about_to_wait` —

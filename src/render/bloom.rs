@@ -19,9 +19,13 @@ pub const BLOOM_MIN_DIM: u32 = 4;
 /// whole-texture render targets, so no level-of-detail subview is
 /// needed.
 pub struct BloomMip {
+    // `texture` and dimensions are kept for future resize/recreation use.
+    #[allow(dead_code)]
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
+    #[allow(dead_code)]
     pub width: u32,
+    #[allow(dead_code)]
     pub height: u32,
 }
 

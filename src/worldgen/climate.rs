@@ -21,9 +21,13 @@
 //! `net/minecraft/world/level/biome/Climate.java`. Integers give
 //! byte-deterministic equality comparison across platforms.
 //!
-//! The lookup is wrapped in an [`RTree`] with fanout 6 and a per-
-//! thread last-leaf cache so adjacent voxels (which almost always
-//! hit the same leaf) prune the tree on the first child check.
+//! The lookup is wrapped in an [`RTree`] with fanout 6 and a per-thread
+//! last-leaf cache so adjacent voxels (which almost always hit the same
+//! leaf) prune the tree on the first child check.
+//!
+//! See `docs/book/content/part-3-region-build/3.2-climate.mdx` and
+//! `docs/superpowers/specs/2026-05-19-worldgen-3d-design.md` for the
+//! design rationale and the mapping from MC's climate channels to ours.
 
 use crate::worldgen::Biome;
 use serde::{Deserialize, Serialize};
@@ -49,7 +53,9 @@ pub fn quantize(v: f32) -> i64 {
 /// quantized integer space.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Parameter {
+    /// Lower bound of the interval (inclusive), in quantized units.
     pub min: i64,
+    /// Upper bound of the interval (inclusive), in quantized units.
     pub max: i64,
 }
 
@@ -97,13 +103,21 @@ impl Parameter {
 /// without a schema change).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ParameterPoint {
+    /// Thermal axis claim (Fbm noise, low frequency).
     pub temperature: Parameter,
+    /// Moisture axis claim (Fbm noise, low frequency).
     pub humidity: Parameter,
+    /// Land/sea axis claim (derived from plate Voronoi).
     pub continentalness: Parameter,
+    /// Vertical relief axis claim (Fbm noise + bias).
     pub terrain_shape: Parameter,
+    /// Depth gradient claim; 0 at surface, positive underground.
     pub depth: Parameter,
+    /// Ridge/weird-terrain axis claim (mid-frequency Fbm).
     pub weirdness: Parameter,
+    /// Synthetic tie-breaker; always 0 in authored biome entries.
     pub offset: i64,
+    /// The biome this point assigns when it wins the nearest-neighbor search.
     pub biome: Biome,
 }
 
@@ -142,12 +156,19 @@ impl ParameterPoint {
 /// A quantized query point in the 6D climate space.
 #[derive(Clone, Copy, Debug)]
 pub struct TargetPoint {
+    /// Quantized temperature value for this voxel/column.
     pub temperature: i64,
+    /// Quantized humidity value for this voxel/column.
     pub humidity: i64,
+    /// Quantized continentalness value for this voxel/column.
     pub continentalness: i64,
+    /// Quantized terrain_shape value for this voxel/column.
     pub terrain_shape: i64,
+    /// Quantized depth gradient for this voxel.
     pub depth: i64,
+    /// Quantized weirdness value for this voxel/column.
     pub weirdness: i64,
+    /// Always 0 for query points; present for symmetry with `ParameterPoint`.
     pub offset: i64,
 }
 
@@ -398,11 +419,15 @@ fn union_bbox(entries: &[ParameterPoint], indices: &[u32]) -> [Parameter; PARAME
 /// A parsed [`ParameterPoint`] list plus its built [`RTree`]. The
 /// public API biome lookups go through here.
 pub struct ParameterList {
+    /// Authored biome parameter claims, indexed by `RTree` leaf entries.
     pub entries: Vec<ParameterPoint>,
+    /// Spatial index over `entries` for O(log n) nearest-neighbor queries.
     pub tree: RTree,
 }
 
 impl ParameterList {
+    /// Build the parameter list and its R-tree from `entries`. Panics
+    /// if `entries` is empty — the engine always loads at least one biome.
     pub fn new(entries: Vec<ParameterPoint>) -> Self {
         let tree = RTree::build(&entries);
         Self { entries, tree }

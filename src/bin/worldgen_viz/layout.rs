@@ -31,7 +31,7 @@ pub fn dashboard(ctx: &Context, app: &mut AppState) -> LayoutResult {
         ui.horizontal(|ui| {
             ui.label("Paint:");
             let prev_paint = app.session.paint;
-            egui::ComboBox::from_id_source("paint_mode_combo")
+            egui::ComboBox::from_id_salt("paint_mode_combo")
                 .selected_text(prev_paint.label())
                 .show_ui(ui, |ui| {
                     for &m in crate::paint::PaintMode::ALL {
@@ -403,12 +403,11 @@ fn preset_library_section(ui: &mut egui::Ui, app: &mut AppState, cfg: &mut World
                 "Replace the current config with the bundled assets/worldgen/default.ron.",
             )
             .clicked()
+            && let Ok(new) = WorldgenConfig::bundled_default()
         {
-            if let Ok(new) = WorldgenConfig::bundled_default() {
-                *cfg = new;
-                app.presets.activate(None);
-                loaded = true;
-            }
+            *cfg = new;
+            app.presets.activate(None);
+            loaded = true;
         }
     });
 
@@ -527,12 +526,11 @@ fn preset_library_section(ui: &mut egui::Ui, app: &mut AppState, cfg: &mut World
                 .add_enabled(dirty, egui::Button::new("💾 Save notes"))
                 .on_hover_text("Write notes to assets/worldgen/presets/<name>.notes.md.")
                 .clicked()
+                && let Some(entry) = app.presets.entries.iter().find(|e| e.name == name).cloned()
             {
-                if let Some(entry) = app.presets.entries.iter().find(|e| e.name == name).cloned() {
-                    match preset::save_notes(&entry, &app.presets.notes_buffer) {
-                        Ok(()) => app.presets.mark_notes_saved(),
-                        Err(e) => eprintln!("save notes: {e}"),
-                    }
+                match preset::save_notes(&entry, &app.presets.notes_buffer) {
+                    Ok(()) => app.presets.mark_notes_saved(),
+                    Err(e) => eprintln!("save notes: {e}"),
                 }
             }
             if dirty {

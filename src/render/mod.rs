@@ -927,6 +927,7 @@ impl Renderer {
     /// from the time-of-day system. `time` is seconds since startup and
     /// drives shader-side animation (e.g. water shimmer). The optional
     /// `hud` is drawn as a separate pass over the world view.
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         eye: Vec3,

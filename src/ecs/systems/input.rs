@@ -181,7 +181,7 @@ pub fn apply_input(ecs: &mut GameEcs, buf: &InputBuf, state: &mut InputState) {
         let now = Instant::now();
         if state
             .last_space_press_at
-            .map_or(false, |t| now - t <= DOUBLE_TAP_WINDOW)
+            .is_some_and(|t| now - t <= DOUBLE_TAP_WINDOW)
         {
             movement.mode = match movement.mode {
                 MovementMode::Walk => MovementMode::Fly,
@@ -198,10 +198,7 @@ pub fn apply_input(ecs: &mut GameEcs, buf: &InputBuf, state: &mut InputState) {
     // Release resets the timer so the *next* tap fires immediately too.
     let now = Instant::now();
     let break_fired = buf.lmb_pressed
-        || (buf.lmb_down
-            && state
-                .last_break_at
-                .map_or(true, |t| now - t >= ACTION_REPEAT));
+        || (buf.lmb_down && state.last_break_at.is_none_or(|t| now - t >= ACTION_REPEAT));
     input.break_ = break_fired;
     if break_fired {
         state.last_break_at = Some(now);
@@ -211,10 +208,7 @@ pub fn apply_input(ecs: &mut GameEcs, buf: &InputBuf, state: &mut InputState) {
     }
 
     let place_fired = buf.rmb_pressed
-        || (buf.rmb_down
-            && state
-                .last_place_at
-                .map_or(true, |t| now - t >= ACTION_REPEAT));
+        || (buf.rmb_down && state.last_place_at.is_none_or(|t| now - t >= ACTION_REPEAT));
     input.place = place_fired;
     if place_fired {
         state.last_place_at = Some(now);
@@ -255,10 +249,10 @@ pub fn apply_input(ecs: &mut GameEcs, buf: &InputBuf, state: &mut InputState) {
     // block is `Some` actually change the selection — empty slot 9
     // is ignored).
     for (i, k) in digit_keys.iter().enumerate() {
-        if buf.key_pressed_this_frame.contains(k) {
-            if let Some(block) = HOTBAR_BLOCKS[i] {
-                sel.0 = block;
-            }
+        if buf.key_pressed_this_frame.contains(k)
+            && let Some(block) = HOTBAR_BLOCKS[i]
+        {
+            sel.0 = block;
         }
     }
 

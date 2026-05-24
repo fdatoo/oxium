@@ -57,10 +57,10 @@ impl Invalidator {
     /// Call once per frame. If a queued change's debounce window has
     /// elapsed, promote it to a `bump()`.
     pub fn tick(&mut self) {
-        if let Some(t) = self.pending_since {
-            if t.elapsed() >= DEBOUNCE {
-                self.bump();
-            }
+        if let Some(t) = self.pending_since
+            && t.elapsed() >= DEBOUNCE
+        {
+            self.bump();
         }
     }
 

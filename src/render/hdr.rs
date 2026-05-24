@@ -14,9 +14,13 @@ pub const HDR_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 /// Owns the offscreen color texture sized to the swapchain. Re-created
 /// on resize via `recreate`.
 pub struct HdrTarget {
+    // `texture` and dimensions are kept for future resize/recreation use.
+    #[allow(dead_code)]
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
+    #[allow(dead_code)]
     pub width: u32,
+    #[allow(dead_code)]
     pub height: u32,
 }
 
