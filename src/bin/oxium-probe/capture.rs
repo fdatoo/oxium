@@ -45,7 +45,7 @@ use oxium::ecs::systems::time_of_day::sun_state;
 use oxium::worldgen::features::{self, FeatureHit, FeatureKind};
 use oxium::worldgen::Generator;
 
-use crate::cli::{CaptureArgs, parse_xz, parse_xyz};
+use crate::cli::{BurstMode, CaptureArgs, parse_xz, parse_xyz};
 use crate::sidecar::{CaptureMeta, CameraInfo, FeatureTargetInfo, GroundInfo, PerfInfo};
 
 // How many consecutive frames the chunk-mesh count must be stable
@@ -117,6 +117,13 @@ pub fn run(seed: u64, args: CaptureArgs) -> anyhow::Result<()> {
             args.frames
         );
     }
+    if args.mode == BurstMode::Sim && args.interval_ms > 0 {
+        anyhow::bail!(
+            "--interval-ms {} is meaningless with --mode sim (sim clock is not tied to wall \
+             time). Remove --interval-ms or switch to --mode wallclock.",
+            args.interval_ms
+        );
+    }
 
     // Resolve metrics CSV path:
     //   single-shot: <out_png>.metrics.csv
@@ -141,6 +148,8 @@ pub fn run(seed: u64, args: CaptureArgs) -> anyhow::Result<()> {
         warmup_frames: args.warmup_frames,
         burst_total: args.frames,
         burst_interval: Duration::from_millis(args.interval_ms),
+        burst_mode: args.mode,
+        sim_dt: args.sim_dt,
         metrics_path,
         feature_hit,
         state: None,
@@ -149,6 +158,7 @@ pub fn run(seed: u64, args: CaptureArgs) -> anyhow::Result<()> {
         screenshot_stable_frames: 0,
         burst_done: 0,
         burst_next_at: None,
+        sim_time: 0.0,
     };
 
     let event_loop = EventLoop::new()?;
@@ -171,8 +181,16 @@ struct ProbeCapture {
     warmup_frames: u32,
     /// Total number of frames to capture (1 = single shot).
     burst_total: u32,
-    /// Minimum wall-clock gap between consecutive captures.
+    /// Minimum wall-clock gap between consecutive captures (wallclock mode).
     burst_interval: Duration,
+    /// Whether to use wall-clock or sim timing for the burst.
+    burst_mode: BurstMode,
+    /// Fixed timestep in seconds for sim mode.
+    sim_dt: f32,
+    /// Accumulated sim clock. Starts at 0 when quiesce completes; advances by
+    /// `sim_dt` each captured frame. Used as the shader `time` uniform so
+    /// water animation and sun position are deterministic.
+    sim_time: f32,
     /// Where the per-frame CSV profiler writes.
     metrics_path: PathBuf,
     feature_hit: Option<FeatureHit>,
@@ -182,7 +200,8 @@ struct ProbeCapture {
     screenshot_stable_frames: u32,
     /// How many frames have been captured so far (0 until quiesce completes).
     burst_done: u32,
-    /// Wall-clock deadline for the next capture. `None` until quiesce is done.
+    /// Wall-clock deadline for the next capture (wallclock mode).
+    /// `None` until quiesce is done; set to `Some(Instant::now())` on quiesce.
     burst_next_at: Option<Instant>,
 }
 
@@ -264,7 +283,19 @@ impl ApplicationHandler for ProbeCapture {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => state.renderer.resize(size.width, size.height),
             WindowEvent::RedrawRequested => {
-                state.step();
+                // ── Advance the simulation ────────────────────────────────────
+                // Quiesce always uses the wall-clock step; once quiesce is
+                // done, sim mode switches to step_with_dt so the shader clock
+                // is deterministic for the captured frames.
+                let in_sim_burst = self.burst_mode == BurstMode::Sim
+                    && self.burst_next_at.is_some();
+
+                if in_sim_burst {
+                    // Fixed timestep, shader time = self.sim_time.
+                    state.step_with_dt(self.sim_dt, Some(self.sim_time));
+                } else {
+                    state.step();
+                }
                 self.frames_drawn = self.frames_drawn.saturating_add(1);
 
                 // ── Phase: quiescing ──────────────────────────────────────────
@@ -287,24 +318,49 @@ impl ApplicationHandler for ProbeCapture {
                         // Quiesce complete — start the burst clock.
                         self.burst_next_at = Some(Instant::now());
                         log::info!(
-                            "quiesce complete after {} frames ({} chunks); starting burst \
-                             ({} frames, interval {}ms)",
+                            "quiesce complete after {} frames ({} chunks); starting {} burst \
+                             ({} frames{})",
                             self.frames_drawn,
                             count,
+                            match self.burst_mode {
+                                BurstMode::Wallclock => "wallclock",
+                                BurstMode::Sim => "sim",
+                            },
                             self.burst_total,
-                            self.burst_interval.as_millis(),
+                            if self.burst_mode == BurstMode::Wallclock {
+                                format!(", interval {}ms", self.burst_interval.as_millis())
+                            } else {
+                                format!(", sim_dt {:.4}s", self.sim_dt)
+                            },
                         );
                     }
                 }
 
                 // ── Phase: bursting ───────────────────────────────────────────
-                if let Some(next_at) = self.burst_next_at {
-                    let now = Instant::now();
-                    if now >= next_at && self.burst_done < self.burst_total {
+                if self.burst_next_at.is_some() && self.burst_done < self.burst_total {
+                    let should_capture = match self.burst_mode {
+                        // Wall-clock: respect the inter-frame interval.
+                        BurstMode::Wallclock => {
+                            let next_at = self.burst_next_at.unwrap();
+                            Instant::now() >= next_at
+                        }
+                        // Sim: capture every step — the fixed dt IS the interval.
+                        BurstMode::Sim => true,
+                    };
+
+                    if should_capture {
                         // Re-apply look override so frame-0 drift doesn't affect aim.
                         if let Some((yaw, pitch)) = self.look_override {
                             set_camera_look(&mut state.ecs, yaw, pitch);
                         }
+
+                        // Shader time for the offscreen capture:
+                        //   wallclock → 0.0 (deterministic baseline, same as main.rs)
+                        //   sim       → current sim_time (animation advances across frames)
+                        let shader_time = match self.burst_mode {
+                            BurstMode::Wallclock => 0.0,
+                            BurstMode::Sim => self.sim_time,
+                        };
 
                         let frame_idx = self.burst_done + 1; // 1-based for filenames
                         let out_png = burst_frame_path(&self.out_path, self.burst_total, frame_idx);
@@ -314,13 +370,22 @@ impl ApplicationHandler for ProbeCapture {
                             self.time_of_day,
                             &out_png,
                             self.feature_hit.as_ref(),
+                            shader_time,
                         );
                         match result {
                             Ok(()) => {
                                 self.burst_done += 1;
-                                // Advance the clock for the next capture.
-                                self.burst_next_at =
-                                    Some(next_at + self.burst_interval);
+                                match self.burst_mode {
+                                    BurstMode::Wallclock => {
+                                        // Advance the wall-clock deadline.
+                                        let prev = self.burst_next_at.unwrap();
+                                        self.burst_next_at = Some(prev + self.burst_interval);
+                                    }
+                                    BurstMode::Sim => {
+                                        // Advance the sim clock.
+                                        self.sim_time += self.sim_dt;
+                                    }
+                                }
                             }
                             Err(e) => {
                                 log::error!("capture failed: {e:?}");
@@ -353,17 +418,22 @@ impl ApplicationHandler for ProbeCapture {
 /// Render and save one screenshot + sidecar JSON. Called from the event loop
 /// after warmup + quiesce. Separated from `ProbeCapture` so it can borrow
 /// `state` independently of the driver struct.
+///
+/// `shader_time` drives the `time` uniform for the offscreen render (water
+/// shimmer, etc.). Pass `0.0` for wall-clock captures (deterministic baseline);
+/// pass the current `sim_time` for sim-burst captures so animation advances
+/// across frames while remaining reproducible across runs.
 fn do_capture(
     state: &AppState,
     seed: u64,
     time_of_day: Option<f32>,
     out_path: &Path,
     feature_hit: Option<&FeatureHit>,
+    shader_time: f32,
 ) -> anyhow::Result<()> {
     let (eye, yaw, pitch) = camera_from_ecs(&state.ecs);
     let (sun_dir, sun_intensity) = sun_state(&state.ecs);
 
-    // Zero shader time for deterministic captures (same as main.rs).
     capture_offscreen(
         &state.renderer,
         out_path,
@@ -372,7 +442,7 @@ fn do_capture(
         pitch,
         sun_dir,
         sun_intensity,
-        0.0,
+        shader_time,
         Some(&state.ui),
     )?;
 

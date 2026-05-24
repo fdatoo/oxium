@@ -1,6 +1,6 @@
 //! Clap CLI definitions for `oxium-probe`.
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(
@@ -118,8 +118,32 @@ pub struct CaptureArgs {
 
     /// Minimum wall-clock delay between consecutive captures in burst mode
     /// (--frames > 1). 0 = capture on every rendered frame. Default: 0.
+    /// Ignored and must be 0 when --mode sim is active.
     #[arg(long, default_value_t = 0)]
     pub interval_ms: u64,
+
+    /// Burst timing mode:
+    ///   wallclock — captures are spaced by real wall time (default).
+    ///   sim       — drives a fixed-timestep simulation clock; fully
+    ///               deterministic: same seed + sim-dt + frame index = same pixels.
+    #[arg(long, value_enum, default_value_t = BurstMode::Wallclock)]
+    pub mode: BurstMode,
+
+    /// Fixed simulation timestep in seconds for --mode sim.
+    /// Default: 1/60 ≈ 0.01667 (60 Hz simulation).
+    #[arg(long, default_value_t = 1.0_f32 / 60.0)]
+    pub sim_dt: f32,
+}
+
+/// How burst captures are timed.
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
+pub enum BurstMode {
+    /// Space captures by real wall-clock time. Game loop runs normally;
+    /// captures real jitter, popping, and animation seams.
+    Wallclock,
+    /// Drive a fixed-timestep simulation clock. Bypasses wall-clock timing;
+    /// all captured frames are fully reproducible across runs.
+    Sim,
 }
 
 // ── Coordinate parsers ─────────────────────────────────────────────────────

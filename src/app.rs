@@ -326,17 +326,29 @@ impl AppState {
         }
     }
 
-    /// Run one frame: input → movement → world_stream → drain_jobs →
-    /// world_unload → render. See module docs for ordering rationale.
-    pub fn step(&mut self) {
-        let now = Instant::now();
-        let dt = now.duration_since(self.last_tick).as_secs_f32().min(0.1);
-        self.last_tick = now;
+    /// Run one frame with a caller-supplied timestep and optional shader-time
+    /// override.
+    ///
+    /// # Parameters
+    ///
+    /// - `dt`: physics timestep in seconds (capped to 0.1 by the caller for
+    ///   wall-clock mode; passed raw for sim mode).
+    /// - `sim_time_override`: when `Some(t)`, the renderer's shader `time`
+    ///   uniform (used by water shimmer, sun movement, etc.) is driven by `t`
+    ///   instead of `self.start_time.elapsed()`. Pass `None` from the
+    ///   [`step`] wrapper so the wall-clock path computes shader time at the
+    ///   same point in the frame as before, preserving byte-identical PNG
+    ///   output vs. the un-refactored version.
+    ///
+    /// The probe's sim-burst mode calls this directly with
+    /// `Some(sim_time)` so every burst run is fully reproducible: same seed,
+    /// same `sim_dt`, same frame index → identical pixels.
+    pub fn step_with_dt(&mut self, dt: f32, sim_time_override: Option<f32>) {
         self.fps_meter.record(dt);
         // Start of the per-step CPU work; stopped just before the
         // render `present()` call so the measurement excludes
         // wall-clock time we spend waiting on vsync.
-        let work_start = now;
+        let work_start = Instant::now();
         use crate::profiler::time;
 
         self.ui.tick(dt);
@@ -538,7 +550,11 @@ impl AppState {
         }
 
         let prof = self.profiler.as_ref();
-        let now_secs = self.start_time.elapsed().as_secs_f32();
+        // Shader time: use the caller-supplied value when running under a
+        // deterministic sim clock; otherwise read wall-clock elapsed time at
+        // the same point in the frame as the original code (preserves
+        // byte-identical output on the normal path).
+        let now_secs = sim_time_override.unwrap_or_else(|| self.start_time.elapsed().as_secs_f32());
         let fps = self.fps_meter.fps();
         // Underwater detection: probe the block at the camera's eye
         // position. `get_block` returns `None` for unloaded chunks
@@ -604,6 +620,24 @@ impl AppState {
             });
         }
         self.frame_edit_count = 0;
+    }
+
+    /// Run one frame driven by real wall-clock time.
+    ///
+    /// Computes `dt` from the gap since the last call, caps it at 100 ms to
+    /// prevent large physics leaps after a pause or background stall, then
+    /// delegates to [`step_with_dt`] with `sim_time_override = None` so the
+    /// shader time reads from `self.start_time` at the same place as the
+    /// original single-method code did — preserving byte-identical PNG output.
+    ///
+    /// This is the path used by the normal game window and wall-clock burst
+    /// capture. The probe's sim-burst mode bypasses this and calls
+    /// [`step_with_dt`] directly.
+    pub fn step(&mut self) {
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_tick).as_secs_f32().min(0.1);
+        self.last_tick = now;
+        self.step_with_dt(dt, None);
     }
 
     /// Run relight for a single edit-dirtied chunk synchronously on
