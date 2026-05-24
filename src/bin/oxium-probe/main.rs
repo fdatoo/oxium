@@ -29,6 +29,7 @@ use clap::Parser;
 mod capture;
 mod cli;
 mod inspect;
+mod script;
 mod sidecar;
 
 fn main() -> anyhow::Result<()> {

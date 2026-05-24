@@ -133,6 +133,21 @@ pub struct CaptureArgs {
     /// Default: 1/60 ≈ 0.01667 (60 Hz simulation).
     #[arg(long, default_value_t = 1.0_f32 / 60.0)]
     pub sim_dt: f32,
+
+    /// JSON script file for injecting player input during --mode sim bursts.
+    ///
+    /// The file must be a JSON array of timed steps. Example:
+    ///
+    ///   [
+    ///     { "at_s": 0.0, "press":   ["MoveForward"] },
+    ///     { "at_s": 1.0, "release": ["MoveForward"] }
+    ///   ]
+    ///
+    /// Each step fires once when `sim_time >= at_s`. Recognised action names
+    /// are the exact variant names of `InputAction` (see input_engine.rs).
+    /// Rejected with an error if --mode is not sim.
+    #[arg(long, value_name = "PATH.json")]
+    pub script: Option<std::path::PathBuf>,
 }
 
 /// How burst captures are timed.

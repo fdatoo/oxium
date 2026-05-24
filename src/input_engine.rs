@@ -460,6 +460,54 @@ impl InputEngine {
         self.raw.on_scroll(lines);
     }
 
+    /// Inject a synthetic key event for the first key binding of `action`.
+    ///
+    /// Finds the first `Key(…)` input listed for the action in the current
+    /// config snapshot and calls [`on_key`] with it. Respects live
+    /// rebindings since it reads the `ConfigHolder` on every call. If the
+    /// action has no key binding in the current config, logs a warning and
+    /// returns without panicking — the script driver validates that all
+    /// action names resolve at load time, so this path is unreachable in
+    /// normal use.
+    ///
+    /// Intended for the probe's sim-burst scripted input; not wired into any
+    /// game UI.
+    pub fn inject_action(&mut self, action: InputAction, state: ElementState) {
+        let snap = self.config.load();
+        for binding in &snap.config.bindings {
+            if binding.action == action
+                && let Some(InputBinding::Key(key_name)) = binding.inputs.first()
+            {
+                self.raw.on_key(key_name.to_winit(), state, None);
+                return;
+            }
+        }
+        log::warn!("inject_action: no key binding found for {:?}", action);
+    }
+
+    /// Inject a synthetic one-frame camera rotation.
+    ///
+    /// `yaw_delta_rad`: positive = turn right; added to `Camera.yaw` via
+    /// `apply_input`'s `cam.yaw += look_delta.x`.
+    /// `pitch_delta_rad`: positive = look up; added to `Camera.pitch` via
+    /// `apply_input`'s `cam.pitch -= look_delta.y`.
+    ///
+    /// The raw mouse delta is divided by `mouse_sensitivity` so the existing
+    /// scaling in `resolve()` produces the requested camera rotation. Clears
+    /// automatically after the next `clear_frame()`, so subsequent frames see
+    /// no residual motion unless this is called again.
+    pub fn inject_look(&mut self, yaw_delta_rad: f32, pitch_delta_rad: f32) {
+        let sensitivity = self.config.load().config.mouse_sensitivity;
+        if sensitivity > 0.0 {
+            self.raw.on_mouse_motion(
+                (yaw_delta_rad / sensitivity) as f64,
+                // `cam.pitch -= look_delta.y`, so a positive pitch_delta needs
+                // a negative mouse_dy (raw Y grows downward on screen).
+                (-pitch_delta_rad / sensitivity) as f64,
+            );
+        }
+    }
+
     pub fn clear_frame(&mut self) {
         self.raw.clear_frame();
     }

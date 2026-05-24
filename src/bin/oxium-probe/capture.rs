@@ -46,6 +46,7 @@ use oxium::worldgen::features::{self, FeatureHit, FeatureKind};
 use oxium::worldgen::Generator;
 
 use crate::cli::{BurstMode, CaptureArgs, parse_xz, parse_xyz};
+use crate::script::ScriptDriver;
 use crate::sidecar::{CaptureMeta, CameraInfo, FeatureTargetInfo, GroundInfo, PerfInfo};
 
 // How many consecutive frames the chunk-mesh count must be stable
@@ -124,6 +125,21 @@ pub fn run(seed: u64, args: CaptureArgs) -> anyhow::Result<()> {
             args.interval_ms
         );
     }
+    if args.script.is_some() && args.mode != BurstMode::Sim {
+        anyhow::bail!(
+            "--script requires --mode sim (wall-clock bursts are too jittery for timed script \
+             steps). Add --mode sim or remove --script."
+        );
+    }
+
+    // Load and validate the script now (before the renderer starts) so any
+    // typos in action names surface immediately.
+    let script: Option<ScriptDriver> = args
+        .script
+        .as_deref()
+        .map(ScriptDriver::load)
+        .transpose()
+        .context("loading --script file")?;
 
     // Resolve metrics CSV path:
     //   single-shot: <out_png>.metrics.csv
@@ -150,6 +166,7 @@ pub fn run(seed: u64, args: CaptureArgs) -> anyhow::Result<()> {
         burst_interval: Duration::from_millis(args.interval_ms),
         burst_mode: args.mode,
         sim_dt: args.sim_dt,
+        script,
         metrics_path,
         feature_hit,
         state: None,
@@ -187,6 +204,11 @@ struct ProbeCapture {
     burst_mode: BurstMode,
     /// Fixed timestep in seconds for sim mode.
     sim_dt: f32,
+    /// Optional scripted input driver (sim mode only).
+    ///
+    /// Ticked once per sim step before `step_with_dt`, injecting key presses,
+    /// releases, and camera deltas from the JSON script file.
+    script: Option<ScriptDriver>,
     /// Accumulated sim clock. Starts at 0 when quiesce completes; advances by
     /// `sim_dt` each captured frame. Used as the shader `time` uniform so
     /// water animation and sun position are deterministic.
@@ -291,6 +313,12 @@ impl ApplicationHandler for ProbeCapture {
                     && self.burst_next_at.is_some();
 
                 if in_sim_burst {
+                    // Fire scripted input steps before the simulation tick so
+                    // the injected presses are consumed by the movement system
+                    // in this very frame.
+                    if let Some(ref mut script) = self.script {
+                        script.tick(&mut state.input, self.sim_time);
+                    }
                     // Fixed timestep, shader time = self.sim_time.
                     state.step_with_dt(self.sim_dt, Some(self.sim_time));
                 } else {

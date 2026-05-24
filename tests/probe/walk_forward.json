@@ -1,0 +1,4 @@
+[
+  { "at_s": 0.0, "press":   ["MoveForward"] },
+  { "at_s": 1.0, "release": ["MoveForward"] }
+]
