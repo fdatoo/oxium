@@ -469,6 +469,7 @@ impl ApplicationHandler for App {
                     } else {
                         release_cursor(&state.window);
                     }
+                    state.input.clear_all();
                 }
 
                 // Re-assert cursor invisibility every gameplay frame.
@@ -585,10 +586,9 @@ impl ApplicationHandler for App {
         let Some(state) = self.state.as_mut() else {
             return;
         };
-        if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
-            // Raw motion is always buffered; action resolution only turns it
-            // into look input in the gameplay context, and frame clear drops
-            // menu/chat motion before it can affect the camera.
+        if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event
+            && state.ui.is_playing()
+        {
             state.input.on_mouse_motion(dx, dy);
         }
     }

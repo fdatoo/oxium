@@ -5,8 +5,9 @@
 //!
 //! Integration in both modes happens in [`crate::ecs::systems::physics`] via
 //! `sweep_player`; this system only writes the desired velocity. Fly mode
-//! skips gravity (so you float when not pressing keys) but still respects
-//! voxel collision, matching creative-flight conventions.
+//! skips gravity but still respects voxel collision, matching creative-flight
+//! conventions. It accelerates toward the desired velocity and applies drag
+//! with no input, so motion has controlled momentum instead of snap starts.
 //!
 //! Walk-bob: advances `Camera.bob_phase` while the player is walking on
 //! the ground. The renderer reads the phase to apply a small head-sway
@@ -64,11 +65,21 @@ pub fn movement(ecs: &mut GameEcs, dt: f32) {
             // so creative-mode movement feels distinctly faster than
             // walking, especially with sprint stacked on top.
             const FLY_SPEED_MULT: f32 = 3.0;
+            const FLY_ACCEL: f32 = 42.0;
+            const FLY_DRAG: f32 = 8.0;
             let speed = base_speed * FLY_SPEED_MULT;
             let wish = right * input.wishdir.x
                 + forward_horiz * input.wishdir.z
                 + Vec3::Y * input.wishdir.y;
-            vel.0 = wish.normalize_or_zero() * speed;
+            if wish.length_squared() > 1e-6 {
+                let target = wish.normalize() * speed;
+                vel.0 += (target - vel.0).clamp_length_max(FLY_ACCEL * dt);
+            } else {
+                vel.0 *= (1.0 - FLY_DRAG * dt).max(0.0);
+                if vel.0.length_squared() < 1e-4 {
+                    vel.0 = Vec3::ZERO;
+                }
+            }
         }
         MovementMode::Walk => {
             // Quake-style ground accel + friction.
@@ -121,5 +132,45 @@ pub fn movement(ecs: &mut GameEcs, dt: f32) {
         if cam.bob_phase > std::f32::consts::TAU * 32.0 {
             cam.bob_phase -= std::f32::consts::TAU * 32.0;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ecs::components::{MovementMode, PlayerInput, Velocity};
+    use glam::Vec3;
+
+    #[test]
+    fn fly_accelerates_toward_target_instead_of_snapping() {
+        let mut ecs = GameEcs::new(Vec3::new(0.0, 64.0, 0.0));
+        {
+            let mut q = ecs
+                .world
+                .query_one::<(&mut Movement, &mut PlayerInput)>(ecs.player)
+                .unwrap();
+            let (movement, input) = q.get().unwrap();
+            movement.mode = MovementMode::Fly;
+            input.wishdir.z = 1.0;
+        }
+
+        movement(&mut ecs, 1.0 / 60.0);
+        let speed = {
+            let mut q = ecs.world.query_one::<&Velocity>(ecs.player).unwrap();
+            q.get().unwrap().0.length()
+        };
+        assert!(speed > 0.0);
+        assert!(speed < 15.0, "fly velocity should ramp, not snap to max");
+
+        {
+            let mut q = ecs.world.query_one::<&mut PlayerInput>(ecs.player).unwrap();
+            q.get().unwrap().wishdir = Vec3::ZERO;
+        }
+        movement(&mut ecs, 1.0 / 60.0);
+        let decayed = {
+            let mut q = ecs.world.query_one::<&Velocity>(ecs.player).unwrap();
+            q.get().unwrap().0.length()
+        };
+        assert!(decayed < speed, "fly velocity should decay with no input");
     }
 }

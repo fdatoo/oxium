@@ -37,6 +37,7 @@ pub struct Ui {
     /// Set to `true` when a `UiEffect::Quit` is drained, so the event
     /// loop can call `event_loop.exit()` from outside the step.
     pub wants_quit: bool,
+    chat_history: VecDeque<String>,
     chat_drag_anchor: Option<usize>,
     last_chat_click: Option<(Instant, usize)>,
 }
@@ -126,13 +127,24 @@ impl Ui {
             effects: VecDeque::new(),
             cursor_state_changed: false,
             wants_quit: false,
+            chat_history: VecDeque::new(),
             chat_drag_anchor: None,
             last_chat_click: None,
         }
     }
 
+    fn chat_input(&self, prefill: &str) -> ChatInput {
+        let mut input = ChatInput::new(prefill);
+        input.history = self.chat_history.clone();
+        input
+    }
+
     pub fn is_playing(&self) -> bool {
         matches!(self.state, UiState::Playing)
+    }
+
+    pub fn should_step_game(&self) -> bool {
+        !matches!(self.state, UiState::Paused { .. })
     }
 
     pub fn input_mode(&self) -> InputMode {
@@ -171,11 +183,11 @@ impl Ui {
                     };
                 } else if actions.pressed(InputAction::OpenChat) {
                     self.state = UiState::Chat {
-                        input: ChatInput::new(""),
+                        input: self.chat_input(""),
                     };
                 } else if actions.pressed(InputAction::OpenCommandChat) {
                     self.state = UiState::Chat {
-                        input: ChatInput::new("/"),
+                        input: self.chat_input("/"),
                     };
                 }
             }
@@ -246,8 +258,10 @@ impl Ui {
                     }
                     if actions.pressed(InputAction::ChatSubmit) {
                         let line = input.submit();
-                        self.submit_chat(&line);
-                        self.state = UiState::Playing;
+                        self.chat_history = input.history.clone();
+                        if !self.submit_chat(&line) {
+                            self.state = UiState::Playing;
+                        }
                     }
                 }
             }
@@ -280,6 +294,7 @@ impl Ui {
         let mut submitted = None;
         let mut close_chat = false;
         let mut clipboard_error = None;
+        let mut chat_history = None;
 
         {
             let UiState::Chat { input } = &mut self.state else {
@@ -330,7 +345,10 @@ impl Ui {
                 KeyCode::ArrowUp => input.history_prev(),
                 KeyCode::ArrowDown => input.history_next(),
                 KeyCode::Tab => Self::apply_chat_completion(&self.commands, input),
-                KeyCode::Enter | KeyCode::NumpadEnter => submitted = Some(input.submit()),
+                KeyCode::Enter | KeyCode::NumpadEnter => {
+                    submitted = Some(input.submit());
+                    chat_history = Some(input.history.clone());
+                }
                 _ if primary => {}
                 _ => {
                     if let Some(text) = text
@@ -345,9 +363,11 @@ impl Ui {
         if let Some(err) = clipboard_error {
             self.log.push_error(err);
         }
+        if let Some(history) = chat_history {
+            self.chat_history = history;
+        }
         if let Some(line) = submitted {
-            self.submit_chat(&line);
-            close_chat = true;
+            close_chat = !self.submit_chat(&line);
         }
         if close_chat {
             self.state = UiState::Playing;
@@ -408,13 +428,13 @@ impl Ui {
             }
             (UiState::Playing, KeyCode::KeyT) => {
                 self.state = UiState::Chat {
-                    input: ChatInput::new(""),
+                    input: self.chat_input(""),
                 };
                 true
             }
             (UiState::Playing, KeyCode::Slash) => {
                 self.state = UiState::Chat {
-                    input: ChatInput::new("/"),
+                    input: self.chat_input("/"),
                 };
                 true
             }
@@ -512,7 +532,11 @@ impl Ui {
                         Self::apply_chat_completion(&self.commands, input);
                         None
                     }
-                    KeyCode::Enter | KeyCode::NumpadEnter => Some(input.submit()),
+                    KeyCode::Enter | KeyCode::NumpadEnter => {
+                        let line = input.submit();
+                        self.chat_history = input.history.clone();
+                        Some(line)
+                    }
                     _ => {
                         if let Some(t) = text
                             && !t.chars().any(|c| c.is_control())
@@ -523,9 +547,10 @@ impl Ui {
                     }
                 };
                 if let Some(line) = submitted {
-                    self.submit_chat(&line);
-                    self.state = UiState::Playing;
-                    self.cursor_state_changed = true;
+                    if !self.submit_chat(&line) {
+                        self.state = UiState::Playing;
+                        self.cursor_state_changed = true;
+                    }
                 }
             }
             UiState::Playing => {}
@@ -554,15 +579,16 @@ impl Ui {
         }
     }
 
-    fn submit_chat(&mut self, line: &str) {
+    fn submit_chat(&mut self, line: &str) -> bool {
         let line = line.trim();
         if line.is_empty() {
-            return;
+            return false;
         }
         if !line.starts_with('/') {
             self.log.push_player(line);
-            return;
+            return false;
         }
+        let keep_open = command_name(line) == Some("help");
         self.log.push_echo(line);
 
         match self.commands.dispatch(line) {
@@ -570,13 +596,17 @@ impl Ui {
                 for e in effs {
                     match e {
                         UiEffect::PostMessage(msg) => self.log.push_system(msg),
-                        UiEffect::ClearChat => self.log.clear(),
+                        UiEffect::ClearChat => {
+                            self.log.clear();
+                            self.log.push_system("Chat cleared.");
+                        }
                         other => self.push_effect(other),
                     }
                 }
             }
             Err(err) => self.log.push_error(err.message),
         }
+        keep_open
     }
 
     fn apply_chat_completion(commands: &Registry, input: &mut ChatInput) {
@@ -687,6 +717,10 @@ impl Ui {
             }
         }
     }
+}
+
+fn command_name(line: &str) -> Option<&str> {
+    line.trim().strip_prefix('/')?.split_whitespace().next()
 }
 
 #[cfg(test)]
@@ -838,6 +872,52 @@ mod tests {
             UiState::Chat { input } => assert_eq!(input.buf, "hello"),
             _ => panic!("expected chat"),
         }
+    }
+
+    #[test]
+    fn chat_history_survives_reopen() {
+        let mut ui = Ui::new();
+        ui.apply_actions(&actions(&[InputAction::OpenCommandChat], &[]));
+        ui.apply_actions(&actions(&[], &["fly"]));
+        ui.apply_actions(&actions(&[InputAction::ChatSubmit], &[]));
+        assert!(ui.is_playing());
+
+        ui.apply_actions(&actions(&[InputAction::OpenChat], &[]));
+        ui.apply_actions(&actions(&[InputAction::ChatHistoryPrev], &[]));
+        match &ui.state {
+            UiState::Chat { input } => assert_eq!(input.buf, "/fly"),
+            _ => panic!("expected chat"),
+        }
+    }
+
+    #[test]
+    fn chat_does_not_pause_game_step() {
+        let mut ui = Ui::new();
+        assert!(ui.should_step_game());
+        ui.apply_actions(&actions(&[InputAction::OpenChat], &[]));
+        assert!(!ui.is_playing());
+        assert!(ui.should_step_game());
+
+        let mut paused = Ui::new();
+        paused.apply_actions(&actions(&[InputAction::Pause], &[]));
+        assert!(!paused.should_step_game());
+    }
+
+    #[test]
+    fn help_command_keeps_chat_open_with_header() {
+        let mut ui = Ui::new();
+        ui.apply_actions(&actions(&[InputAction::OpenCommandChat], &[]));
+        ui.apply_actions(&actions(&[], &["help"]));
+        ui.apply_actions(&actions(&[InputAction::ChatSubmit], &[]));
+
+        assert!(matches!(ui.state, UiState::Chat { .. }));
+        let lines: Vec<_> = ui.log.iter().map(|line| line.text.as_str()).collect();
+        assert!(lines.contains(&"Commands:"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| *line == "/tp <x> <y> <z> - teleport the player")
+        );
     }
 
     #[test]

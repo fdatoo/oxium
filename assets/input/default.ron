@@ -15,6 +15,7 @@
         (context: Gameplay, action: Sprint, inputs: [Key(ControlLeft), Key(ControlRight)]),
         (context: Gameplay, action: Break, inputs: [Mouse(Left)]),
         (context: Gameplay, action: Place, inputs: [Mouse(Right)]),
+        (context: Gameplay, action: PickBlock, inputs: [Key(KeyP), Mouse(Middle)]),
         (context: Gameplay, action: ToggleFly, inputs: [Key(KeyF)]),
         (context: Gameplay, action: SelectSlot1, inputs: [Key(Digit1)]),
         (context: Gameplay, action: SelectSlot2, inputs: [Key(Digit2)]),

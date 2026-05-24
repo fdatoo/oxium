@@ -23,9 +23,12 @@ pub struct InputState {
     pub last_break_at: Option<Instant>,
     pub last_place_at: Option<Instant>,
     pub last_space_press_at: Option<Instant>,
+    pub last_forward_press_at: Option<Instant>,
+    pub sprint_enabled: bool,
 }
 
 const ACTION_REPEAT: Duration = Duration::from_millis(200);
+const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(280);
 
 /// Drive the player's `Camera`, `PlayerInput`, and `Movement` components
 /// from the current [`ActionState`].
@@ -67,7 +70,35 @@ pub fn apply_input(ecs: &mut GameEcs, actions: &ActionState, state: &mut InputSt
     }
     input.wishdir = wd;
     input.jump = actions.down(InputAction::Jump);
-    input.sprint = actions.down(InputAction::Sprint);
+
+    let walking = wd.x.abs() > 1e-4 || wd.z.abs() > 1e-4;
+    if walking {
+        if actions.pressed(InputAction::Sprint) {
+            state.sprint_enabled = true;
+        }
+        if actions.pressed(InputAction::MoveForward) {
+            let now = Instant::now();
+            if state
+                .last_forward_press_at
+                .is_some_and(|t| now - t <= DOUBLE_TAP_WINDOW)
+            {
+                state.sprint_enabled = true;
+                state.last_forward_press_at = None;
+            } else {
+                state.last_forward_press_at = Some(now);
+            }
+        }
+        input.sprint = state.sprint_enabled;
+    } else {
+        let was_sprinting = state.sprint_enabled;
+        state.sprint_enabled = false;
+        if was_sprinting {
+            state.last_forward_press_at = None;
+        } else if actions.pressed(InputAction::MoveForward) {
+            state.last_forward_press_at = Some(Instant::now());
+        }
+        input.sprint = false;
+    }
 
     // Edge-triggered: `F` toggles between Walk and Fly.
     if actions.pressed(InputAction::ToggleFly) {
@@ -78,7 +109,6 @@ pub fn apply_input(ecs: &mut GameEcs, actions: &ActionState, state: &mut InputSt
     }
 
     // Double-tap Space within 280 ms also toggles Walk ⇄ Fly.
-    const DOUBLE_TAP_WINDOW: Duration = Duration::from_millis(280);
     if actions.pressed(InputAction::Jump) {
         let now = Instant::now();
         if state
@@ -114,6 +144,7 @@ pub fn apply_input(ecs: &mut GameEcs, actions: &ActionState, state: &mut InputSt
     let place_fired = actions.pressed(InputAction::Place)
         || (place_down && state.last_place_at.is_none_or(|t| now - t >= ACTION_REPEAT));
     input.place = place_fired;
+    input.pick_block = actions.pressed(InputAction::PickBlock);
     if place_fired {
         state.last_place_at = Some(now);
     }
@@ -208,6 +239,78 @@ mod tests {
         apply_input(&mut e, &actions, &mut st);
         let pi = read_pi(&mut e);
         assert!(pi.break_);
+    }
+
+    #[test]
+    fn pick_block_sets_edge_flag() {
+        let mut e = ecs();
+        let mut actions = actions();
+        let mut st = InputState::default();
+        actions.set_pressed(InputAction::PickBlock);
+        apply_input(&mut e, &actions, &mut st);
+        let pi = read_pi(&mut e);
+        assert!(pi.pick_block);
+    }
+
+    #[test]
+    fn sprint_key_enters_sprint_only_while_walking() {
+        let mut e = ecs();
+        let mut actions = actions();
+        let mut st = InputState::default();
+
+        actions.set_pressed(InputAction::Sprint);
+        apply_input(&mut e, &actions, &mut st);
+        assert!(
+            !read_pi(&mut e).sprint,
+            "sprint key should not arm sprint while stationary"
+        );
+
+        actions.pressed.clear();
+        actions.set_pressed(InputAction::MoveForward);
+        actions.set_down(InputAction::MoveForward);
+        actions.set_pressed(InputAction::Sprint);
+        apply_input(&mut e, &actions, &mut st);
+        assert!(read_pi(&mut e).sprint);
+
+        actions.pressed.clear();
+        apply_input(&mut e, &actions, &mut st);
+        assert!(
+            read_pi(&mut e).sprint,
+            "sprint should persist while walking"
+        );
+
+        actions.down.clear();
+        apply_input(&mut e, &actions, &mut st);
+        assert!(!read_pi(&mut e).sprint, "stopping should reset sprint");
+
+        actions.set_pressed(InputAction::MoveForward);
+        actions.set_down(InputAction::MoveForward);
+        apply_input(&mut e, &actions, &mut st);
+        assert!(
+            !read_pi(&mut e).sprint,
+            "ordinary movement after stopping should start at walk speed"
+        );
+    }
+
+    #[test]
+    fn double_tap_forward_enables_sprint_mode() {
+        let mut e = ecs();
+        let mut actions = actions();
+        let mut st = InputState::default();
+
+        actions.set_pressed(InputAction::MoveForward);
+        actions.set_down(InputAction::MoveForward);
+        apply_input(&mut e, &actions, &mut st);
+        assert!(!read_pi(&mut e).sprint);
+
+        actions.pressed.clear();
+        actions.down.clear();
+        apply_input(&mut e, &actions, &mut st);
+
+        actions.set_pressed(InputAction::MoveForward);
+        actions.set_down(InputAction::MoveForward);
+        apply_input(&mut e, &actions, &mut st);
+        assert!(read_pi(&mut e).sprint);
     }
 
     #[test]

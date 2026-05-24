@@ -16,6 +16,7 @@
 
 use crate::ecs::GameEcs;
 use crate::ecs::components::{Aabb, Camera, CursorTarget, PlayerInput, Position, Selected};
+use crate::render::hud::HOTBAR_BLOCKS;
 use crate::voxel::block::Block;
 use crate::voxel::coords::{BlockPos, ChunkCoord};
 use crate::voxel::raycast::raycast;
@@ -34,7 +35,7 @@ pub fn interaction(ecs: &mut GameEcs, world: &mut World) -> Vec<ChunkCoord> {
             &Camera,
             &Aabb,
             &mut PlayerInput,
-            &Selected,
+            &mut Selected,
             &mut CursorTarget,
         )>(ecs.player)
         .unwrap();
@@ -51,7 +52,13 @@ pub fn interaction(ecs: &mut GameEcs, world: &mut World) -> Vec<ChunkCoord> {
 
     let mut dirty = Vec::new();
     if let Some(h) = hit {
-        if input.break_ {
+        if input.pick_block {
+            if let Some(block) = world.get_block(h.block)
+                && HOTBAR_BLOCKS.contains(&Some(block))
+            {
+                sel.0 = block;
+            }
+        } else if input.break_ {
             dirty = world.set_block(h.block, Block::Air);
         } else if input.place {
             // Place the new block adjacent to the face the ray entered
@@ -66,6 +73,7 @@ pub fn interaction(ecs: &mut GameEcs, world: &mut World) -> Vec<ChunkCoord> {
     // Consume edge triggers so a held click doesn't repeat.
     input.break_ = false;
     input.place = false;
+    input.pick_block = false;
     dirty
 }
 
@@ -82,4 +90,42 @@ fn overlaps_player(block: BlockPos, feet: Vec3, half: Vec3) -> bool {
         && pmax.y > bmin.y
         && pmin.z < bmax.z
         && pmax.z > bmin.z
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ecs::components::{PlayerInput, Selected};
+    use crate::voxel::chunk::{DenseChunk, PalettedChunk};
+    use crate::voxel::coords::{ChunkCoord, LocalPos};
+    use glam::{IVec3, UVec3};
+
+    #[test]
+    fn pick_block_selects_looked_at_hotbar_block() {
+        let mut ecs = GameEcs::new(Vec3::new(0.5, 0.0, 0.5));
+        {
+            let mut q = ecs
+                .world
+                .query_one::<(&mut PlayerInput, &mut Selected)>(ecs.player)
+                .unwrap();
+            let (input, selected) = q.get().unwrap();
+            input.pick_block = true;
+            selected.0 = Block::Stone;
+        }
+
+        let mut dense = DenseChunk::empty();
+        dense.set(LocalPos(UVec3::new(3, 1, 0)), Block::Grass);
+        let mut world = World::new(42);
+        world.insert(ChunkCoord(IVec3::ZERO), PalettedChunk::compress(&dense));
+
+        let dirty = interaction(&mut ecs, &mut world);
+        assert!(dirty.is_empty());
+        let mut q = ecs
+            .world
+            .query_one::<(&PlayerInput, &Selected)>(ecs.player)
+            .unwrap();
+        let (input, selected) = q.get().unwrap();
+        assert!(!input.pick_block);
+        assert_eq!(selected.0, Block::Grass);
+    }
 }

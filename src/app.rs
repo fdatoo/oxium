@@ -89,9 +89,8 @@ pub struct AppState {
     /// the user triggered an edit.
     pub frame_edit_count: u32,
     /// UI state machine: pause menu, chat log, command dispatcher.
-    /// When `ui.is_playing()` is false, `step` skips the game schedule
-    /// (full freeze); the renderer still draws the last frame plus the
-    /// UI overlay so the menu/chat is visible.
+    /// Paused UI skips the game schedule; chat keeps it running while
+    /// routing keyboard input to the text editor.
     pub ui: crate::ui::Ui,
     pub clipboard: crate::ui::Clipboard,
     /// Per-frame `world_stream` scratch: the sorted candidate-chunk
@@ -348,7 +347,7 @@ impl AppState {
             self.input.clear_all();
         }
 
-        if self.ui.is_playing() {
+        if self.ui.should_step_game() {
             let prof = self.profiler.as_ref();
 
             time(prof, "input", || {
@@ -578,6 +577,7 @@ impl AppState {
                 &self.generator,
                 &self.world,
                 self.fullbright,
+                self.input.debug_enabled(),
             ) {
                 log::warn!("render error: {e:?}");
             }
@@ -810,6 +810,7 @@ impl AppState {
             UiEffect::Save => self.flush_modified(),
             UiEffect::Teleport(p) => {
                 use crate::ecs::components::{Position, Velocity};
+                let mut teleported = false;
                 if let Ok(mut q) = self
                     .ecs
                     .world
@@ -818,10 +819,17 @@ impl AppState {
                 {
                     pos.0 = p;
                     vel.0 = glam::Vec3::ZERO;
+                    teleported = true;
+                }
+                if teleported {
+                    self.ui
+                        .log
+                        .push_system(format!("Teleported to {:.1}, {:.1}, {:.1}.", p.x, p.y, p.z));
                 }
             }
             UiEffect::SetTime(t) => {
                 let t = t.clamp(0.0, 1.0);
+                let mut changed = false;
                 for (_, tod) in self
                     .ecs
                     .world
@@ -829,10 +837,15 @@ impl AppState {
                     .iter()
                 {
                     tod.t = t;
+                    changed = true;
+                }
+                if changed {
+                    self.ui.log.push_system(format!("Time set to {t:.2}."));
                 }
             }
             UiEffect::ToggleFly => {
                 use crate::ecs::components::{Movement, MovementMode};
+                let mut enabled = None;
                 if let Ok(mut q) = self.ecs.world.query_one::<&mut Movement>(self.ecs.player)
                     && let Some(mv) = q.get()
                 {
@@ -840,6 +853,12 @@ impl AppState {
                         MovementMode::Walk => MovementMode::Fly,
                         MovementMode::Fly => MovementMode::Walk,
                     };
+                    enabled = Some(matches!(mv.mode, MovementMode::Fly));
+                }
+                if let Some(on) = enabled {
+                    self.ui
+                        .log
+                        .push_system(if on { "fly ON" } else { "fly OFF" });
                 }
             }
             UiEffect::ToggleNoclip => {

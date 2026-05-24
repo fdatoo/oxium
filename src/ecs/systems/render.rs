@@ -32,6 +32,7 @@ pub fn render(
     generator: &Generator,
     world: &World,
     fullbright: bool,
+    debug_enabled: bool,
 ) -> Result<(), wgpu::SurfaceError> {
     let target = ecs
         .world
@@ -73,24 +74,31 @@ pub fn render(
         .position(|b| *b == Some(selected.0))
         .unwrap_or(0);
 
-    let time_of_day = ecs
-        .world
-        .query::<(&Sun, &TimeOfDay)>()
-        .iter()
-        .next()
-        .map(|(_, (_, tod))| tod.t)
-        .unwrap_or(0.5);
-    let probe = generator.probe_column(eye.x as i32, eye.z as i32);
-    let sky = sky_probe(world, eye);
-    let target_probe = target_probe(world, renderer, target.hit.map(|(b, _)| b));
-    let world_debug = WorldDebug {
-        seed: generator.seed(),
-        time_of_day,
-        yaw: cam.yaw,
-        pitch: cam.pitch,
-        probe: &probe,
-        sky,
-        target: target_probe,
+    let debug_probe;
+    let debug_sky;
+    let debug_target;
+    let world_debug = if debug_enabled {
+        let time_of_day = ecs
+            .world
+            .query::<(&Sun, &TimeOfDay)>()
+            .iter()
+            .next()
+            .map(|(_, (_, tod))| tod.t)
+            .unwrap_or(0.5);
+        debug_probe = generator.probe_column(eye.x as i32, eye.z as i32);
+        debug_sky = sky_probe(world, eye);
+        debug_target = target_probe(world, renderer, target.hit.map(|(b, _)| b));
+        Some(WorldDebug {
+            seed: generator.seed(),
+            time_of_day,
+            yaw: cam.yaw,
+            pitch: cam.pitch,
+            probe: &debug_probe,
+            sky: debug_sky,
+            target: debug_target,
+        })
+    } else {
+        None
     };
 
     let (sw, sh) = renderer.framebuffer_size();
@@ -101,7 +109,7 @@ pub fn render(
         selected_slot,
         registry,
         perf,
-        Some(&world_debug),
+        world_debug.as_ref(),
     );
     ui.draw_overlay((sw, sh), &mut hud);
 

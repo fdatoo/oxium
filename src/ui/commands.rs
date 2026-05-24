@@ -88,7 +88,8 @@ impl Registry {
                 .executes(|_| vec![UiEffect::ClearChat]),
         );
 
-        let lines = dispatcher.help_lines(&source);
+        let mut lines = vec!["Commands:".to_string()];
+        lines.extend(dispatcher.help_lines(&source));
         let _ = help_lines.set(lines);
 
         Self { dispatcher, source }
@@ -239,6 +240,7 @@ mod tests {
                 .iter()
                 .any(|line| line == "/tp <x> <y> <z> - teleport the player")
         );
+        assert_eq!(lines.first().map(String::as_str), Some("Commands:"));
         assert!(lines.iter().any(|line| line == "/teleport - alias for /tp"));
     }
 

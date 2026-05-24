@@ -90,6 +90,8 @@ pub struct PlayerInput {
     pub sprint: bool,
     /// Edge-triggered (consumed per frame): right-mouse button pressed.
     pub place: bool,
+    /// Edge-triggered: select the looked-at block from the hotbar if present.
+    pub pick_block: bool,
     /// Edge-triggered (consumed per frame): left-mouse button pressed.
     pub break_: bool,
     /// Edge-triggered: `F` was tapped this frame to toggle walk/fly.

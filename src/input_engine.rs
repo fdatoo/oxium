@@ -39,6 +39,7 @@ pub enum InputAction {
     Sprint,
     Break,
     Place,
+    PickBlock,
     ToggleFly,
     SelectSlot1,
     SelectSlot2,
@@ -118,6 +119,7 @@ pub enum KeyName {
     KeyS,
     KeyD,
     KeyF,
+    KeyP,
     KeyB,
     KeyT,
     Slash,
@@ -158,6 +160,7 @@ impl KeyName {
             Self::KeyS => KeyCode::KeyS,
             Self::KeyD => KeyCode::KeyD,
             Self::KeyF => KeyCode::KeyF,
+            Self::KeyP => KeyCode::KeyP,
             Self::KeyB => KeyCode::KeyB,
             Self::KeyT => KeyCode::KeyT,
             Self::Slash => KeyCode::Slash,
@@ -466,7 +469,6 @@ impl InputEngine {
         self.scroll_accumulator = 0.0;
     }
 
-    #[cfg(test)]
     pub fn debug_enabled(&self) -> bool {
         self.debug_enabled
     }
@@ -668,6 +670,19 @@ mod tests {
         let actions = engine.resolve(InputMode::Gameplay);
         assert!(actions.down(InputAction::MoveForward));
         assert_eq!(actions.move_axis.y, 1.0);
+    }
+
+    #[test]
+    fn pick_block_defaults_to_p_and_middle_mouse() {
+        let mut engine = engine();
+        engine.on_key(KeyCode::KeyP, ElementState::Pressed, None);
+        let actions = engine.resolve(InputMode::Gameplay);
+        assert!(actions.pressed(InputAction::PickBlock));
+
+        engine.clear_all();
+        engine.on_mouse_button(MouseButton::Middle, ElementState::Pressed);
+        let actions = engine.resolve(InputMode::Gameplay);
+        assert!(actions.pressed(InputAction::PickBlock));
     }
 
     #[test]

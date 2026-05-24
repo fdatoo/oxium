@@ -195,25 +195,23 @@ impl HudFrame {
     ///
     /// Each character occupies exactly `cell_w × scale` pixels horizontally
     /// (the font's monospace advance), and `glyph_h × scale` pixels
-    /// vertically. UV coordinates span the full slot cell so both left bearing
-    /// and right spacing are included in the sampled region — transparent atlas
-    /// pixels outside the visible glyph rasterise to zero alpha and are
-    /// effectively invisible.
+    /// vertically. UV coordinates are inset half a texel from slot edges so
+    /// nearest sampling cannot bleed into neighbouring glyph cells.
     pub fn push_text(&mut self, mut x: f32, y: f32, text: &str, scale: f32, color: [u8; 4]) -> f32 {
         let cw = font::cell_w() as f32;
         let gh = font::glyph_h() as f32;
         let aw = font::atlas_w() as f32;
         let ah = font::atlas_h() as f32;
+        let du = 0.5 / aw;
+        let dv = 0.5 / ah;
         let cw_px = cw * scale;
         let gh_px = gh * scale;
         for ch in text.chars() {
             let slot = font::slot_for(ch) as f32;
-            // UV covers the full cell width so the font's built-in side
-            // bearings are preserved. The atlas row is exactly one cell tall.
-            let u0 = slot * cw / aw;
-            let u1 = u0 + cw / aw;
-            let v0 = 0.0_f32;
-            let v1 = gh / ah; // = 1.0 since atlas_h == glyph_h
+            let u0 = slot * cw / aw + du;
+            let u1 = (slot + 1.0) * cw / aw - du;
+            let v0 = dv;
+            let v1 = gh / ah - dv;
             self.text
                 .push_quad(x, y, cw_px, gh_px, [u0, v0], [u1, v1], color);
             x += cw_px;
@@ -292,6 +290,37 @@ pub fn hotbar_layout(screen_px: (u32, u32)) -> HotbarLayout {
     }
 }
 
+fn push_crosshair(frame: &mut HudFrame, screen_px: (u32, u32)) {
+    let (sw, sh) = (screen_px.0 as f32, screen_px.1 as f32);
+    if sw <= 0.0 || sh <= 0.0 {
+        return;
+    }
+
+    let s = hud_scale(sh);
+    let cx = (sw * 0.5).round();
+    let cy = (sh * 0.5).round();
+    let thick = (2.0 * s).round().max(2.0);
+    let arm = (7.0 * s).round().max(7.0);
+    let gap = (3.0 * s).round().max(3.0);
+    let x_mid = (cx - thick * 0.5).round();
+    let y_mid = (cy - thick * 0.5).round();
+    let rects = [
+        (cx - gap - arm, y_mid, arm, thick),
+        (cx + gap, y_mid, arm, thick),
+        (x_mid, cy - gap - arm, thick, arm),
+        (x_mid, cy + gap, thick, arm),
+    ];
+
+    for (x, y, w, h) in rects {
+        frame
+            .icons
+            .push_rect(x - 1.0, y - 1.0, w + 2.0, h + 2.0, [0, 0, 0, 150]);
+    }
+    for (x, y, w, h) in rects {
+        frame.icons.push_rect(x, y, w, h, [255, 255, 255, 230]);
+    }
+}
+
 /// Build one frame of HUD content: the upper-left debug overlay
 /// (FPS + XYZ) and the bottom-centre hotbar. `screen_px` is the
 /// current framebuffer size so the hotbar can be centred without the
@@ -311,32 +340,33 @@ pub fn build_hud(
     let mut frame = HudFrame::new();
     let sh = screen_px.1 as f32;
 
-    // ── Upper-left debug overlay ────────────────────────────────────
-    // Scale 3 keeps the 5×7 glyphs at 15×21 px — readable at 1080p
-    // without dominating the frame.
-    let text_scale = 3.0;
-    let pad = 12.0;
-    let inner_pad = 6.0;
-    let line_h = 28.0;
-    let white = [255, 255, 255, 255];
-    let cyan = [120, 220, 255, 255];
+    if let Some(d) = debug {
+        // ── Upper-left debug overlay ────────────────────────────────────
+        let debug_scale = hud_scale(sh);
+        let text_scale = 1.25 * debug_scale;
+        let pad = 12.0 * debug_scale;
+        let inner_pad = 6.0 * debug_scale;
+        let line_h = font::glyph_h() as f32 * text_scale + 2.0 * debug_scale;
+        let white = [255, 255, 255, 255];
+        let cyan = [120, 220, 255, 255];
+        let yellow = [255, 220, 120, 255];
+        let green = [120, 255, 160, 255];
 
-    let fps_str = format!("FPS: {:.0}", fps);
-    let xyz_str = format!("XYZ: {:.1}  {:.1}  {:.1}", eye.x, eye.y, eye.z);
-    // Perf line: live counters for the debug HUD. "LO" = light-engine
-    // op queue depth entering this frame; large during initial stream-in,
-    // approaches zero as lighting converges. "CH" = chunk mesh count.
-    let perf_str = format!(
-        "LO: {} LD: {} PE: {} CH: {} DC: {} WMS: {:.1}",
-        perf.light_ops_pending,
-        perf.chunks_loaded,
-        perf.chunks_pending,
-        perf.chunks_rendered,
-        perf.draw_calls,
-        perf.work_ms,
-    );
+        let fps_str = format!("FPS: {:.0}", fps);
+        let xyz_str = format!("XYZ: {:.1}  {:.1}  {:.1}", eye.x, eye.y, eye.z);
+        // Perf line: live counters for the debug HUD. "LO" = light-engine
+        // op queue depth entering this frame; large during initial stream-in,
+        // approaches zero as lighting converges. "CH" = chunk mesh count.
+        let perf_str = format!(
+            "LO: {} LD: {} PE: {} CH: {} DC: {} WMS: {:.1}",
+            perf.light_ops_pending,
+            perf.chunks_loaded,
+            perf.chunks_pending,
+            perf.chunks_rendered,
+            perf.draw_calls,
+            perf.work_ms,
+        );
 
-    let (info_str, gen_str, cave_str, sky_str, target_str) = if let Some(d) = debug {
         let total_mins = (d.time_of_day * 24.0 * 60.0) as u32;
         let hh = total_mins / 60;
         let mm = total_mins % 60;
@@ -374,77 +404,61 @@ pub fn build_hud(
                 if t.gpu_light { "Y" } else { "N" },
             )
         });
-        (
-            format!(
-                "SEED: {}  TIME: {:02}:{:02}  {} {:.0}°/{:+.0}°",
-                d.seed, hh, mm, cardinal, yaw_deg, pitch_deg,
-            ),
-            format!(
-                "CONT: {:.2}  TEMP: {:.2}  HMD: {:.2}  WRD: {:.2}  {:?}",
-                p.continentalness, p.temperature, p.humidity, p.weirdness, p.biome,
-            ),
-            format!(
-                "H: {}  CAVE: {}  RIV: {}  FLOW: {}",
-                p.h_target,
-                p.cave_systems_count,
-                p.river_water_y
-                    .map_or_else(|| "-".to_string(), |y| y.to_string()),
-                p.flow_accum,
-            ),
-            format!(
-                "SKY[{},{},{}] eye={}  +Y0={}  col={}",
-                d.sky.eye_chunk.x, d.sky.eye_chunk.y, d.sky.eye_chunk.z, at_eye, above, col,
-            ),
-            target,
-        )
-    } else {
-        (
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-        )
-    };
+        let info_str = format!(
+            "SEED: {}  TIME: {:02}:{:02}  {} {:.0}°/{:+.0}°",
+            d.seed, hh, mm, cardinal, yaw_deg, pitch_deg,
+        );
+        let gen_str = format!(
+            "CONT: {:.2}  TEMP: {:.2}  HMD: {:.2}  WRD: {:.2}  {:?}",
+            p.continentalness, p.temperature, p.humidity, p.weirdness, p.biome,
+        );
+        let cave_str = format!(
+            "H: {}  CAVE: {}  RIV: {}  FLOW: {}",
+            p.h_target,
+            p.cave_systems_count,
+            p.river_water_y
+                .map_or_else(|| "-".to_string(), |y| y.to_string()),
+            p.flow_accum,
+        );
+        let sky_str = format!(
+            "SKY[{},{},{}] eye={}  +Y0={}  col={}",
+            d.sky.eye_chunk.x, d.sky.eye_chunk.y, d.sky.eye_chunk.z, at_eye, above, col,
+        );
 
-    let extra_lines = if debug.is_some() { 5 } else { 0 };
-    // A semi-transparent dark backdrop behind the text lines so the
-    // cyan/white glyphs stay readable against bright skies and grass.
-    // Panel width tracks the widest string; icons batch draws first in
-    // the pass so this lands beneath the text.
-    let glyph_w = font::cell_w() as f32 * text_scale;
-    let widest = fps_str
-        .chars()
-        .count()
-        .max(xyz_str.chars().count())
-        .max(perf_str.chars().count())
-        .max(info_str.chars().count())
-        .max(gen_str.chars().count())
-        .max(cave_str.chars().count())
-        .max(sky_str.chars().count())
-        .max(target_str.chars().count());
-    let panel_w = widest as f32 * glyph_w + inner_pad * 2.0;
-    let panel_h = line_h * (3 + extra_lines) as f32 + inner_pad * 2.0;
-    frame.icons.push_rect(
-        pad - inner_pad,
-        pad - inner_pad,
-        panel_w,
-        panel_h,
-        [0, 0, 0, 0xA0],
-    );
+        // A semi-transparent dark backdrop behind the text lines so the
+        // cyan/white glyphs stay readable against bright skies and grass.
+        let glyph_w = font::cell_w() as f32 * text_scale;
+        let widest = fps_str
+            .chars()
+            .count()
+            .max(xyz_str.chars().count())
+            .max(perf_str.chars().count())
+            .max(info_str.chars().count())
+            .max(gen_str.chars().count())
+            .max(cave_str.chars().count())
+            .max(sky_str.chars().count())
+            .max(target.chars().count());
+        let panel_w = widest as f32 * glyph_w + inner_pad * 2.0;
+        let panel_h = line_h * 8.0 + inner_pad * 2.0;
+        frame.icons.push_rect(
+            pad - inner_pad,
+            pad - inner_pad,
+            panel_w,
+            panel_h,
+            [0, 0, 0, 0xB8],
+        );
 
-    let yellow = [255, 220, 120, 255];
-    let green = [120, 255, 160, 255];
-    frame.push_text(pad, pad, &fps_str, text_scale, white);
-    frame.push_text(pad, pad + line_h, &xyz_str, text_scale, cyan);
-    frame.push_text(pad, pad + line_h * 2.0, &perf_str, text_scale, yellow);
-    if debug.is_some() {
+        frame.push_text(pad, pad, &fps_str, text_scale, white);
+        frame.push_text(pad, pad + line_h, &xyz_str, text_scale, cyan);
+        frame.push_text(pad, pad + line_h * 2.0, &perf_str, text_scale, yellow);
         frame.push_text(pad, pad + line_h * 3.0, &info_str, text_scale, white);
         frame.push_text(pad, pad + line_h * 4.0, &gen_str, text_scale, green);
         frame.push_text(pad, pad + line_h * 5.0, &cave_str, text_scale, cyan);
         frame.push_text(pad, pad + line_h * 6.0, &sky_str, text_scale, yellow);
-        frame.push_text(pad, pad + line_h * 7.0, &target_str, text_scale, green);
+        frame.push_text(pad, pad + line_h * 7.0, &target, text_scale, green);
     }
+
+    push_crosshair(&mut frame, screen_px);
 
     // ── Bottom-centre hotbar ────────────────────────────────────────
     let hotbar = hotbar_layout(screen_px);
@@ -496,4 +510,21 @@ pub fn build_hud(
     }
 
     frame
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crosshair_adds_center_quads() {
+        let mut frame = HudFrame::new();
+
+        push_crosshair(&mut frame, (1280, 720));
+
+        assert_eq!(frame.icons.vertices.len(), 32);
+        assert_eq!(frame.icons.indices.len(), 48);
+        assert_eq!(frame.icons.vertices[16].pos_px, [630.0, 359.0]);
+        assert_eq!(frame.icons.vertices[16].color, [255, 255, 255, 230]);
+    }
 }

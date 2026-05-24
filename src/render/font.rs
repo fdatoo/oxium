@@ -1,17 +1,17 @@
 //! TrueType font renderer for the HUD overlay.
 //!
-//! Replaces the hand-baked 5×7 bitmap table with **PixelOperatorMono8**, a
-//! pixel-art monospace font designed for 8 pt rendering. The font is embedded
+//! Replaces the hand-baked 5×7 bitmap table with **Spleen 8x16**, a
+//! pixel-art monospace font designed for 16 px rendering. The font is embedded
 //! at compile time via [`include_bytes!`] and rasterised once at startup by
 //! [`fontdue`] into the same flat `Rgba8Unorm` atlas the HUD pipeline already
 //! consumes. No changes to the GPU pipeline, shader, or vertex builder are
 //! required — only this module and the handful of call sites that read the old
 //! `const` metrics are updated.
 //!
-//! ## Why PixelOperatorMono8?
+//! ## Why Spleen?
 //!
-//! The font is distributed under the MIT license (see
-//! `assets/fonts/FONT_LICENSE.txt`), has a consistent 8-px advance width for
+//! The font is distributed under the BSD 2-Clause license (see
+//! `assets/fonts/SPLEEN_LICENSE.txt`), has a consistent 8-px advance width for
 //! every glyph, and covers the full printable ASCII range — so the HUD can now
 //! render any character rather than the curated 96-glyph table we maintained by
 //! hand.
@@ -36,15 +36,14 @@ use std::sync::OnceLock;
 
 use fontdue::{Font, FontSettings};
 
-/// Embedded PixelOperatorMono8 TrueType data. Licensed under MIT —
-/// see `assets/fonts/FONT_LICENSE.txt`.
-const FONT_DATA: &[u8] = include_bytes!("../../assets/fonts/PixelOperatorMono8.ttf");
+/// Embedded Spleen 8x16 OpenType data. Licensed under BSD 2-Clause —
+/// see `assets/fonts/SPLEEN_LICENSE.txt`.
+const FONT_DATA: &[u8] = include_bytes!("../../assets/fonts/spleen-8x16.otf");
 
-/// Rasterisation size in pixels. PixelOperator8 is hinted for 8 pt; rendering
-/// at exactly 8 px produces crisply aligned, zero-antialiased pixel edges. The
+/// Rasterisation size in pixels. Spleen 8x16 is drawn for this native size; the
 /// HUD vertex builder scales character quads independently via a float factor,
 /// so this only affects the resolution of the atlas itself.
-const PX_SIZE: f32 = 8.0;
+const PX_SIZE: f32 = 16.0;
 
 /// First code point stored in the atlas: U+0020 (space). Slot index = cp − FIRST.
 const FIRST: u32 = 0x0020;
@@ -58,7 +57,7 @@ struct FontState {
     /// Flat RGBA8 atlas buffer: `atlas_w × atlas_h × 4` bytes.
     atlas: Vec<u8>,
     /// Horizontal advance width in pixels, uniform across all glyphs because
-    /// PixelOperatorMono is a monospace family.
+    /// Spleen is a monospace family.
     cell_w: u32,
     /// Full line-box height: ascent + |descent|. Character quads are drawn at
     /// `glyph_h × scale` pixels tall.
@@ -81,12 +80,12 @@ fn state() -> &'static FontState {
 /// fontdue and compositing the coverage bitmaps into the atlas.
 fn build() -> FontState {
     let font = Font::from_bytes(FONT_DATA, FontSettings::default())
-        .expect("PixelOperatorMono8.ttf embedded in the binary is valid; this is a build bug");
+        .expect("spleen-8x16.otf embedded in the binary is valid; this is a build bug");
 
     // Derive cell dimensions from the font's line metrics at the chosen size.
     let line = font
         .horizontal_line_metrics(PX_SIZE)
-        .expect("PixelOperatorMono8.ttf has horizontal line metrics");
+        .expect("spleen-8x16.otf has horizontal line metrics");
 
     // fontdue reports descent as a negative value (below the baseline).
     let ascent = line.ascent.ceil() as i32;
@@ -161,7 +160,7 @@ fn build() -> FontState {
 // the dimensions are not known until fontdue has parsed the font at startup.
 
 /// Horizontal pixel advance for any character. Uniform across all glyphs
-/// because PixelOperatorMono is monospace.
+/// because Spleen is monospace.
 pub fn cell_w() -> u32 {
     state().cell_w
 }
