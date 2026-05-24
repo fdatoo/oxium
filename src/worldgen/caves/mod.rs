@@ -54,6 +54,12 @@ pub mod sdf;
 pub mod style;
 pub mod system;
 
+// Internal helpers split out of system.rs — not part of the public API.
+pub(super) mod chamber;
+pub(super) mod ctx;
+pub(super) mod entrance;
+pub(super) mod tunnel;
+
 // Re-export the public API surface so external callers use `caves::*`.
 pub use connectors::{build_trunks, build_vertical_connectors};
 pub use noise_carvers::{
