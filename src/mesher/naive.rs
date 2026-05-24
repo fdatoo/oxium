@@ -5,7 +5,7 @@
 //! contents, so we conservatively *do* emit those faces; M3 fixes this by
 //! plumbing neighbour chunks into the mesher.
 //!
-//! The greedy mesher in `greedy.rs` (M4) replaces this on the hot path, but
+//! The greedy mesher replaces this on the hot path, but
 //! the naive variant stays because:
 //!
 //! 1. It is the obvious-but-correct reference; greedy tests compare against it.
@@ -101,7 +101,7 @@ fn emit_quad(
         .unwrap_or(UNTEXTURED_TILE);
     // 1×1 quad UV per face, matching `face_corners`' winding so the
     // texture reads right-side up on every side face. See the equivalent
-    // comment in `greedy.rs::emit_greedy_quad` for the full rationale.
+    // comment in `greedy::emit::emit_greedy_quad` for the full rationale.
     // For naive: `face_corners` puts the two top-Y corners at indices 1
     // and 2, and the two bottom-Y corners at 0 and 3; the horizontal
     // (UV.x) side then follows the face's "near/far" corner ordering.

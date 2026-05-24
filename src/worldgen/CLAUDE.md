@@ -6,12 +6,12 @@ The worldgen package is a **pure `(seed, ChunkCoord) → DenseChunk` map**. Ever
 
 **Layer order (plates → chunk):**
 1. `plates.rs` — Voronoi tectonic plates → continental mask + roughness
-2. `heightmap.rs` — plate-driven FBM relief + domain warp → `h_pre`
-3. `density_graph.rs` — 9³ corner-lattice trilerp → per-voxel 3D density
+2. `density/heightmap.rs` — plate-driven FBM relief + domain warp → `h_pre`
+3. `density/` — 9³ corner-lattice trilerp → per-voxel 3D density
 4. `climate.rs` — 6D R-tree biome lookup, Voronoi jitter
-5. `region.rs` — LRU caches for fine/macro region builds
-6. `hydrology.rs` — D8 flow accumulation, sink-fill, valley carve, rivers
-7. `caves.rs` — graph cave systems, noise carvers (cheese, Terasology)
+5. `region/` — LRU caches for fine/macro region builds
+6. `hydrology/` — D8 flow accumulation, sink-fill, valley carve, rivers
+7. `caves/` — graph cave systems, noise carvers (cheese, Terasology)
 8. `surface.rs` — rule-tree surface block selection
 9. `fluid.rs` — fluid placement (sea, lakes, cave pools)
 10. `mod.rs` / `pipeline.rs` — orchestrates everything per chunk
@@ -81,7 +81,7 @@ Comments explain **why**. The code shows **what**.
 
 ## Naming Conventions
 
-- **Hash salts**: `const SALT_<PURPOSE>: i32 = N;` — never bare integers in `mix_u32`/`mix_unit` calls. See the `// ── Hash domain separators ──` block in `caves.rs` for the template.
+- **Hash salts**: `const SALT_<PURPOSE>: i32 = N;` — never bare integers in `mix_u32`/`mix_unit` calls. See the `// ── Hash domain separators ──` block in `caves/style.rs` for the template.
 - **Tuning constants**: `SCREAMING_SNAKE` in `tuning.rs`, organized under `// ── Section ──` banners.
 - **Newtypes** where a value carries clamp semantics (`RiverWidth`, `ChamberRadius`); leave plain `i32`/`f32` for purely arithmetic locals.
 

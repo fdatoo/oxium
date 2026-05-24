@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-**Oxium** is a single-player voxel sandbox engine in Rust (edition 2024, rust-version 1.95). It targets real-time procedural terrain, streaming chunk I/O, and incremental lighting. Current phase: post-M3 streaming foundation, with ongoing work on the graph-based lighting engine and worldgen documentation.
+**Oxium** is a single-player voxel sandbox engine in Rust (edition 2024, rust-version 1.95). It targets real-time procedural terrain, streaming chunk I/O, and chunk relighting. Current phase: post-M3 streaming foundation, with worldgen, voxel, persistence, and mesher organized around documented domain modules.
 
 - Published book: https://fdatoo.github.io/oxium/
 - Design specs: `docs/superpowers/specs/`
@@ -68,7 +68,8 @@ Write beautiful, idiomatic Rust. Prefer:
 
 - **Iterators over index loops** — `chunks.iter().filter_map(...)` over `for i in 0..n`
 - **`?` everywhere** — no `.unwrap()` in library code; reserve `.expect("reason")` for invariants that are genuinely impossible to violate
-- **Expressive types** — newtype wrappers (`ChunkCoord`, `BlockPos`, `LocalPos`) over raw integers; `impl Trait` return types where concrete types are unimportant to callers
+- **Expressive types** — newtype wrappers (`ChunkCoord`, `BlockPos`, `LocalPos`, `RegionCoord`, `RegionSlot`, `LightLevel`, `PackedRgbLight`) over raw integers; `impl Trait` return types where concrete types are unimportant to callers
+- **Traits with purpose** — add traits only for a real shared contract or hot-path specialization point; prefer newtypes for single-value invariants
 - **`match` / `if let`** over chained `.is_some()` / `.unwrap()`
 - **`From`/`Into`** for conversions between domain types
 - **`derive` first** — `#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]` before writing manual impls
@@ -94,12 +95,12 @@ Write beautiful, idiomatic Rust. Prefer:
 
 | Module | Responsibility |
 |--------|---------------|
-| `voxel/` | `Block`, `DenseChunk`/`PalettedChunk`, `World`, `BlockPos`/`ChunkCoord`/`LocalPos`, raycasting |
+| `voxel/` | `Block`, coordinate types, `DenseChunk`/`PalettedChunk`, light packing metadata, `World`, raycasting |
 | `worldgen/` | Seed-deterministic terrain pipeline: plates → heightmap → caves → hydrology → climate → surface → trees |
-| `lighting/` | Graph-engine `LightEngine` (default); legacy BFS behind `--features legacy-lighting` |
-| `mesher/` | Greedy mesh (production), naive (debug), LOD1/2, ambient occlusion |
+| `lighting/` | Chunk relight worker: sky light plus RGB block light BFS |
+| `mesher/` | Public mesh types, greedy mesh (production), naive (debug), LOD1/2, ambient occlusion |
 | `jobs/` | Two rayon pools (`gen_pool`, `mesh_pool`) + crossbeam result channels |
-| `persistence/` | Region file format, dedicated I/O thread, `SaveIndex` occupancy cache, world manifest |
+| `persistence/` | World manifest, 16^3 region file format, `SaveIndex` occupancy cache, dedicated I/O thread |
 | `physics/` | AABB collision helpers |
 
 ### Binary-only modules (depend on winit/wgpu)
@@ -128,21 +129,19 @@ let chunk = block.to_chunk();
 ### Chunk lifecycle
 
 ```
-Pending → Generated → Stored → (unload)
+Pending -> Stored(Generated/Meshing/Ready) -> (unload)
 ```
 
-Each chunk carries `mesh_dirty` / `light_dirty` flags; systems re-run the relevant job when set.
+Each stored chunk carries `ChunkMeta::dirty.mesh` and `ChunkMeta::dirty.light`; systems re-run the relevant job when set.
 
 ### Lighting
 
-**Graph engine (default):** Directed DAG per-voxel RGB light. Increase phase on block removal, decrease phase on block placement. Incremental per-frame ticks — no full recompute. Uses `TickCache` to amortize chunk decompress in the hot path.
-
-**Legacy BFS** (opt-in via `--features legacy-lighting`): Full BFS from sky ceiling + emissive blocks on every edit. Simpler but slower.
+The checked-in lighting path is recompute-on-dirty BFS. Sky light drops from the top face, RGB block light spreads from emissive blocks, and neighbour boundary values seed cross-chunk continuity. Graph-engine designs may exist in `docs/`, but they are not the current runtime authority unless implemented in code.
 
 ### Chunk compression
 
-- `DenseChunk` – flat 32³ `Block` array (~50 KB)
-- `PalettedChunk` – palette + bit-packed indices (1–4 bits/voxel, ~1 KB typical)
+- `DenseChunk` - hot, unpacked 32^3 block and light arrays used by generation, lighting, meshing, and edits
+- `PalettedChunk` - compressed in-memory/on-disk palette plus bit-packed indices
 - Compression happens post-worldgen/lighting, before disk write.
 
 ### Worldgen config hot-reload
@@ -151,7 +150,7 @@ Edit `assets/worldgen/default.ron` while the engine runs — `notify-debouncer-m
 
 ### Persistence
 
-Region files at `saves/default/regions/*.bin`. Delete this directory after any worldgen change or after seeing chunk-aligned artifacts at the stale/fresh boundary.
+16 x 16 x 16 chunk region files live at `saves/default/regions/*.bin`. Delete this directory after any worldgen change or after seeing chunk-aligned artifacts at the stale/fresh boundary.
 
 ---
 
@@ -188,7 +187,7 @@ tests/
   gen_with_neighbors.rs    Chunk gen with neighbor context
 ```
 
-Unit tests are inline (`#[cfg(test)]` blocks) throughout the library modules.
+Unit tests are inline (`#[cfg(test)]` blocks) or in sibling `tests.rs` / `*_tests.rs` modules.
 
 ---
 
@@ -199,6 +198,6 @@ Unit tests are inline (`#[cfg(test)]` blocks) throughout the library modules.
 - **Persistence is async** — the I/O thread saves in the background; on-disk state lags.
 - **Mesh must be re-uploaded after lighting changes** — handled by system ordering, but matters if you bypass the normal pipeline.
 - **Config hot-reload is not retroactive** — existing chunks don't refresh when `default.ron` changes.
-- **Legacy lighting requires a feature flag** — `cargo build --features legacy-lighting`; the graph engine is the default authority.
+- **Docs can lead code** - design plans may describe future systems. Inspect the runtime module before treating a plan as implemented.
 
-For worldgen-specific conventions (tuning.rs vs default.ron boundary, fingerprint test rules, common edit patterns, submodule layout), see `src/worldgen/CLAUDE.md`.
+For package-specific conventions, see the local `CLAUDE.md` files under `src/worldgen/`, `src/voxel/`, `src/mesher/`, and `src/persistence/`.

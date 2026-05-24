@@ -1,10 +1,19 @@
-//! Disk save format: Minecraft-style region files (`.mca`-ish).
+//! Persistent world storage.
 //!
-//! Each region file holds a 16×16 grid of chunks with a 4 KB header at the
-//! top. The header is 256 `u32` slot entries packed as `(offset_in_sectors:
-//! u24, len_sectors: u8)` so the file can be opened, header-read, and a
-//! single chunk located in two seeks. Chunk payload is `bincode(PalettedChunk)`
-//! then `zstd`-compressed.
+//! Procedural chunks are reproducible from the save seed, so disk only stores
+//! chunks the player has modified. The persistence layer is split into four
+//! small pieces:
+//!
+//! | Module       | Responsibility                                             |
+//! |--------------|------------------------------------------------------------|
+//! | `manifest`   | `world.toml`: seed, worldgen version, creation metadata    |
+//! | `region`     | 16 x 16 x 16 chunk region files, zstd-compressed payloads  |
+//! | `save_index` | per-session cache of which region slots exist on disk      |
+//! | `thread`     | single blocking I/O worker for async save/load requests    |
+//!
+//! Region files use a 16 KB header containing 4096 packed slot entries, then
+//! append compressed `PalettedChunk` blobs at EOF. [`SaveIndex`] reads those
+//! headers once per session so streaming can skip disk I/O for empty slots.
 
 pub mod manifest;
 pub mod region;

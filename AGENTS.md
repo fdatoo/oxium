@@ -4,7 +4,7 @@ Repository guidance for Codex and other coding agents working in this project.
 
 ## Project
 
-Oxium is a single-player voxel sandbox engine in Rust 2024. It targets real-time procedural terrain, streaming chunk I/O, and incremental lighting. Current work is post-M3 streaming foundation, focused on the graph-based lighting engine and worldgen documentation.
+Oxium is a single-player voxel sandbox engine in Rust 2024. It targets real-time procedural terrain, streaming chunk I/O, and chunk relighting. Current work is post-M3 streaming foundation, with the worldgen, voxel, persistence, and mesher packages shaped around documented domain modules.
 
 - Published book: https://fdatoo.github.io/oxium/
 - Design specs: `docs/superpowers/specs/`
@@ -65,7 +65,8 @@ cargo run --release --bin doc_render -- --help
 - Prefer iterators over index loops where that remains clear and efficient.
 - Use `?` for error propagation. Avoid `.unwrap()` in library code.
 - Use `.expect("reason")` only for invariants that are genuinely impossible to violate.
-- Prefer expressive domain types such as `ChunkCoord`, `BlockPos`, and `LocalPos` over raw integers.
+- Prefer expressive domain types such as `ChunkCoord`, `BlockPos`, `LocalPos`, `RegionCoord`, `RegionSlot`, `LightLevel`, and `PackedRgbLight` over raw integers.
+- Add traits only when they encode a real shared contract or hot-path specialization point; newtypes are preferred for single-value invariants.
 - Prefer `match` and `if let` over chained `.is_some()` plus `.unwrap()`.
 - Use `From` and `Into` for conversions between domain types.
 - Derive standard traits before writing manual implementations.
@@ -88,12 +89,12 @@ Library modules in `src/lib.rs` must not depend on windowing:
 
 | Module | Responsibility |
 | --- | --- |
-| `voxel/` | Blocks, chunks, world storage, positions, raycasting |
+| `voxel/` | Blocks, coordinate types, chunk storage, light packing metadata, world storage, raycasting |
 | `worldgen/` | Seed-deterministic terrain pipeline |
-| `lighting/` | Default graph-engine `LightEngine`; legacy BFS behind `legacy-lighting` |
-| `mesher/` | Greedy mesh, debug naive mesh, LOD, ambient occlusion |
+| `lighting/` | Chunk relight worker: sky light plus RGB block light BFS |
+| `mesher/` | Public mesh types, greedy mesh, debug naive mesh, LOD, ambient occlusion |
 | `jobs/` | Rayon pools and crossbeam result channels |
-| `persistence/` | Region files, I/O thread, `SaveIndex`, world manifest |
+| `persistence/` | World manifest, 16^3 region files, `SaveIndex`, I/O thread |
 | `physics/` | AABB collision helpers |
 
 Binary-only modules may depend on `winit` and `wgpu`:
@@ -121,18 +122,20 @@ let chunk = block.to_chunk();
 Chunk lifecycle:
 
 ```text
-Pending -> Generated -> Stored -> unload
+Pending -> Stored(Generated/Meshing/Ready) -> unload
 ```
 
-Each chunk carries `mesh_dirty` and `light_dirty` flags. Systems rerun the relevant job when these are set.
+Each stored chunk carries `ChunkMeta::dirty.mesh` and `ChunkMeta::dirty.light` flags. Systems rerun the relevant job when these are set.
 
-The graph lighting engine is the default authority. It uses a directed per-voxel RGB DAG with incremental per-frame ticks and `TickCache` to amortize chunk decompress work. Legacy BFS is opt-in through `--features legacy-lighting`.
+The checked-in lighting path is recompute-on-dirty BFS: sky light drops from the top face, RGB block light spreads from emissive blocks, and neighbour boundary values seed cross-chunk continuity. Graph-engine designs may exist in `docs/`, but they are not the current runtime authority unless implemented in code.
 
 Chunk compression uses `DenseChunk` for a flat 32^3 `Block` array and `PalettedChunk` for palette plus bit-packed indices. Compression happens after worldgen and lighting, before disk writes.
 
 Worldgen config hot-reloads from `assets/worldgen/default.ron`, but only affects newly generated chunks.
 
-Persistence stores region files at `saves/default/regions/*.bin`. Delete that directory after worldgen changes or after seeing chunk-aligned stale/fresh artifacts.
+Persistence stores 16 x 16 x 16 chunk region files at `saves/default/regions/*.bin`. Delete that directory after worldgen changes or after seeing chunk-aligned stale/fresh artifacts.
+
+Package-specific guidance lives in `src/worldgen/`, `src/voxel/`, `src/mesher/`, and `src/persistence/`.
 
 ## Visual Regression
 
@@ -163,7 +166,7 @@ Integration tests:
 - `tests/worldgen_fingerprint.rs`: worldgen stability fingerprints
 - `tests/gen_with_neighbors.rs`: chunk gen with neighbor context
 
-Unit tests are inline in library modules.
+Unit tests are inline or in sibling `tests.rs` / `*_tests.rs` modules.
 
 ## Gotchas
 
@@ -172,4 +175,4 @@ Unit tests are inline in library modules.
 - Persistence is async, so on-disk state lags.
 - Meshes must be re-uploaded after lighting changes.
 - Config hot-reload is not retroactive.
-- Legacy lighting requires `--features legacy-lighting`.
+- Do not assume plans in `docs/` are implemented; inspect the runtime module before changing adjacent code.

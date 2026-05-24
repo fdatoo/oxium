@@ -3,7 +3,7 @@
 //! The region file format packs 16³ = 4096 chunk slots into one file
 //! with a 16 KB header that maps each slot to its blob offset. To answer
 //! "does coord X exist on disk" we have to look at byte
-//! `slot_index(X) * 4` of that header.
+//! `region_slot(X) * 4` of that header.
 //!
 //! Without a cache, the streaming system answers that question once per
 //! chunk per session by sending a `Load` request through the
@@ -24,7 +24,7 @@
 //! persistence thread at all.
 
 use crate::persistence::region::{
-    REGION_SLOTS, read_presence_bitmap, region_coord, region_path, slot_index,
+    REGION_SLOTS, RegionCoord, read_presence_bitmap, region_coord, region_path, region_slot,
 };
 use crate::voxel::coords::ChunkCoord;
 use std::collections::HashMap;
@@ -46,10 +46,10 @@ type RegionEntry = Option<Box<[bool; REGION_SLOTS]>>;
 #[derive(Default)]
 pub struct SaveIndex {
     /// Lazily-populated, keyed by the chunk's owning region grid
-    /// coordinate `(rx, ry, rz)`. Each entry is read once per
+    /// coordinate. Each entry is read once per
     /// session on its first reference; subsequent checks hit the
     /// in-memory bitmap.
-    regions: HashMap<(i32, i32, i32), RegionEntry>,
+    regions: HashMap<RegionCoord, RegionEntry>,
 }
 
 impl SaveIndex {
@@ -84,7 +84,7 @@ impl SaveIndex {
         });
         match entry {
             None => false,
-            Some(bm) => bm[slot_index(coord)],
+            Some(bm) => bm[region_slot(coord).index()],
         }
     }
 
@@ -109,7 +109,7 @@ impl SaveIndex {
         // promote it to an empty bitmap — we're about to make the
         // file exist by saving into it.
         let bm = entry.get_or_insert_with(|| Box::new([false; REGION_SLOTS]));
-        bm[slot_index(coord)] = true;
+        bm[region_slot(coord).index()] = true;
     }
 }
 

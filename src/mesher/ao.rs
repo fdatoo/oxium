@@ -15,7 +15,7 @@
 //! the diagonal "corner" block. If both sides are solid, the corner is
 //! fully occluded (= 0). Otherwise the AO value is `3 − occupied_count`.
 //!
-//! Corner index convention (must match `greedy.rs`'s `corner_uv` layout):
+//! Corner index convention (must match `greedy::emit`'s corner layout):
 //!
 //!   index 0 → (-u, -v)
 //!   index 1 → (+u, -v)
@@ -74,7 +74,7 @@ where
 }
 
 /// Per-face `(normal, u_unit, v_unit)` triple, matching the axis mapping
-/// used by `greedy.rs::greedy_one_face`. Changing one without the other
+/// used by `greedy::mask::greedy_one_face`. Changing one without the other
 /// would re-introduce the corner-mismatch artefact this function exists
 /// to prevent.
 fn face_axes(face: Face) -> (Off, Off, Off) {
