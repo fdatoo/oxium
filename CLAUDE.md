@@ -59,18 +59,69 @@ cargo run --release --bin worldgen_viz -- --seed 42 --radius-xz 3
 # Generate documentation images
 cargo run --release --bin doc_render -- --help
 
-# LLM testing harness — inspect world state as JSON (no renderer)
+# LLM testing harness (oxium-probe)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# inspect — pure worldgen queries, no renderer, ~<1s cold start
 cargo run --release --bin oxium-probe -- inspect --column 0,0
 cargo run --release --bin oxium-probe -- inspect --find cave --max-radius 2048 --count 3
 cargo run --release --bin oxium-probe -- inspect --at 100,64,-200
 
-# oxium-probe inspect modes:
+# inspect modes (exactly one of --column / --at / --find required):
 #   --column WX,WZ          ColumnData JSON (biome, height, water_surface_y, …)
 #   --at WX,WY,WZ           DensityBreakdown JSON (per-voxel density decomposition)
 #   --find <kind>           Nearest feature JSON; kinds: water, lava, cave, river,
 #                           forest, tropical, desert, tundra, plains, snowy_forest
 #   --max-radius N          Search radius in blocks (default 8192)
 #   --count N               Number of results (default 1)
+
+# capture — boots a hidden window, warms up, takes screenshots with sidecar JSON
+# Single shot (writes shot.png + shot.png.json + shot.png.metrics.csv):
+cargo run --release --bin oxium-probe -- capture --out /tmp/shot.png
+
+# Aim at a specific feature (lava lake, cave, etc.):
+cargo run --release --bin oxium-probe -- capture \
+  --out /tmp/lava.png --find lava --look-at-feature --time 0.5
+
+# Wall-clock burst (5 frames, 100ms apart → burst_dir/0001.png … 0005.png + metrics.csv):
+cargo run --release --bin oxium-probe -- capture \
+  --out /tmp/burst --frames 5 --mode wallclock --interval-ms 100
+
+# Deterministic sim burst (fixed timestep, fully reproducible):
+cargo run --release --bin oxium-probe -- capture \
+  --out /tmp/sim --frames 60 --mode sim --sim-dt 0.0166
+
+# Scripted player input (sim burst only; JSON file drives key presses by sim time):
+cargo run --release --bin oxium-probe -- capture \
+  --out /tmp/walk --frames 60 --mode sim --sim-dt 0.0166 \
+  --script tests/probe/walk_forward.json
+
+# capture flags:
+#   --out <path>            PNG path (single-shot) or directory (burst, no extension)
+#   --seed N                World seed (default 42)
+#   --spawn X,Y,Z           Override spawn position
+#   --look yaw,pitch        Camera orientation in degrees (yaw 0 = +X, pitch >0 = up)
+#   --look-at WX,WY,WZ      Aim camera at a world position (overrides --look)
+#   --look-at-feature       Aim at the --find result (overrides --look / --look-at)
+#   --find <kind>           Find nearest feature and use it as spawn
+#   --time 0..=1            Time of day (0=midnight, 0.5=noon, 0.75=sunset)
+#   --window-size WxH       Hidden window resolution (default: renderer default)
+#   --warmup-frames N       Frames before quiesce check begins (default 60)
+#   --frames N              Number of screenshots to capture (default 1)
+#   --mode wallclock|sim    Burst timing: wall-clock intervals vs fixed-dt sim clock
+#   --interval-ms T         Wallclock ms between captures (default 0 = every frame)
+#   --sim-dt S              Fixed timestep in seconds for --mode sim (default 1/60)
+#   --script <path.json>    JSON input script (--mode sim only); see script format below
+
+# Script format for --script:
+#   [
+#     { "at_s": 0.0, "press":   ["MoveForward"] },
+#     { "at_s": 0.5, "press":   ["Jump"] },
+#     { "at_s": 0.6, "release": ["Jump"] },
+#     { "at_s": 2.0, "release": ["MoveForward"], "look_delta_deg": [10.0, -5.0] }
+#   ]
+# Action names match InputAction variant names exactly (see src/input_engine.rs).
+# look_delta_deg: [yaw_delta, pitch_delta] — positive yaw turns right, positive pitch looks up.
 ```
 
 ---
@@ -118,11 +169,14 @@ Write beautiful, idiomatic Rust. Prefer:
 
 ### Binary-only modules (depend on winit/wgpu)
 
-- `app.rs` – `AppState` owns renderer, world, ECS, jobs, persistence
+- `app.rs` – `AppState` owns renderer, world, ECS, jobs, persistence; exposes `step_with_dt` for probe
 - `ecs/` – `hecs`-based components + per-frame systems
 - `render/` – wgpu pipelines, camera, atlas, HDR, bloom, HUD, font, screenshot
 - `ui/` – egui pause menu, chat, command dispatcher
-- `src/bin/worldgen_viz/`, `src/bin/doc_render/`
+- `src/bin/worldgen_viz/` – interactive terrain tuning GUI
+- `src/bin/doc_render/` – documentation image generator
+- `src/bin/oxium-probe/` – LLM testing harness: `inspect` (JSON worldgen queries, no GPU) + `capture`
+  (hidden-window screenshots, single-shot and burst, wallclock and deterministic-sim modes, scripted input)
 
 ---
 
@@ -219,7 +273,7 @@ For package-specific conventions, see the local `CLAUDE.md` files under `src/wor
 
 ## Performance Metrics
 
-All per-frame performance data flows through a single struct pipeline so the HUD overlay, the `--profile <path>` CSV output, and (future) `oxium-probe capture` metrics CSV all see the same numbers.
+All per-frame performance data flows through a single struct pipeline so the HUD overlay, the `--profile <path>` CSV output, and `oxium-probe capture` metrics CSV all see the same numbers.
 
 ### How metrics flow
 
@@ -229,7 +283,7 @@ All per-frame performance data flows through a single struct pipeline so the HUD
 | `PerfSnapshot` | `src/app.rs:111` | Runtime copy read by HUD and perf CSV |
 | `Profiler::finish_frame` | `src/profiler.rs` | Writes one CSV row (base counters + per-span µs columns) |
 | HUD overlay | `src/render/hud.rs:355` | Renders on-screen line from `PerfSnapshot` |
-| `oxium-probe` sidecar JSON | `src/bin/oxium-probe/` | Embeds `perf` object in each `<frame>.png.json` |
+| `oxium-probe` sidecar JSON | `src/bin/oxium-probe/sidecar.rs` | Embeds `perf` object in each `<frame>.png.json`; aggregate `metrics.csv` per burst |
 
 ### Adding a new counter
 
