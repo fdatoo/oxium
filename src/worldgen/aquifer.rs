@@ -134,8 +134,11 @@ impl Default for AquiferConfig {
 /// value.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct AquiferCell {
+    /// Cell grid coordinate along X.
     pub cx: i32,
+    /// Cell grid coordinate along Y.
     pub cy: i32,
+    /// Cell grid coordinate along Z.
     pub cz: i32,
     /// Jittered world-space center used for the nearest-cell
     /// distance metric.
@@ -167,11 +170,15 @@ pub enum Substance {
 /// config, and the FBM noise used by the barrier function.
 pub struct AquiferSystem {
     seed: u64,
+    /// Runtime-tunable parameters. The visualizer panel writes here
+    /// to adjust aquifer behaviour without rebuilding the system.
     pub cfg: AquiferConfig,
     barrier: Fbm<Simplex>,
 }
 
 impl AquiferSystem {
+    /// Construct a new system with `seed` and tuning `cfg`. Bakes the
+    /// barrier FBM at construction time so query calls are allocation-free.
     pub fn new(seed: u64, cfg: AquiferConfig) -> Self {
         // 3D barrier noise: shapes the wavy fluid-surface boundary.
         // Use a higher-frequency, fewer-octaves FBM so the boundary

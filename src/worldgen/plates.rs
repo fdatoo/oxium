@@ -28,7 +28,9 @@ use glam::Vec2;
 /// be recomputed from the ID alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PlateId {
+    /// Plate grid column (cell units, not block units).
     pub cell_x: i32,
+    /// Plate grid row (cell units, not block units).
     pub cell_z: i32,
 }
 
@@ -37,7 +39,9 @@ pub struct PlateId {
 /// boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PlateKind {
+    /// Thick, buoyant crust; sits above sea level in the spline output.
     Continental,
+    /// Thin, dense crust; biased toward ocean depths in the spline output.
     Oceanic,
 }
 
@@ -45,7 +49,9 @@ pub enum PlateKind {
 /// `(seed, plate_id)`.
 #[derive(Debug, Clone, Copy)]
 pub struct Plate {
+    /// Unique identifier; encodes the grid cell this plate belongs to.
     pub id: PlateId,
+    /// Continental or oceanic; determines elevation bias in the splines.
     pub kind: PlateKind,
     /// World-space seed point inside the cell. Distances are measured
     /// to this point when classifying a column's plate.
@@ -100,7 +106,9 @@ impl Plate {
 /// plate, and the smooth boundary intensity between them.
 #[derive(Debug, Clone, Copy)]
 pub struct PlateLookup {
+    /// The plate whose seed is nearest to the query point.
     pub a: Plate,
+    /// The plate whose seed is second-nearest to the query point.
     pub b: Plate,
     /// Distance to `a`'s seed (blocks).
     pub d_a: f32,

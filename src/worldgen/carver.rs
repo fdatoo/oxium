@@ -64,8 +64,12 @@ const MAX_BRANCH_DEPTH: u8 = 2;
 /// One sphere along a tunnel path.
 #[derive(Debug, Clone, Copy)]
 pub struct CarverSphere {
+    /// World-space center of the ellipsoid (fractional block coords).
     pub center: Vec3,
+    /// Horizontal (XZ) semi-axis in blocks.
     pub h_radius: f32,
+    /// Vertical (Y) semi-axis in blocks; scaled from `h_radius` by the
+    /// per-cave `y_scale` so caves can be flat or round in cross-section.
     pub v_radius: f32,
     /// Normalized Y cutoff: voxels with `yd / v_radius <= floor_level`
     /// are NOT carved. MC: U[-1.0, -0.4] — gives the cave a flat-ish
@@ -76,8 +80,11 @@ pub struct CarverSphere {
 /// One tunnel = a chain of spheres + an AABB for quick rejection.
 #[derive(Debug, Clone)]
 pub struct CarverTunnel {
+    /// Ordered list of ellipsoids making up this tunnel.
     pub spheres: Vec<CarverSphere>,
+    /// World-space minimum corner of the bounding box enclosing all spheres.
     pub aabb_min: IVec3,
+    /// World-space maximum corner of the bounding box enclosing all spheres.
     pub aabb_max: IVec3,
 }
 
