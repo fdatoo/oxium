@@ -639,6 +639,7 @@ impl Ui {
             _ => None,
         };
         if let Some(a) = action {
+            self.push_effect(UiEffect::PlayUiSound);
             self.apply_menu_action(a);
         }
     }

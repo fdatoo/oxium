@@ -19,12 +19,13 @@ use std::time::{Duration, Instant};
 use winit::window::Window;
 use wgpu;
 
+use crate::audio::{AmbientProbe, AudioEngine, AudioEvent};
 use crate::ecs::GameEcs;
 use crate::jobs::Jobs;
 use crate::persistence::SaveIndex;
 use crate::persistence::thread::{PersistRequest, Persistence};
 use crate::render::Renderer;
-use crate::voxel::block::BlockRegistry;
+use crate::voxel::block::{Block, BlockRegistry};
 use crate::voxel::world::{ChunkSlot, World};
 use crate::worldgen::Generator;
 
@@ -94,6 +95,10 @@ pub struct AppState {
     /// routing keyboard input to the text editor.
     pub ui: crate::ui::Ui,
     pub clipboard: crate::ui::Clipboard,
+    /// Runtime audio backend and decoded/static sound cache. This is
+    /// binary-owned because it holds OS audio device state.
+    pub audio: AudioEngine,
+    audio_events: Vec<AudioEvent>,
     /// Per-frame `world_stream` scratch: the sorted candidate-chunk
     /// list, cached across frames and only rebuilt when the player
     /// crosses a chunk boundary. See
@@ -148,6 +153,17 @@ pub struct PerfSnapshot {
 
 /// How often the autosave system flushes modified chunks to disk.
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(60);
+const LANDING_SOUND_MIN_FALL_SPEED: f32 = 0.75;
+
+#[derive(Debug, Clone, Copy)]
+struct PlayerAudioState {
+    pos: glam::Vec3,
+    vel: glam::Vec3,
+    half: glam::Vec3,
+    bob_phase: f32,
+    grounded: bool,
+    walking: bool,
+}
 
 /// Rolling window of recent frame durations, used to compute a smooth
 /// FPS readout for the HUD. A short window (1 s of frames) reacts
@@ -287,6 +303,8 @@ impl AppState {
         // loaded: seed=…` line in stdout/log file).
         let mut ui = crate::ui::Ui::new();
         ui.log.push_system(format!("World seed: {seed}"));
+        let audio =
+            AudioEngine::from_default_config().expect("bundled audio default.ron must parse");
 
         Self {
             window,
@@ -321,6 +339,8 @@ impl AppState {
             frame_edit_count: 0,
             ui,
             clipboard: crate::ui::Clipboard::new(),
+            audio,
+            audio_events: Vec::with_capacity(16),
             world_stream_cache: crate::ecs::systems::world_stream::WorldStreamCache::default(),
             fullbright: false,
         }
@@ -382,9 +402,14 @@ impl AppState {
             time(prof, "movement", || {
                 crate::ecs::systems::movement::movement(&mut self.ecs, dt)
             });
+            let player_audio_before = self.player_audio_state();
             time(prof, "physics", || {
                 crate::ecs::systems::physics::physics(&mut self.ecs, &self.world, dt)
             });
+            if let Some(before) = player_audio_before {
+                let events = Self::player_audio_events(&self.ecs, &self.world, before);
+                self.audio_events.extend(events);
+            }
 
             // Interaction: raycast + place/break. Returns chunks the edit
             // dirtied; we immediately spawn relight (followed by remesh) on
@@ -548,6 +573,24 @@ impl AppState {
         for eff in effects {
             self.apply_ui_effect(eff);
         }
+        let time_of_day = self.time_of_day();
+        self.audio_events.push(AudioEvent::MusicState {
+            time_of_day,
+            paused: !self.ui.is_playing(),
+        });
+        if let Some(probe) = self.ambient_probe(time_of_day) {
+            self.audio_events.push(AudioEvent::AmbientProbe(probe));
+        }
+        if !self.ui.is_playing() {
+            self.audio_events.push(AudioEvent::FootstepState {
+                pos: glam::Vec3::ZERO,
+                block: None,
+                horizontal_speed: 0.0,
+                bob_phase: 0.0,
+                walking: false,
+            });
+        }
+        self.audio.drain_events(self.audio_events.drain(..));
 
         let prof = self.profiler.as_ref();
         // Shader time: use the caller-supplied value when running under a
@@ -832,6 +875,102 @@ impl AppState {
         }
     }
 
+    fn player_audio_state(&self) -> Option<PlayerAudioState> {
+        use crate::ecs::components::{
+            Aabb, Camera, Grounded, Movement, MovementMode, Position, Velocity,
+        };
+        let mut q = self
+            .ecs
+            .world
+            .query_one::<(&Position, &Velocity, &Aabb, &Camera, &Grounded, &Movement)>(
+                self.ecs.player,
+            )
+            .ok()?;
+        let (pos, vel, aabb, camera, grounded, movement) = q.get()?;
+        Some(PlayerAudioState {
+            pos: pos.0,
+            vel: vel.0,
+            half: aabb.half,
+            bob_phase: camera.bob_phase,
+            grounded: grounded.0,
+            walking: matches!(movement.mode, MovementMode::Walk),
+        })
+    }
+
+    fn player_audio_events(
+        ecs: &GameEcs,
+        world: &World,
+        before: PlayerAudioState,
+    ) -> Vec<AudioEvent> {
+        let Some(after) = Self::player_audio_state_from(ecs) else {
+            return Vec::new();
+        };
+        let mut events = Vec::with_capacity(3);
+        if before.walking && before.grounded && !after.grounded && after.vel.y > 0.0 {
+            events.push(AudioEvent::Jump);
+        }
+        let surface_block = block_under_feet(world, after.pos, after.half);
+        if !before.grounded && after.grounded && before.vel.y < -LANDING_SOUND_MIN_FALL_SPEED {
+            events.push(AudioEvent::Land {
+                impact: before.vel.y.abs(),
+                block: surface_block,
+            });
+        }
+
+        let horizontal_speed = glam::Vec3::new(after.vel.x, 0.0, after.vel.z).length();
+        let walking = after.walking && after.grounded && horizontal_speed > 0.5;
+        events.push(AudioEvent::FootstepState {
+            pos: after.pos,
+            block: walking.then_some(surface_block).flatten(),
+            horizontal_speed,
+            bob_phase: after.bob_phase,
+            walking,
+        });
+        events
+    }
+
+    fn player_audio_state_from(ecs: &GameEcs) -> Option<PlayerAudioState> {
+        use crate::ecs::components::{
+            Aabb, Camera, Grounded, Movement, MovementMode, Position, Velocity,
+        };
+        let mut q = ecs
+            .world
+            .query_one::<(&Position, &Velocity, &Aabb, &Camera, &Grounded, &Movement)>(ecs.player)
+            .ok()?;
+        let (pos, vel, aabb, camera, grounded, movement) = q.get()?;
+        Some(PlayerAudioState {
+            pos: pos.0,
+            vel: vel.0,
+            half: aabb.half,
+            bob_phase: camera.bob_phase,
+            grounded: grounded.0,
+            walking: matches!(movement.mode, MovementMode::Walk),
+        })
+    }
+
+    fn time_of_day(&self) -> f32 {
+        self.ecs
+            .world
+            .query::<&crate::ecs::components::TimeOfDay>()
+            .iter()
+            .next()
+            .map(|(_, tod)| tod.t)
+            .unwrap_or_default()
+    }
+
+    fn ambient_probe(&self, time_of_day: f32) -> Option<AmbientProbe> {
+        let state = self.player_audio_state()?;
+        let nearby_water = water_contact_factor(&self.world, state.pos, state.half);
+        let nearby_lava = nearby_lava_factor(&self.world, state.pos);
+        Some(AmbientProbe {
+            listener_pos: state.pos,
+            time_of_day,
+            nearby_water,
+            nearby_lava,
+            undergroundness: undergroundness(state.pos),
+        })
+    }
+
     /// Apply one UI-emitted intent. Each variant maps to a small piece
     /// of game-state mutation (or a process-level action like Quit).
     /// Kept small so adding a command is one match arm here plus one
@@ -924,6 +1063,9 @@ impl AppState {
             UiEffect::ClearChat => {
                 self.ui.log.clear();
             }
+            UiEffect::PlayUiSound => {
+                self.audio_events.push(AudioEvent::UiClick);
+            }
         }
     }
 
@@ -947,6 +1089,96 @@ impl AppState {
             }
         }
     }
+}
+
+fn block_under_feet(world: &World, pos: glam::Vec3, half: glam::Vec3) -> Option<Block> {
+    let y = (pos.y - 0.05).floor() as i32;
+    let y_candidates = [y, y - 1];
+    let x = (half.x - 0.02).max(0.0);
+    let z = (half.z - 0.02).max(0.0);
+    let samples = [
+        (0.0, 0.0),
+        (x, 0.0),
+        (-x, 0.0),
+        (0.0, z),
+        (0.0, -z),
+        (x, z),
+        (x, -z),
+        (-x, z),
+        (-x, -z),
+    ];
+    let mut stone = None;
+    for y in y_candidates {
+        for (dx, dz) in samples {
+            let block_pos = crate::voxel::coords::BlockPos(glam::IVec3::new(
+                (pos.x + dx).floor() as i32,
+                y,
+                (pos.z + dz).floor() as i32,
+            ));
+            match world.get_block(block_pos) {
+                Some(Block::Air) | None => {}
+                Some(Block::Stone) => stone = Some(Block::Stone),
+                Some(block) => return Some(block),
+            }
+        }
+    }
+    stone
+}
+
+fn water_contact_factor(world: &World, pos: glam::Vec3, half: glam::Vec3) -> f32 {
+    let x = (half.x - 0.02).max(0.0);
+    let z = (half.z - 0.02).max(0.0);
+    let samples = [
+        (0.0, 0.0),
+        (x, 0.0),
+        (-x, 0.0),
+        (0.0, z),
+        (0.0, -z),
+        (x, z),
+        (x, -z),
+        (-x, z),
+        (-x, -z),
+    ];
+    for y in [pos.y + 0.1, pos.y + 0.9] {
+        for (dx, dz) in samples {
+            let p = crate::voxel::coords::BlockPos(glam::IVec3::new(
+                (pos.x + dx).floor() as i32,
+                y.floor() as i32,
+                (pos.z + dz).floor() as i32,
+            ));
+            if matches!(world.get_block(p), Some(Block::Water)) {
+                return 1.0;
+            }
+        }
+    }
+    0.0
+}
+
+fn nearby_lava_factor(world: &World, pos: glam::Vec3) -> f32 {
+    let base = crate::voxel::coords::BlockPos(glam::IVec3::new(
+        pos.x.floor() as i32,
+        pos.y.floor() as i32,
+        pos.z.floor() as i32,
+    ));
+    let mut lava = 0.0_f32;
+    const RADIUS: i32 = 6;
+    for dy in -3..=3 {
+        for dz in -RADIUS..=RADIUS {
+            for dx in -RADIUS..=RADIUS {
+                let dist2 = (dx * dx + dy * dy + dz * dz).max(1) as f32;
+                let weight = 1.0 / dist2.sqrt();
+                let p = crate::voxel::coords::BlockPos(base.0 + glam::IVec3::new(dx, dy, dz));
+                if let Some(Block::Lava) = world.get_block(p) {
+                    lava = lava.max(weight);
+                }
+            }
+        }
+    }
+    lava.clamp(0.0, 1.0)
+}
+
+fn undergroundness(pos: glam::Vec3) -> f32 {
+    ((72.0 - pos.y) / 48.0).clamp(0.0, 1.0)
 }
 
 impl Drop for AppState {

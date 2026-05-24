@@ -25,4 +25,6 @@ pub enum UiEffect {
     PostMessage(String),
     /// Empty the chat log.
     ClearChat,
+    /// Play the configured UI activation sound.
+    PlayUiSound,
 }

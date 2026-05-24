@@ -12,6 +12,9 @@ winit = "0.30"
 pollster = "0.4"           # block_on adapter init
 arboard = "3.6"
 
+# Audio runtime: cpal output + Symphonia decoding through Kira.
+kira = "0.12"
+
 # Math
 glam = { version = "0.29", features = ["bytemuck"] }
 bytemuck = { version = "1.18", features = ["derive"] }
@@ -96,6 +99,24 @@ split-debuginfo = "packed"
 
 [profile.dev]
 opt-level = 1   # debug builds are slow without this for graphics work
+
+[profile.dev.package.kira]
+opt-level = 3
+
+[profile.dev.package.cpal]
+opt-level = 3
+
+[profile.dev.package.symphonia]
+opt-level = 3
+
+[profile.dev.package.symphonia-core]
+opt-level = 3
+
+[profile.dev.package.symphonia-format-ogg]
+opt-level = 3
+
+[profile.dev.package.symphonia-codec-vorbis]
+opt-level = 3
 
 [[bin]]
 name = "worldgen_viz"

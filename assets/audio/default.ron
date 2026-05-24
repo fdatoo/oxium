@@ -1,0 +1,87 @@
+(
+    master_volume: 0.8,
+    music_volume: 0.45,
+    ambient_volume: 0.55,
+    sfx_volume: 0.65,
+    music: (
+        playlist: [
+            (id: "music_voxel_dawn", path: "assets/audio/music/voxel_dawn.ogg", volume: 1.0),
+            (id: "music_voxel_dreams", path: "assets/audio/music/voxel_dreams.ogg", volume: 0.95),
+            (id: "music_voxel_nightfall", path: "assets/audio/music/voxel_nightfall.ogg", volume: 0.95),
+            (id: "music_voxel_depths", path: "assets/audio/music/voxel_depths.ogg", volume: 0.9),
+        ],
+        shuffle: true,
+        pause_volume: 0.35,
+    ),
+    ui: (
+        click: (id: "ui_click", path: "assets/audio/ui/click.ogg", volume: 0.7),
+    ),
+    player: (
+        jump: None,
+        footsteps: [
+            (
+                id: "stone_steps",
+                material: "stone",
+                blocks: [Stone],
+                clips: [
+                    (id: "stone_step_1", path: "assets/audio/player/footsteps/stone_1.ogg", volume: 0.45),
+                    (id: "stone_step_2", path: "assets/audio/player/footsteps/stone_2.ogg", volume: 0.24),
+                ],
+                cooldown_ms: 90,
+            ),
+            (
+                id: "soil_steps",
+                material: "soil",
+                blocks: [Dirt, Grass],
+                clips: [
+                    (id: "grass_step_1", path: "assets/audio/player/footsteps/grass_1.ogg", volume: 0.72),
+                    (id: "grass_step_2", path: "assets/audio/player/footsteps/grass_2.ogg", volume: 0.72),
+                    (id: "grass_step_3", path: "assets/audio/player/footsteps/grass_3.ogg", volume: 0.72),
+                ],
+                cooldown_ms: 90,
+            ),
+            (
+                id: "sand_steps",
+                material: "sand",
+                blocks: [Sand],
+                clips: [
+                    (id: "sand_step_1", path: "assets/audio/player/footsteps/sand_1.ogg", volume: 0.34),
+                    (id: "sand_step_2", path: "assets/audio/player/footsteps/sand_2.ogg", volume: 0.52),
+                    (id: "sand_step_3", path: "assets/audio/player/footsteps/sand_3.ogg", volume: 0.52),
+                ],
+                cooldown_ms: 95,
+            ),
+            (
+                id: "snow_steps",
+                material: "snow",
+                blocks: [Snow],
+                clips: [
+                    (id: "snow_step_1", path: "assets/audio/player/footsteps/snow_1.ogg", volume: 0.52),
+                    (id: "snow_step_2", path: "assets/audio/player/footsteps/snow_2.ogg", volume: 0.34),
+                ],
+                sequential: true,
+                cooldown_ms: 95,
+            ),
+            (
+                id: "water_steps",
+                material: "water",
+                blocks: [Water],
+                clips: [
+                    (id: "water_step_1", path: "assets/audio/player/footsteps/water_1.ogg", volume: 0.38),
+                    (id: "water_step_2", path: "assets/audio/player/footsteps/water_2.ogg", volume: 0.34),
+                ],
+                cooldown_ms: 110,
+            ),
+        ],
+    ),
+    ambient: (
+        layers: [
+            (id: "wind", kind: Wind, clip: (id: "amb_birds_wind", path: "assets/audio/ambient/birds_2.ogg", volume: 1.0), base_volume: 0.25),
+            (id: "day", kind: Day, clip: (id: "amb_birds_day", path: "assets/audio/ambient/bird_1.ogg", volume: 1.0), base_volume: 0.45),
+            (id: "night", kind: Night, clip: (id: "amb_birds_night", path: "assets/audio/ambient/birds_3.ogg", volume: 0.75), base_volume: 0.25),
+            (id: "water", kind: Water, clip: (id: "amb_water", path: "assets/audio/ambient/water.ogg", volume: 1.0), base_volume: 0.65),
+            (id: "cave", kind: Cave, clip: (id: "amb_cave_depths", path: "assets/audio/music/voxel_depths.ogg", volume: 0.85), base_volume: 0.35),
+        ],
+    ),
+    mobs: [],
+)

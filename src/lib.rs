@@ -9,7 +9,9 @@
 //! window or GPU device.
 //!
 //! **Windowed engine modules** (depend on `winit`/`wgpu`): `app`, `ecs`,
-//! `input_engine`, `profiler`, `render`, `ui`. Exposed here so the
+//! `input_engine`, `profiler`, `render`, `ui`. `audio` is runtime-owned and
+//! may touch OS audio devices, so treat it like the windowed modules rather
+//! than a pure engine surface. Exposed here so the
 //! `oxium-probe capture` subcommand can drive the renderer without
 //! duplicating the modules. These modules must not be imported by pure
 //! library consumers — bring them in only from binaries or integration tests
@@ -30,6 +32,7 @@ pub mod worldgen;
 // These are re-exported from main.rs via `pub use oxium::{app, ecs, …}` so
 // that `crate::*` paths inside those modules continue to resolve correctly.
 pub mod app;
+pub mod audio;
 pub mod ecs;
 pub mod input_engine;
 pub mod profiler;

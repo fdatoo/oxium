@@ -12,7 +12,7 @@
 // modules (app/ecs/render/…) were moved from `mod X;` declarations here to
 // `pub mod X;` in lib.rs; pure modules were already there.
 pub use oxium::{
-    app, command, ecs, input_engine, jobs, lighting, mesher, persistence, physics, profiler,
+    app, audio, command, ecs, input_engine, jobs, lighting, mesher, persistence, physics, profiler,
     render, ui, voxel, worldgen,
 };
 
