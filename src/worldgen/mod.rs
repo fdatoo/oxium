@@ -113,7 +113,8 @@ pub use columns::ColumnData;
 // the fingerprint test is updated to use `worldgen::density::HeightmapNoise`.
 // Internal callers (hydrology, caves) now use `crate::worldgen::density::*` directly.
 pub mod heightmap {
-    pub use crate::worldgen::density::heightmap::{DensityNoise, HeightmapNoise};
+    pub use crate::worldgen::density::density_3d::DensityNoise;
+    pub use crate::worldgen::density::heightmap::HeightmapNoise;
     pub use crate::worldgen::density::math::{
         offset_to_world_y, peaks_and_valleys, plate_roughness_bias, signed_continentalness, slide,
         smooth_plate_contribution,
@@ -133,7 +134,7 @@ pub struct Generator {
     /// 3D relief FBM. Drives the per-voxel solid/air decision in
     /// `fill_chunk` so moderate slopes don't read as clean
     /// chevron stripes.
-    pub(crate) density: density::heightmap::DensityNoise,
+    pub(crate) density: density::density_3d::DensityNoise,
     /// Temperature map (large-period 2D noise). Drives the cold/warm
     /// axis of the biome R-tree lookup. Negative values are colder
     /// (Tundra / SnowyForest), positive warmer (Desert / Tropical).

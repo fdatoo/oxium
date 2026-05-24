@@ -84,7 +84,7 @@ impl Generator {
         let bundled =
             config::WorldgenConfig::bundled_default().expect("bundled default.ron must parse");
         let heightmap = density::heightmap::HeightmapNoise::new(seed, &bundled.climate);
-        let density = density::heightmap::DensityNoise::new(seed, &bundled.density);
+        let density = density::density_3d::DensityNoise::new(seed, &bundled.density);
         // Climate maps. Large period (~512 blocks) so biome bands are wide
         // enough that players walk for a while between them. Independently
         // seeded so temperature and humidity drift apart and span all four

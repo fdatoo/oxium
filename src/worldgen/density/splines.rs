@@ -9,7 +9,7 @@
 //! See `docs/book/content/part-4-chunk-fill/4.1-density-graph.mdx` and
 //! `docs/superpowers/specs/2026-05-19-worldgen-3d-design.md`.
 
-use super::heightmap::DensityNoise;
+use super::density_3d::DensityNoise;
 use crate::worldgen::config::{DensityConfig, NestedSpline};
 use std::sync::Arc;
 

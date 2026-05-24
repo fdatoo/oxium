@@ -22,6 +22,7 @@
 //! `docs/superpowers/specs/2026-05-19-worldgen-3d-design.md`.
 
 pub mod cell_evaluator;
+pub mod density_3d;
 pub mod heightmap;
 pub mod math;
 pub mod splines;
@@ -31,7 +32,8 @@ pub mod splines;
 // find what they need without digging into submodules.
 
 pub use cell_evaluator::{CELL_COUNT, CELL_SIZE, CORNER_COUNT, CellEvaluator};
-pub use heightmap::{DensityComposition, DensityNoise, HeightmapNoise};
+pub use density_3d::{DensityComposition, DensityNoise};
+pub use heightmap::HeightmapNoise;
 pub use math::{
     offset_to_world_y, peaks_and_valleys, plate_roughness_bias, signed_continentalness, slide,
     smooth_plate_contribution,

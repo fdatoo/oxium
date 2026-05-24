@@ -18,7 +18,7 @@
 //! See `docs/book/content/part-4-chunk-fill/4.2-cell-evaluator.mdx` and
 //! `docs/superpowers/specs/2026-05-19-worldgen-3d-design.md`.
 
-use super::heightmap::DensityNoise;
+use super::density_3d::DensityNoise;
 use super::splines::{ColumnClimate, DensityFn};
 use crate::voxel::coords::CHUNK_DIM_U;
 use crate::worldgen::config::DensityConfig;
