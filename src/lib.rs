@@ -11,6 +11,7 @@
 //! `winit`/`wgpu` stack and we deliberately keep the library footprint
 //! small.
 
+pub mod command;
 pub mod jobs;
 pub mod lighting;
 pub mod mesher;

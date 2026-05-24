@@ -256,6 +256,42 @@ pub const HOTBAR_BLOCKS: [Option<Block>; 9] = [
     None,
 ];
 
+#[derive(Debug, Clone, Copy)]
+pub struct HotbarLayout {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub cell: f32,
+    pub gap: f32,
+    pub border: f32,
+}
+
+pub fn hud_scale(screen_h: f32) -> f32 {
+    (screen_h / 720.0).clamp(1.0, 1.75)
+}
+
+pub fn hotbar_layout(screen_px: (u32, u32)) -> HotbarLayout {
+    let (sw, sh) = (screen_px.0 as f32, screen_px.1 as f32);
+    let s = hud_scale(sh);
+    let cell = 44.0 * s;
+    let gap = 4.0 * s;
+    let border = 4.0 * s;
+    let cells = HOTBAR_BLOCKS.len() as f32;
+    let w = cell * cells + gap * (cells - 1.0);
+    let x = (sw - w) * 0.5;
+    let y = sh - cell - 14.0 * s;
+    HotbarLayout {
+        x,
+        y,
+        w,
+        h: cell,
+        cell,
+        gap,
+        border,
+    }
+}
+
 /// Build one frame of HUD content: the upper-left debug overlay
 /// (FPS + XYZ) and the bottom-centre hotbar. `screen_px` is the
 /// current framebuffer size so the hotbar can be centred without the
@@ -273,7 +309,7 @@ pub fn build_hud(
     debug: Option<&WorldDebug<'_>>,
 ) -> HudFrame {
     let mut frame = HudFrame::new();
-    let (sw, sh) = (screen_px.0 as f32, screen_px.1 as f32);
+    let sh = screen_px.1 as f32;
 
     // ── Upper-left debug overlay ────────────────────────────────────
     // Scale 3 keeps the 5×7 glyphs at 15×21 px — readable at 1080p
@@ -411,42 +447,34 @@ pub fn build_hud(
     }
 
     // ── Bottom-centre hotbar ────────────────────────────────────────
-    // 9 cells, 48 px each, 4 px gap. Centred horizontally; 16 px
-    // above the bottom edge.
-    let cell = 48.0;
-    let gap = 4.0;
-    let cells = HOTBAR_BLOCKS.len() as f32;
-    let bar_w = cell * cells + gap * (cells - 1.0);
-    let bar_x = (sw - bar_w) * 0.5;
-    let bar_y = sh - cell - 16.0;
+    let hotbar = hotbar_layout(screen_px);
     let bg_alpha = 0x80;
-    let border = 4.0;
 
     // Outer translucent panel — one big rectangle behind every slot
     // so the hotbar reads as a single UI element.
     frame.icons.push_rect(
-        bar_x - border,
-        bar_y - border,
-        bar_w + border * 2.0,
-        cell + border * 2.0,
+        hotbar.x - hotbar.border,
+        hotbar.y - hotbar.border,
+        hotbar.w + hotbar.border * 2.0,
+        hotbar.h + hotbar.border * 2.0,
         [0, 0, 0, bg_alpha],
     );
 
     for (i, slot) in HOTBAR_BLOCKS.iter().enumerate() {
-        let x = bar_x + (cell + gap) * i as f32;
+        let x = hotbar.x + (hotbar.cell + hotbar.gap) * i as f32;
         // Selection highlight: bright outline behind the icon.
         if i == selected_slot {
-            let pad = 3.0;
+            let pad = 3.0 * hud_scale(sh);
             frame.icons.push_rect(
                 x - pad,
-                bar_y - pad,
-                cell + pad * 2.0,
-                cell + pad * 2.0,
+                hotbar.y - pad,
+                hotbar.cell + pad * 2.0,
+                hotbar.cell + pad * 2.0,
                 [255, 255, 255, 255],
             );
             frame
                 .icons
-                .push_rect(x, bar_y, cell, cell, [40, 40, 40, 200]);
+                .push_rect(x, hotbar.y, hotbar.cell, hotbar.cell, [40, 40, 40, 200]);
         }
         if let Some(block) = slot {
             let info = registry.info(*block);
@@ -462,7 +490,7 @@ pub fn build_hud(
                     (tint[2] * 255.0) as u8,
                     255,
                 ];
-                frame.push_block_icon(x, bar_y, cell, tile.index(), tint_u8);
+                frame.push_block_icon(x, hotbar.y, hotbar.cell, tile.index(), tint_u8);
             }
         }
     }

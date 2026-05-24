@@ -1,0 +1,53 @@
+// Oxium input defaults.
+// Hot-reloaded during play. On parse/validation failure, the engine logs
+// and keeps the previous valid binding set.
+
+(
+    mouse_sensitivity: 0.0025,
+    scroll_units_per_step: 1.0,
+    bindings: [
+        (context: Gameplay, action: MoveForward, inputs: [Key(KeyW)]),
+        (context: Gameplay, action: MoveBack, inputs: [Key(KeyS)]),
+        (context: Gameplay, action: MoveLeft, inputs: [Key(KeyA)]),
+        (context: Gameplay, action: MoveRight, inputs: [Key(KeyD)]),
+        (context: Gameplay, action: Jump, inputs: [Key(Space)]),
+        (context: Gameplay, action: Descend, inputs: [Key(ShiftLeft), Key(ShiftRight)]),
+        (context: Gameplay, action: Sprint, inputs: [Key(ControlLeft), Key(ControlRight)]),
+        (context: Gameplay, action: Break, inputs: [Mouse(Left)]),
+        (context: Gameplay, action: Place, inputs: [Mouse(Right)]),
+        (context: Gameplay, action: ToggleFly, inputs: [Key(KeyF)]),
+        (context: Gameplay, action: SelectSlot1, inputs: [Key(Digit1)]),
+        (context: Gameplay, action: SelectSlot2, inputs: [Key(Digit2)]),
+        (context: Gameplay, action: SelectSlot3, inputs: [Key(Digit3)]),
+        (context: Gameplay, action: SelectSlot4, inputs: [Key(Digit4)]),
+        (context: Gameplay, action: SelectSlot5, inputs: [Key(Digit5)]),
+        (context: Gameplay, action: SelectSlot6, inputs: [Key(Digit6)]),
+        (context: Gameplay, action: SelectSlot7, inputs: [Key(Digit7)]),
+        (context: Gameplay, action: SelectSlot8, inputs: [Key(Digit8)]),
+        (context: Gameplay, action: SelectSlot9, inputs: [Key(Digit9)]),
+        (context: Gameplay, action: CycleHotbar, inputs: [ScrollY]),
+        (context: Gameplay, action: Pause, inputs: [Key(Escape)]),
+        (context: Gameplay, action: OpenChat, inputs: [Key(KeyT)]),
+        (context: Gameplay, action: OpenCommandChat, inputs: [Key(Slash)]),
+        (context: Gameplay, action: ToggleDebugContext, inputs: [Key(F3)]),
+
+        (context: PausedMenu, action: Pause, inputs: [Key(Escape)]),
+        (context: PausedMenu, action: MenuUp, inputs: [Key(ArrowUp), Key(KeyW)]),
+        (context: PausedMenu, action: MenuDown, inputs: [Key(ArrowDown), Key(KeyS)]),
+        (context: PausedMenu, action: MenuAccept, inputs: [Key(Enter), Key(NumpadEnter), Key(Space)]),
+
+        (context: Chat, action: Pause, inputs: [Key(Escape)]),
+        (context: Chat, action: ChatBackspace, inputs: [Key(Backspace)]),
+        (context: Chat, action: ChatDelete, inputs: [Key(Delete)]),
+        (context: Chat, action: ChatLeft, inputs: [Key(ArrowLeft)]),
+        (context: Chat, action: ChatRight, inputs: [Key(ArrowRight)]),
+        (context: Chat, action: ChatHome, inputs: [Key(Home)]),
+        (context: Chat, action: ChatEnd, inputs: [Key(End)]),
+        (context: Chat, action: ChatHistoryPrev, inputs: [Key(ArrowUp)]),
+        (context: Chat, action: ChatHistoryNext, inputs: [Key(ArrowDown)]),
+        (context: Chat, action: ChatComplete, inputs: [Key(Tab)]),
+        (context: Chat, action: ChatSubmit, inputs: [Key(Enter), Key(NumpadEnter)]),
+
+        (context: Debug, action: ToggleFullbright, inputs: [Key(KeyB)]),
+    ],
+)

@@ -10,12 +10,13 @@
 // tests can drive them headlessly. Re-export them at the binary's crate
 // root so `crate::voxel::…` references in our `app` / `ecs` / `render`
 // submodules continue to resolve without rewriting paths everywhere.
-pub use oxium::{jobs, lighting, mesher, persistence, physics, voxel, worldgen};
+pub use oxium::{command, jobs, lighting, mesher, persistence, physics, voxel, worldgen};
 
 // Binary-only modules — they import `winit`/`wgpu` directly and so
 // aren't part of the library surface.
 mod app;
 mod ecs;
+mod input_engine;
 mod profiler;
 mod render;
 mod ui;
@@ -24,9 +25,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
-use winit::event::{DeviceEvent, WindowEvent};
+use winit::dpi::PhysicalSize;
+use winit::event::{DeviceEvent, ElementState, Ime, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::PhysicalKey;
+use winit::keyboard::{ModifiersState, PhysicalKey};
 use winit::window::{CursorGrabMode, WindowAttributes, WindowId};
 
 use app::AppState;
@@ -71,6 +73,8 @@ struct CliOptions {
     /// Override the world seed. `--seed 43` forces seed 43 regardless of
     /// the saved manifest or the TEST_SEED_OVERRIDE constant.
     seed: Option<u64>,
+    /// Hidden screenshot helper: set the initial window size.
+    window_size: Option<(u32, u32)>,
 }
 
 impl CliOptions {
@@ -85,6 +89,7 @@ impl CliOptions {
         let mut profile_path = None;
         let mut ui_state: Option<String> = None;
         let mut seed: Option<u64> = None;
+        let mut window_size: Option<(u32, u32)> = None;
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--screenshot-and-exit" => {
@@ -131,6 +136,10 @@ impl CliOptions {
                     let v = args.next().expect("--seed requires an integer");
                     seed = Some(v.parse().expect("--seed must be a u64"));
                 }
+                "--window-size" => {
+                    let v = args.next().expect("--window-size requires WIDTHxHEIGHT");
+                    window_size = Some(parse_window_size(&v));
+                }
                 _ => {}
             }
         }
@@ -149,8 +158,20 @@ impl CliOptions {
             profile_path,
             ui_state,
             seed,
+            window_size,
         }
     }
+}
+
+fn parse_window_size(raw: &str) -> (u32, u32) {
+    let (w, h) = raw
+        .split_once('x')
+        .or_else(|| raw.split_once('X'))
+        .expect("--window-size must be WIDTHxHEIGHT");
+    let w: u32 = w.parse().expect("--window-size width must be a u32");
+    let h: u32 = h.parse().expect("--window-size height must be a u32");
+    assert!(w > 0 && h > 0, "--window-size dimensions must be non-zero");
+    (w, h)
 }
 
 /// Scan world generation around `(0, 0)` for the lowest-height column
@@ -219,6 +240,8 @@ struct App {
     /// by [`Self::frame_budget`] each frame. Ignored when
     /// `cli.uncapped` is set.
     next_frame_target: Option<Instant>,
+    modifiers: ModifiersState,
+    cursor_pos: Option<(f32, f32)>,
 }
 
 /// Target frame budget when the FPS cap is on. 60 FPS = 16.666… ms
@@ -231,9 +254,12 @@ impl ApplicationHandler for App {
         // headless — no surface flash on macOS, no focus-stealing while
         // capturing a baseline. The window still exists (wgpu's Surface
         // needs a winit window on every platform), it's just never shown.
-        let attrs = WindowAttributes::default()
+        let mut attrs = WindowAttributes::default()
             .with_title("oxium")
             .with_visible(self.cli.screenshot_path.is_none());
+        if let Some((w, h)) = self.cli.window_size {
+            attrs = attrs.with_inner_size(PhysicalSize::new(w, h));
+        }
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
         // Pick spawn: explicit --spawn wins, else --find-water locates
         // a known wet column, else the default mid-air spawn.
@@ -277,15 +303,46 @@ impl ApplicationHandler for App {
                 "paused" => UiState::Paused {
                     menu: MenuNav::Top { hovered: 0 },
                 },
-                "chat" => UiState::Chat {
-                    input: ChatInput::new("/he"),
-                },
+                "chat" => {
+                    let mut input = ChatInput::new("/he");
+                    input.set_cursor(1, false);
+                    input.move_end_ext(true);
+                    UiState::Chat { input }
+                }
                 other => panic!("--ui: expected 'paused' or 'chat', got {other}"),
             };
             // Pre-seed a few chat lines so the chat snapshot shows content.
             state.ui.log.push_system("System: hello there");
             state.ui.log.push_player("a friendly note");
             state.ui.log.push_echo("/help");
+        }
+
+        if let Some(path) = self.cli.screenshot_path.clone()
+            && self.cli.ui_state.is_some()
+        {
+            let (eye, mut yaw, mut pitch) = camera_from_ecs(&state.ecs);
+            if let Some((y, p)) = self.cli.look {
+                yaw = y;
+                pitch = p;
+            }
+            let (sun_dir, sun_intensity) = ecs::systems::time_of_day::sun_state(&state.ecs);
+            match capture_offscreen(
+                &state.renderer,
+                &path,
+                eye,
+                yaw,
+                pitch,
+                sun_dir,
+                sun_intensity,
+                0.0,
+                Some(&state.ui),
+            ) {
+                Ok(()) => log::info!("ui screenshot saved to {}", path.display()),
+                Err(e) => log::error!("ui screenshot failed: {e:?}"),
+            }
+            event_loop.exit();
+            self.state = Some(state);
+            return;
         }
 
         // Skip cursor grab when running in screenshot mode so the helper
@@ -304,12 +361,30 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => state.renderer.resize(size.width, size.height),
+            WindowEvent::ModifiersChanged(mods) => {
+                self.modifiers = mods.state();
+            }
+            WindowEvent::Ime(Ime::Commit(text)) if state.ui.is_chat_open() => {
+                state.ui.on_chat_ime_commit(&text);
+            }
             WindowEvent::KeyboardInput { event: ke, .. } => {
                 if let PhysicalKey::Code(code) = ke.physical_key {
-                    let text = ke.text.as_deref();
-                    let disp = state.ui.on_key(code, ke.state, text);
-                    if disp == crate::ui::input::InputDisposition::Forward {
-                        state.input_buf.on_key(code, ke.state);
+                    if state.ui.is_chat_open() {
+                        if ke.state == ElementState::Pressed {
+                            state.ui.on_chat_key(
+                                code,
+                                ke.text.as_deref(),
+                                self.modifiers,
+                                &mut state.clipboard,
+                            );
+                            if state.ui.is_playing() {
+                                state.input.clear_all();
+                            }
+                        } else {
+                            state.input.on_key(code, ke.state, None);
+                        }
+                    } else {
+                        state.input.on_key(code, ke.state, ke.text.as_deref());
                     }
                 }
             }
@@ -318,19 +393,42 @@ impl ApplicationHandler for App {
                 state: bstate,
                 ..
             } => {
-                if state.ui.is_playing() {
-                    state.input_buf.on_mouse_button(button, bstate);
+                if state.ui.is_chat_open() && button == MouseButton::Left {
+                    match bstate {
+                        ElementState::Pressed => {
+                            if let Some((x, y)) = self.cursor_pos {
+                                let (w, h) = state.renderer.framebuffer_size();
+                                state.ui.on_chat_mouse_down(x, y, (w, h));
+                            }
+                        }
+                        ElementState::Released => {
+                            state.ui.on_chat_mouse_up();
+                        }
+                    }
                 } else {
-                    // The UI consumes mouse clicks while paused/chatting
-                    // (menu activation is wired in Task 9).
-                    state.ui.on_mouse_button(button, bstate);
+                    state.input.on_mouse_button(button, bstate);
+                }
+                if !state.ui.is_playing() {
+                    // The UI consumes mouse clicks while paused/chatting.
+                    let was_playing = state.ui.is_playing();
+                    if !state.ui.is_chat_open() {
+                        state.ui.on_mouse_button(button, bstate);
+                    }
+                    if was_playing != state.ui.is_playing() {
+                        state.input.clear_all();
+                    }
                 }
             }
             WindowEvent::CursorMoved { position, .. } if !state.ui.is_playing() => {
+                self.cursor_pos = Some((position.x as f32, position.y as f32));
                 let (w, h) = state.renderer.framebuffer_size();
-                state
-                    .ui
-                    .on_mouse_move(position.x as f32, position.y as f32, (w, h));
+                if state.ui.is_chat_open() {
+                    state.ui.on_chat_mouse_move(position.x as f32, (w, h));
+                } else {
+                    state
+                        .ui
+                        .on_mouse_move(position.x as f32, position.y as f32, (w, h));
+                }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 // winit reports either lines (mouse wheel) or pixels
@@ -342,11 +440,10 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
                 };
-                if state.ui.is_playing() {
-                    state.input_buf.on_scroll(lines);
-                }
-                // Discarded while paused/chatting — chat doesn't scroll yet.
+                state.input.on_scroll(lines);
+                // Resolved only in contexts that bind scroll. Chat doesn't scroll yet.
             }
+            WindowEvent::Focused(false) => state.input.clear_all(),
             WindowEvent::RedrawRequested => {
                 state.step();
                 self.frames_drawn = self.frames_drawn.saturating_add(1);
@@ -407,7 +504,8 @@ impl ApplicationHandler for App {
                 }
                 if let Some(path) = self.cli.screenshot_path.clone()
                     && self.frames_drawn > self.cli.warmup_frames
-                    && self.screenshot_stable_frames >= SCREENSHOT_QUIESCE_FRAMES
+                    && (self.cli.ui_state.is_some()
+                        || self.screenshot_stable_frames >= SCREENSHOT_QUIESCE_FRAMES)
                 {
                     let (eye, mut yaw, mut pitch) = camera_from_ecs(&state.ecs);
                     if let Some((y, p)) = self.cli.look {
@@ -429,6 +527,7 @@ impl ApplicationHandler for App {
                         sun_dir,
                         sun_intensity,
                         time,
+                        Some(&state.ui),
                     ) {
                         Ok(()) => log::info!(
                             "screenshot saved to {} ({} entries; lod counts={:?})",
@@ -487,14 +586,10 @@ impl ApplicationHandler for App {
             return;
         };
         if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
-            // Only buffer motion while playing. Otherwise any cursor
-            // movement during a menu / chat session accumulates in
-            // InputBuf and gets applied as a camera shake on the first
-            // resume frame — visible as a sudden snap back toward
-            // where the cursor was last moved in the menu.
-            if state.ui.is_playing() {
-                state.input_buf.on_mouse_motion(dx, dy);
-            }
+            // Raw motion is always buffered; action resolution only turns it
+            // into look input in the gameplay context, and frame clear drops
+            // menu/chat motion before it can affect the camera.
+            state.input.on_mouse_motion(dx, dy);
         }
     }
 }
@@ -522,6 +617,7 @@ fn capture_offscreen(
     sun_dir: [f32; 3],
     sun_intensity: f32,
     time: f32,
+    ui: Option<&crate::ui::Ui>,
 ) -> anyhow::Result<()> {
     let width = renderer.gpu.surface_cfg.width;
     let height = renderer.gpu.surface_cfg.height;
@@ -552,7 +648,11 @@ fn capture_offscreen(
     // path runs in one shot after warmup).
     let registry = crate::voxel::block::BlockRegistry::new();
     let perf = crate::app::PerfSnapshot::default();
-    let hud = crate::render::hud::build_hud((width, height), 60.0, eye, 0, &registry, &perf, None);
+    let mut hud =
+        crate::render::hud::build_hud((width, height), 60.0, eye, 0, &registry, &perf, None);
+    if let Some(ui) = ui {
+        ui.draw_overlay((width, height), &mut hud);
+    }
     renderer.render_to_view(
         &view,
         eye,
@@ -609,6 +709,8 @@ fn main() {
         screenshot_last_chunk_count: 0,
         screenshot_stable_frames: 0,
         next_frame_target: None,
+        modifiers: ModifiersState::default(),
+        cursor_pos: None,
     };
     event_loop.run_app(&mut app).unwrap();
 }

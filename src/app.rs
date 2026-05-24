@@ -6,8 +6,8 @@
 //! complete schedule:
 //!
 //! ```text
-//! input  →  movement  →  world_stream  →  drain_jobs  →  world_unload  →  render
-//!        →  clear_input_buf
+//! input  →  ui  →  movement  →  world_stream  →  drain_jobs  →  world_unload  →  render
+//!        →  clear_input_frame
 //! ```
 //!
 //! Each system is a free function in `ecs::systems`; the ordering here is
@@ -19,7 +19,6 @@ use std::time::{Duration, Instant};
 use winit::window::Window;
 
 use crate::ecs::GameEcs;
-use crate::ecs::systems::input::InputBuf;
 use crate::jobs::Jobs;
 use crate::persistence::SaveIndex;
 use crate::persistence::thread::{PersistRequest, Persistence};
@@ -64,8 +63,10 @@ pub struct AppState {
     /// Wall-clock time of the previous autosave tick. Autosave runs every
     /// `AUTOSAVE_INTERVAL` seconds.
     pub last_autosave: Instant,
-    pub input_buf: InputBuf,
+    pub input: crate::input_engine::InputEngine,
     pub input_state: crate::ecs::systems::input::InputState,
+    /// File watcher for `assets/input/default.ron`. Kept alive for hot reload.
+    pub _input_watcher: Box<dyn std::any::Any + Send + Sync>,
     /// Wall-clock time of the previous `step`; used to derive `dt`.
     pub last_tick: Instant,
     /// Real time when AppState was created — used to compute `time`
@@ -92,6 +93,7 @@ pub struct AppState {
     /// (full freeze); the renderer still draws the last frame plus the
     /// UI overlay so the menu/chat is visible.
     pub ui: crate::ui::Ui,
+    pub clipboard: crate::ui::Clipboard,
     /// Per-frame `world_stream` scratch: the sorted candidate-chunk
     /// list, cached across frames and only rebuilt when the player
     /// crosses a chunk boundary. See
@@ -99,7 +101,7 @@ pub struct AppState {
     pub world_stream_cache: crate::ecs::systems::world_stream::WorldStreamCache,
     /// When true, the opaque shader renders all geometry at full
     /// brightness (skips the direct+block+sky-ambient composition).
-    /// Toggled by pressing B in-game. Default: false.
+    /// Toggled by the debug `ToggleFullbright` action. Default: false.
     pub fullbright: bool,
 }
 
@@ -272,6 +274,10 @@ impl AppState {
         let watcher = crate::worldgen::config::spawn_watcher(watcher_path, holder.clone())
             .expect("file watcher must start");
         let generator = Arc::new(Generator::with_config(seed, holder));
+        let (input_holder, input_path) = crate::input_engine::load_default_holder()
+            .expect("bundled input default.ron must parse");
+        let input_watcher = crate::input_engine::spawn_watcher(input_path, input_holder.clone())
+            .expect("input file watcher must start");
         let registry = Arc::new(BlockRegistry::new());
 
         let persistence = Persistence::spawn(saves_dir.clone());
@@ -295,8 +301,9 @@ impl AppState {
             save_index: SaveIndex::new(),
             saves_dir,
             last_autosave: Instant::now(),
-            input_buf: InputBuf::default(),
+            input: crate::input_engine::InputEngine::new(input_holder),
             input_state: crate::ecs::systems::input::InputState::default(),
+            _input_watcher: Box::new(input_watcher),
             last_tick: Instant::now(),
             start_time: Instant::now(),
             fps_meter: FpsMeter::new(60),
@@ -313,6 +320,7 @@ impl AppState {
             }),
             frame_edit_count: 0,
             ui,
+            clipboard: crate::ui::Clipboard::new(),
             world_stream_cache: crate::ecs::systems::world_stream::WorldStreamCache::default(),
             fullbright: false,
         }
@@ -332,6 +340,13 @@ impl AppState {
         use crate::profiler::time;
 
         self.ui.tick(dt);
+        let input_mode = self.ui.input_mode();
+        let was_playing = self.ui.is_playing();
+        let actions = self.input.resolve(input_mode);
+        self.ui.apply_actions(&actions);
+        if was_playing != self.ui.is_playing() {
+            self.input.clear_all();
+        }
 
         if self.ui.is_playing() {
             let prof = self.profiler.as_ref();
@@ -339,18 +354,14 @@ impl AppState {
             time(prof, "input", || {
                 crate::ecs::systems::input::apply_input(
                     &mut self.ecs,
-                    &self.input_buf,
+                    &actions,
                     &mut self.input_state,
                 )
             });
             // B toggles fullbright: all opaque geometry renders at full
             // brightness, skipping the lighting composition. Useful for
             // cave spelunking where dim block-light obscures structure.
-            if self
-                .input_buf
-                .key_pressed_this_frame
-                .contains(&winit::keyboard::KeyCode::KeyB)
-            {
+            if actions.pressed(crate::input_engine::InputAction::ToggleFullbright) {
                 self.fullbright = !self.fullbright;
             }
             time(prof, "time_of_day", || {
@@ -571,7 +582,7 @@ impl AppState {
                 log::warn!("render error: {e:?}");
             }
         });
-        self.input_buf.clear_per_frame();
+        self.input.clear_frame();
         // Sample full per-step time AFTER the render call so WMS
         // captures GPU command encoding + the present (or whatever
         // wgpu blocks on under Immediate present mode). The HUD on

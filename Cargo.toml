@@ -10,6 +10,7 @@ default-run = "oxium"
 wgpu = "23"
 winit = "0.30"
 pollster = "0.4"           # block_on adapter init
+arboard = "3.6"
 
 # Math
 glam = { version = "0.29", features = ["bytemuck"] }

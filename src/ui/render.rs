@@ -29,12 +29,9 @@ const BASE_TITLE_PAD_Y: f32 = 32.0;
 const BASE_ITEMS_TOP_Y: f32 = 120.0;
 const BASE_ITEMS_LEFT_X: f32 = 60.0;
 
-const BASE_CHAT_PAD: f32 = 12.0;
-const BASE_CHAT_LINE_H: f32 = 20.0;
-const BASE_CHAT_SCALE: f32 = 2.0;
-const BASE_CHAT_BOTTOM_GAP: f32 = 80.0;
-const CHAT_VISIBLE_PLAYING: usize = 5;
-const CHAT_VISIBLE_OPEN: usize = 8;
+const BASE_CHAT_PAD: f32 = 10.0;
+const CHAT_VISIBLE_PLAYING: usize = 4;
+const CHAT_VISIBLE_OPEN: usize = 7;
 const CHAT_FADE_START_SEC: f32 = 6.0;
 const CHAT_FADE_END_SEC: f32 = 8.0;
 
@@ -46,14 +43,70 @@ fn ui_scale(screen_h: f32) -> f32 {
     (screen_h / 720.0).clamp(0.75, 2.5)
 }
 
-/// Width of the chat block. Half the window with a floor at 560 px so it
-/// can hold a typical line on a small window, capped to the window width
-/// minus padding so it doesn't bleed off the right edge.
-fn chat_block_width(screen_w: f32, scale: f32) -> f32 {
-    let pad = BASE_CHAT_PAD * scale;
-    (screen_w * 0.5)
-        .max(560.0 * scale)
-        .min(screen_w - 2.0 * pad)
+/// Resolved chat panel layout for rendering and hit testing.
+#[derive(Debug, Clone, Copy)]
+pub struct ChatLayout {
+    pub panel_x: f32,
+    pub panel_y: f32,
+    pub panel_w: f32,
+    pub panel_h: f32,
+    pub line_h: f32,
+    pub text_scale: f32,
+    pub input_x: f32,
+    pub input_y: f32,
+    pub input_w: f32,
+    pub input_h: f32,
+    pub hint_y: f32,
+}
+
+pub fn chat_layout(screen_px: (u32, u32)) -> ChatLayout {
+    let (sw, sh) = (screen_px.0 as f32, screen_px.1 as f32);
+    let s = crate::render::hud::hud_scale(sh);
+    let hotbar = crate::render::hud::hotbar_layout(screen_px);
+    let pad = BASE_CHAT_PAD * s;
+    let text_scale = 2.0 * s;
+    let glyph_w = crate::render::font::cell_w() as f32 * text_scale;
+    let glyph_h = crate::render::font::glyph_h() as f32 * text_scale;
+    let line_h = glyph_h + 2.0 * s;
+    let target_w = glyph_w * 56.0 + pad * 2.0;
+    let max_w = (sw * 0.55).min(sw - 28.0 * s);
+    let panel_w = target_w.min(max_w).max(240.0 * s);
+    let panel_h = line_h * (CHAT_VISIBLE_OPEN as f32 + 2.0) + pad * 2.0;
+    let panel_x = 14.0 * s;
+    let panel_y = hotbar.y - 10.0 * s - panel_h;
+    let input_x = panel_x + pad;
+    let input_y = panel_y + panel_h - pad - line_h;
+    ChatLayout {
+        panel_x,
+        panel_y,
+        panel_w,
+        panel_h,
+        line_h,
+        text_scale,
+        input_x,
+        input_y,
+        input_w: panel_w - pad * 2.0,
+        input_h: line_h,
+        hint_y: input_y - line_h,
+    }
+}
+
+pub fn chat_input_byte_at(
+    input: &crate::ui::chat::ChatInput,
+    layout: &ChatLayout,
+    x: f32,
+) -> usize {
+    let glyph_w = crate::render::font::cell_w() as f32 * layout.text_scale;
+    let col = ((x - layout.input_x) / glyph_w).floor() as isize - 2;
+    let col = col.clamp(0, input.buf.chars().count() as isize) as usize;
+    byte_for_char_col(&input.buf, col)
+}
+
+fn byte_for_char_col(s: &str, col: usize) -> usize {
+    if col == 0 {
+        return 0;
+    }
+    s.char_indices().nth(col).map_or(s.len(), |(byte, _)| byte)
 }
 
 pub fn draw_overlay(ui: &Ui, screen_px: (u32, u32), frame: &mut HudFrame) {
@@ -80,30 +133,64 @@ fn draw_chat_open(
     screen_px: (u32, u32),
     frame: &mut HudFrame,
 ) {
-    let (sw, sh) = (screen_px.0 as f32, screen_px.1 as f32);
-    let s = ui_scale(sh);
-    let pad = BASE_CHAT_PAD * s;
-    let line_h = BASE_CHAT_LINE_H * s;
-    let text_scale = BASE_CHAT_SCALE * s;
-    let bottom_gap = BASE_CHAT_BOTTOM_GAP * s;
-
-    let block_w = chat_block_width(sw, s);
-    let block_h = line_h * (CHAT_VISIBLE_OPEN as f32 + 1.5);
-    let block_y = sh - block_h - bottom_gap;
-    frame
-        .icons
-        .push_rect(0.0, block_y, block_w, block_h, [0, 0, 0, 0xA0]);
+    let sh = screen_px.1 as f32;
+    let layout = chat_layout(screen_px);
+    frame.icons.push_rect(
+        layout.panel_x,
+        layout.panel_y,
+        layout.panel_w,
+        layout.panel_h,
+        [0, 0, 0, 0xA0],
+    );
 
     let lines: Vec<_> = ui.log.iter().rev().take(CHAT_VISIBLE_OPEN).collect();
     for (i, line) in lines.iter().enumerate() {
-        let y = block_y + block_h - line_h * (i as f32 + 2.0);
+        let y = layout.hint_y - layout.line_h * (i as f32 + 1.0);
         let color = line_color(line.kind, 255);
-        frame.push_text(pad, y, &line.text, text_scale, color);
+        frame.push_text(layout.input_x, y, &line.text, layout.text_scale, color);
     }
 
-    let input_y = block_y + block_h - line_h;
+    frame.icons.push_rect(
+        layout.panel_x,
+        layout.input_y - 2.0 * crate::render::hud::hud_scale(sh),
+        layout.panel_w,
+        layout.input_h + 4.0 * crate::render::hud::hud_scale(sh),
+        [10, 10, 12, 0xC0],
+    );
+
+    if let Some(range) = input.selected_range() {
+        let cw = crate::render::font::cell_w() as f32;
+        let gh = crate::render::font::glyph_h() as f32;
+        let start_chars = input.buf[..range.start].chars().count();
+        let end_chars = input.buf[..range.end].chars().count();
+        let x = layout.input_x + (2 + start_chars) as f32 * cw * layout.text_scale;
+        let w = (end_chars - start_chars) as f32 * cw * layout.text_scale;
+        frame.icons.push_rect(
+            x,
+            layout.input_y,
+            w,
+            gh * layout.text_scale,
+            [90, 140, 255, 120],
+        );
+    }
+
     let prompt = format!("> {}", input.buf);
-    frame.push_text(pad, input_y, &prompt, text_scale, TEXT_WHITE);
+    frame.push_text(
+        layout.input_x,
+        layout.input_y,
+        &prompt,
+        layout.text_scale,
+        TEXT_WHITE,
+    );
+    if let Some((hint, color)) = chat_hint(ui, input) {
+        frame.push_text(
+            layout.input_x,
+            layout.hint_y,
+            &hint,
+            layout.text_scale,
+            color,
+        );
+    }
 
     let blink_on = {
         let t = std::time::SystemTime::now()
@@ -111,32 +198,61 @@ fn draw_chat_open(
             .unwrap_or_default();
         (t.as_millis() / 500).is_multiple_of(2)
     };
-    if blink_on {
+    if blink_on && input.selected_range().is_none() {
         let prefix_chars = 2 + input.buf[..input.cursor].chars().count();
         let cw = crate::render::font::cell_w() as f32;
         let gh = crate::render::font::glyph_h() as f32;
-        let caret_x = pad + prefix_chars as f32 * cw * text_scale;
+        let caret_x = layout.input_x + prefix_chars as f32 * cw * layout.text_scale;
         // Draw the caret as a one-cell-wide rectangle the height of a glyph.
         frame.icons.push_rect(
             caret_x,
-            input_y,
-            cw * text_scale,
-            gh * text_scale,
+            layout.input_y,
+            (2.0 * crate::render::hud::hud_scale(sh)).max(1.0),
+            gh * layout.text_scale,
             [255, 255, 255, 180],
         );
     }
 }
 
+fn chat_hint(ui: &Ui, input: &crate::ui::chat::ChatInput) -> Option<(String, [u8; 4])> {
+    if !input.completion.entries.is_empty() {
+        let parts: Vec<_> = input
+            .completion
+            .entries
+            .iter()
+            .take(5)
+            .enumerate()
+            .map(|(i, entry)| {
+                if i == input.completion.selected {
+                    format!("[{}]", entry.display)
+                } else {
+                    entry.display.clone()
+                }
+            })
+            .collect();
+        return Some((format!("tab: {}", parts.join("  ")), TEXT_DIM));
+    }
+
+    ui.commands.hint(&input.buf, input.cursor).map(|hint| {
+        let color = if hint.is_error {
+            [255, 100, 100, 255]
+        } else {
+            TEXT_DIM
+        };
+        (hint.message, color)
+    })
+}
+
 fn draw_idle_log(ui: &Ui, screen_px: (u32, u32), frame: &mut HudFrame) {
     let (_, sh) = (screen_px.0 as f32, screen_px.1 as f32);
-    let s = ui_scale(sh);
-    let pad = BASE_CHAT_PAD * s;
-    let line_h = BASE_CHAT_LINE_H * s;
-    let text_scale = BASE_CHAT_SCALE * s;
-    let bottom_gap = BASE_CHAT_BOTTOM_GAP * s;
+    let s = crate::render::hud::hud_scale(sh);
+    let hotbar = crate::render::hud::hotbar_layout(screen_px);
+    let pad = 14.0 * s;
+    let text_scale = 2.0 * s;
+    let line_h = crate::render::font::glyph_h() as f32 * text_scale + 2.0 * s;
 
     let now = std::time::Instant::now();
-    let block_y = sh - line_h * (CHAT_VISIBLE_PLAYING as f32) - bottom_gap;
+    let block_y = hotbar.y - 10.0 * s - line_h * CHAT_VISIBLE_PLAYING as f32;
     let mut drawn = 0usize;
     for line in ui.log.iter().rev() {
         if drawn >= CHAT_VISIBLE_PLAYING {

@@ -1,164 +1,137 @@
-//! Slash-command dispatcher. Each `Command` is a tiny struct that owns
-//! its name + help string and turns `args: &[&str]` into a list of
-//! `UiEffect`s (or a parse-error string the dispatcher will render as
-//! a red `CommandError` line).
+//! Slash-command registry backed by the pure command tree parser.
 
+use std::sync::{Arc, OnceLock};
+
+use crate::command::{
+    CommandDispatcher, CommandError, CommandHint, CommandNode, CompletionList, F32Argument,
+};
 use crate::ui::effect::UiEffect;
 
-pub trait Command {
-    fn name(&self) -> &'static str;
-    fn help(&self) -> &'static str;
-    fn run(&self, args: &[&str]) -> Result<Vec<UiEffect>, String>;
-}
+#[derive(Debug, Default)]
+pub struct UiCommandSource;
 
 pub struct Registry {
-    commands: Vec<Box<dyn Command>>,
+    dispatcher: CommandDispatcher<UiCommandSource, Vec<UiEffect>>,
+    source: UiCommandSource,
 }
 
 impl Registry {
     pub fn builtin() -> Self {
-        Self {
-            commands: vec![
-                Box::new(CmdTp),
-                Box::new(CmdTime),
-                Box::new(CmdFly),
-                Box::new(CmdNoclip),
-                Box::new(CmdSave),
-                Box::new(CmdHelp),
-                Box::new(CmdClear),
-            ],
+        let source = UiCommandSource;
+        let mut dispatcher = CommandDispatcher::new();
+        let help_lines: Arc<OnceLock<Vec<String>>> = Arc::new(OnceLock::new());
+
+        dispatcher.register(
+            CommandNode::literal("tp").then(
+                CommandNode::argument("x", F32Argument).then(
+                    CommandNode::argument("y", F32Argument).then(
+                        CommandNode::argument("z", F32Argument)
+                            .help("teleport the player")
+                            .executes(|ctx| {
+                                let x = ctx.f32("x").expect("x is parsed by F32Argument");
+                                let y = ctx.f32("y").expect("y is parsed by F32Argument");
+                                let z = ctx.f32("z").expect("z is parsed by F32Argument");
+                                vec![UiEffect::Teleport(glam::Vec3::new(x, y, z))]
+                            }),
+                    ),
+                ),
+            ),
+        );
+        dispatcher.register(
+            CommandNode::literal("teleport")
+                .redirects_to(["tp"])
+                .help("alias for /tp"),
+        );
+        dispatcher.register(
+            CommandNode::literal("time").then(
+                CommandNode::argument("t", F32Argument)
+                    .help("set time of day")
+                    .executes(|ctx| {
+                        let t = ctx.f32("t").expect("t is parsed by F32Argument");
+                        vec![UiEffect::SetTime(t.clamp(0.0, 1.0))]
+                    }),
+            ),
+        );
+        dispatcher.register(
+            CommandNode::literal("fly")
+                .help("toggle fly mode")
+                .executes(|_| vec![UiEffect::ToggleFly]),
+        );
+        dispatcher.register(
+            CommandNode::literal("noclip")
+                .help("toggle collision in fly mode")
+                .executes(|_| vec![UiEffect::ToggleNoclip]),
+        );
+        dispatcher.register(
+            CommandNode::literal("save")
+                .help("force an autosave now")
+                .executes(|_| vec![UiEffect::Save, UiEffect::PostMessage("Saved.".into())]),
+        );
+        dispatcher.register(
+            CommandNode::literal("help")
+                .help("list commands")
+                .executes({
+                    let help_lines = Arc::clone(&help_lines);
+                    move |_| {
+                        help_lines
+                            .get()
+                            .map(|lines| lines.iter().cloned().map(UiEffect::PostMessage).collect())
+                            .unwrap_or_else(|| {
+                                vec![UiEffect::PostMessage("help is not available".into())]
+                            })
+                    }
+                }),
+        );
+        dispatcher.register(
+            CommandNode::literal("clear")
+                .help("clear the chat log")
+                .executes(|_| vec![UiEffect::ClearChat]),
+        );
+
+        let lines = dispatcher.help_lines(&source);
+        let _ = help_lines.set(lines);
+
+        Self { dispatcher, source }
+    }
+
+    pub fn dispatch(&self, line: &str) -> Result<Vec<UiEffect>, CommandError> {
+        let body = command_body(line);
+        self.dispatcher.execute(body, &self.source)
+    }
+
+    pub fn complete(&self, line: &str, cursor: usize) -> CompletionList {
+        let (body, body_cursor, offset) = command_body_and_cursor(line, cursor);
+        let mut completions = self.dispatcher.complete(body, body_cursor, &self.source);
+        completions.range.start += offset;
+        completions.range.end += offset;
+        completions
+    }
+
+    pub fn hint(&self, line: &str, cursor: usize) -> Option<CommandHint> {
+        if !line.trim_start().starts_with('/') {
+            return None;
         }
-    }
-
-    pub fn find(&self, name: &str) -> Option<&dyn Command> {
-        self.commands
-            .iter()
-            .find(|c| c.name() == name)
-            .map(|c| c.as_ref())
-    }
-
-    pub fn all(&self) -> &[Box<dyn Command>] {
-        &self.commands
-    }
-
-    /// Run a chat line that starts with `/`. The leading `/` is stripped
-    /// before tokenisation. Returns the effects to enqueue. Returns
-    /// `Err(msg)` for unknown commands or parse errors; caller logs that
-    /// as a red line.
-    pub fn dispatch(&self, line: &str) -> Result<Vec<UiEffect>, String> {
-        let trimmed = line.trim();
-        let body = trimmed.strip_prefix('/').unwrap_or(trimmed);
-        let mut parts = body.split_whitespace();
-        let name = parts.next().ok_or_else(|| "empty command".to_string())?;
-        let args: Vec<&str> = parts.collect();
-        let cmd = self
-            .find(name)
-            .ok_or_else(|| format!("unknown command: /{name}"))?;
-        cmd.run(&args)
+        let (body, body_cursor, offset) = command_body_and_cursor(line, cursor);
+        self.dispatcher
+            .hint(body, body_cursor, &self.source)
+            .map(|mut hint| {
+                hint.cursor += offset;
+                hint
+            })
     }
 }
 
-struct CmdTp;
-impl Command for CmdTp {
-    fn name(&self) -> &'static str {
-        "tp"
-    }
-    fn help(&self) -> &'static str {
-        "/tp <x> <y> <z> — teleport the player"
-    }
-    fn run(&self, args: &[&str]) -> Result<Vec<UiEffect>, String> {
-        if args.len() != 3 {
-            return Err("usage: /tp <x> <y> <z>".into());
-        }
-        let parse = |s: &str| s.parse::<f32>().map_err(|_| format!("not a number: {s}"));
-        let x = parse(args[0])?;
-        let y = parse(args[1])?;
-        let z = parse(args[2])?;
-        Ok(vec![UiEffect::Teleport(glam::Vec3::new(x, y, z))])
-    }
+fn command_body(line: &str) -> &str {
+    let trimmed = line.trim();
+    trimmed.strip_prefix('/').unwrap_or(trimmed)
 }
 
-struct CmdTime;
-impl Command for CmdTime {
-    fn name(&self) -> &'static str {
-        "time"
-    }
-    fn help(&self) -> &'static str {
-        "/time <0..1> — set time of day"
-    }
-    fn run(&self, args: &[&str]) -> Result<Vec<UiEffect>, String> {
-        let arg = args.first().ok_or("usage: /time <0..1>")?;
-        let t = arg
-            .parse::<f32>()
-            .map_err(|_| format!("not a number: {arg}"))?;
-        Ok(vec![UiEffect::SetTime(t.clamp(0.0, 1.0))])
-    }
-}
-
-struct CmdFly;
-impl Command for CmdFly {
-    fn name(&self) -> &'static str {
-        "fly"
-    }
-    fn help(&self) -> &'static str {
-        "/fly — toggle fly mode"
-    }
-    fn run(&self, _args: &[&str]) -> Result<Vec<UiEffect>, String> {
-        Ok(vec![UiEffect::ToggleFly])
-    }
-}
-
-struct CmdNoclip;
-impl Command for CmdNoclip {
-    fn name(&self) -> &'static str {
-        "noclip"
-    }
-    fn help(&self) -> &'static str {
-        "/noclip — toggle collision in fly mode (no effect while walking)"
-    }
-    fn run(&self, _args: &[&str]) -> Result<Vec<UiEffect>, String> {
-        Ok(vec![UiEffect::ToggleNoclip])
-    }
-}
-
-struct CmdSave;
-impl Command for CmdSave {
-    fn name(&self) -> &'static str {
-        "save"
-    }
-    fn help(&self) -> &'static str {
-        "/save — force an autosave now"
-    }
-    fn run(&self, _args: &[&str]) -> Result<Vec<UiEffect>, String> {
-        Ok(vec![UiEffect::Save, UiEffect::PostMessage("Saved.".into())])
-    }
-}
-
-struct CmdHelp;
-impl Command for CmdHelp {
-    fn name(&self) -> &'static str {
-        "help"
-    }
-    fn help(&self) -> &'static str {
-        "/help — list commands"
-    }
-    fn run(&self, _args: &[&str]) -> Result<Vec<UiEffect>, String> {
-        // /help is handled specially in submit_chat where the registry is
-        // available; never reach this body.
-        Err("__help_handled_by_caller__".into())
-    }
-}
-
-struct CmdClear;
-impl Command for CmdClear {
-    fn name(&self) -> &'static str {
-        "clear"
-    }
-    fn help(&self) -> &'static str {
-        "/clear — clear the chat log"
-    }
-    fn run(&self, _args: &[&str]) -> Result<Vec<UiEffect>, String> {
-        Ok(vec![UiEffect::ClearChat])
+fn command_body_and_cursor(line: &str, cursor: usize) -> (&str, usize, usize) {
+    let cursor = cursor.min(line.len());
+    if let Some(stripped) = line.strip_prefix('/') {
+        (stripped, cursor.saturating_sub(1), 1)
+    } else {
+        (line, cursor, 0)
     }
 }
 
@@ -166,44 +139,28 @@ impl Command for CmdClear {
 mod tests {
     use super::*;
 
-    struct Echo;
-    impl Command for Echo {
-        fn name(&self) -> &'static str {
-            "echo"
-        }
-        fn help(&self) -> &'static str {
-            "echo <text>"
-        }
-        fn run(&self, args: &[&str]) -> Result<Vec<UiEffect>, String> {
-            Ok(vec![UiEffect::PostMessage(args.join(" "))])
-        }
-    }
-
-    fn registry_with_echo() -> Registry {
-        Registry {
-            commands: vec![Box::new(Echo)],
-        }
-    }
-
     #[test]
     fn dispatch_known_command() {
-        let r = registry_with_echo();
-        let effs = r.dispatch("/echo hi there").unwrap();
-        assert_eq!(effs, vec![UiEffect::PostMessage("hi there".into())]);
+        let r = Registry::builtin();
+        let effs = r.dispatch("/save").unwrap();
+        assert!(effs.iter().any(|e| matches!(e, UiEffect::Save)));
     }
 
     #[test]
     fn dispatch_unknown_returns_error() {
-        let r = registry_with_echo();
+        let r = Registry::builtin();
         let err = r.dispatch("/nope").unwrap_err();
-        assert!(err.contains("unknown"));
+        assert!(err.message.contains("unknown"));
     }
 
     #[test]
     fn dispatch_strips_leading_slash_optional() {
-        let r = registry_with_echo();
-        let effs = r.dispatch("echo bare").unwrap();
-        assert_eq!(effs, vec![UiEffect::PostMessage("bare".into())]);
+        let r = Registry::builtin();
+        let effs = r.dispatch("tp 1 2 3").unwrap();
+        assert_eq!(
+            effs,
+            vec![UiEffect::Teleport(glam::Vec3::new(1.0, 2.0, 3.0))]
+        );
     }
 
     #[test]
@@ -220,7 +177,23 @@ mod tests {
     fn cmd_tp_rejects_bad_args() {
         let r = Registry::builtin();
         assert!(r.dispatch("/tp 1 2 abc").is_err());
-        assert!(r.dispatch("/tp 1 2").is_err());
+        let err = r.dispatch("/tp 1 2").unwrap_err();
+        assert_eq!(err.kind, crate::command::CommandErrorKind::Expected);
+        assert!(!err.message.contains("unknown"));
+    }
+
+    #[test]
+    fn incomplete_tp_commands_are_expected_not_unknown() {
+        let r = Registry::builtin();
+        for line in ["/tp", "/teleport"] {
+            let err = r.dispatch(line).unwrap_err();
+            assert_eq!(err.kind, crate::command::CommandErrorKind::Expected);
+            assert!(
+                !err.message.contains("unknown"),
+                "{line} produced {:?}",
+                err.message
+            );
+        }
     }
 
     #[test]
@@ -233,24 +206,60 @@ mod tests {
     }
 
     #[test]
-    fn cmd_fly_emits_toggle() {
+    fn zero_arg_commands_reject_extra_args() {
         let r = Registry::builtin();
-        let effs = r.dispatch("/fly").unwrap();
-        assert_eq!(effs, vec![UiEffect::ToggleFly]);
+        assert!(r.dispatch("/fly now").is_err());
+        assert!(r.dispatch("/save now").is_err());
+        assert!(r.dispatch("/clear now").is_err());
     }
 
     #[test]
-    fn cmd_clear_emits_clear() {
+    fn teleport_alias_redirects_to_tp() {
         let r = Registry::builtin();
-        let effs = r.dispatch("/clear").unwrap();
-        assert_eq!(effs, vec![UiEffect::ClearChat]);
+        let effs = r.dispatch("/teleport 1 2 3").unwrap();
+        assert_eq!(
+            effs,
+            vec![UiEffect::Teleport(glam::Vec3::new(1.0, 2.0, 3.0))]
+        );
     }
 
     #[test]
-    fn cmd_save_emits_save_and_message() {
+    fn help_uses_generated_usage() {
         let r = Registry::builtin();
-        let effs = r.dispatch("/save").unwrap();
-        assert!(effs.iter().any(|e| matches!(e, UiEffect::Save)));
-        assert!(effs.iter().any(|e| matches!(e, UiEffect::PostMessage(_))));
+        let effs = r.dispatch("/help").unwrap();
+        let lines: Vec<_> = effs
+            .into_iter()
+            .filter_map(|eff| match eff {
+                UiEffect::PostMessage(msg) => Some(msg),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "/tp <x> <y> <z> - teleport the player")
+        );
+        assert!(lines.iter().any(|line| line == "/teleport - alias for /tp"));
+    }
+
+    #[test]
+    fn completion_adjusts_for_slash() {
+        let r = Registry::builtin();
+        let completions = r.complete("/t", 2);
+        assert_eq!(completions.range, 1..2);
+        assert!(
+            completions
+                .entries
+                .iter()
+                .any(|entry| entry.replacement == "time")
+        );
+    }
+
+    #[test]
+    fn live_hint_reports_cursor_aware_error() {
+        let r = Registry::builtin();
+        let hint = r.hint("/tp 1 nope", 10).unwrap();
+        assert!(hint.is_error);
+        assert_eq!(hint.cursor, 6);
     }
 }
