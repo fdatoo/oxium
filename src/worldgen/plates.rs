@@ -61,7 +61,7 @@ pub struct Plate {
     /// continent (post-PR-3; pre-PR-3 this was a multiplicative
     /// scale on the now-removed warped-FBM relief). Still raw
     /// `ROUGHNESS_RANGE` so other consumers (visualizer, debug)
-    /// can interpret it; the bias map lives in heightmap.rs.
+    /// can interpret it; the bias map lives in `density/heightmap.rs`.
     pub roughness: f32,
 }
 
@@ -168,7 +168,7 @@ pub fn plate_at(seed: u64, wx: i32, wz: i32) -> PlateLookup {
 
 // `ridge_peak_for_pair`, `ridge_lift`, and `shelf_base` were the
 // pre-PR-3 plate-mosaic heightmap primitives. Removed: the spline
-// pipeline in `heightmap.rs` replaces them. Plate Voronoi geometry
+// pipeline in `density/heightmap.rs` replaces them. Plate Voronoi geometry
 // is still used to derive `signed_continentalness` for the spline.
 
 #[cfg(test)]

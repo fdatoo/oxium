@@ -18,8 +18,8 @@
 //! - [`tree_hash`]: deterministic (seed, x, z, salt) → u32 mixer.
 //!
 //! The **Generator impl methods** (`add_trees`, `tree_in_cell_with_regions`,
-//! `stamp_tree`) remain in `mod.rs` because they access private `Generator`
-//! fields (`self.seed`, `self.heightmap`, `self.density`). They call the
+//! `stamp_tree`) live in `trees_impl.rs`. They access private `Generator`
+//! fields (`self.seed`, `self.heightmap`, `self.density`) and call the
 //! helpers above via `trees::try_set_air` / `trees::tree_hash`.
 //!
 //! ### Design notes

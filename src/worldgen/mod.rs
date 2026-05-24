@@ -5,7 +5,7 @@
 //! tests can pin output with golden hashes. To make that compatible with
 //! the more expensive geography the new pipeline produces, intermediate
 //! data is memoised in two LRU caches keyed on region coords (see
-//! `region.rs`). The function is still pure in `(seed, coord)` — caches
+//! `region/`). The function is still pure in `(seed, coord)` — caches
 //! are just memoisation.
 //!
 //! ### Pipeline (per chunk)
@@ -14,10 +14,10 @@
 //!    grid of fine regions around the chunk; per-column queries read
 //!    from this grid without re-locking the cache.
 //! 2. **Per-column terrain.** For each column:
-//!    * `heightmap::h_pre` evaluates `SEA_LEVEL + plate_shelf +
-//!      plate_ridge_lift + warped_fbm * plate_roughness` from the
-//!      Voronoi plate decomposition (`plates.rs`) and the
-//!      domain-warped FBM relief.
+//!    * `density::heightmap::h_pre` evaluates the spline-driven surface
+//!      height from the Voronoi plate decomposition (`plates.rs`) and
+//!      three climate channels (`continentalness`, `terrain_shape`,
+//!      `ridges_pv`).
 //!    * `slope_at` on `h_pre` decides cliff exposure (slope-driven,
 //!      replaces v1's `MOUNTAIN_ROCK_LINE` line).
 //!    * `valley_carve` queries the region's river segments for a
@@ -30,7 +30,7 @@
 //!    snow line / cold biome → Snow; Desert → Sand; otherwise Grass,
 //!    with a stochastic sand-transition band on the grass side of the
 //!    desert boundary.
-//! 4. **Caves.** Graph-based cave systems (`caves.rs`) deposit
+//! 4. **Caves.** Graph-based cave systems (`caves/`) deposit
 //!    chambers + spline tunnels into the chunk. The `CAVE_SURFACE_BUFFER`
 //!    rule preserves the grass cap except where an explicit entrance
 //!    (sinkhole / cliff mouth / skylight) punches through. Cheese + pillar

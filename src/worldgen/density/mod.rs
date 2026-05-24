@@ -27,8 +27,7 @@ pub mod heightmap;
 pub mod math;
 pub mod splines;
 
-// Re-export everything that was public in the original heightmap.rs
-// and density_graph.rs files so callers at crate::worldgen::density::*
+// Re-export the full public surface so callers at `crate::worldgen::density::*`
 // find what they need without digging into submodules.
 
 pub use cell_evaluator::{CELL_COUNT, CELL_SIZE, CORNER_COUNT, CellEvaluator};

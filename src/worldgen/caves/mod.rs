@@ -40,7 +40,7 @@
 //!   geometrically a disk in 2D noise space. Disk radius grows with depth.
 //!
 //! Both layers are sampled via a `CarverEvaluator` corner-lattice trilerp
-//! (same 9³ pattern as `density_graph::CellEvaluator`) to avoid per-voxel
+//! (same 9³ pattern as `density::cell_evaluator::CellEvaluator`) to avoid per-voxel
 //! FBM cost.
 //!
 //! See `docs/superpowers/specs/2026-05-21-cave-system-overhaul-design.md`,

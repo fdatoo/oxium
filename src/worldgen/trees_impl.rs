@@ -21,9 +21,10 @@ use crate::worldgen::tuning::{SEA_LEVEL, SNOW_LINE, SURFACE_BAND, TREE_CELL_SIZE
 
 impl Generator {
     // ── §6 Tree placement ─────────────────────────────────────────────────
-    // These methods stay in mod.rs because they access private Generator
-    // fields (self.seed, self.heightmap, self.density). Free-standing
-    // helpers (Tree struct, try_set_air, tree_hash) live in trees.rs.
+    // These Generator impl methods live here (trees_impl.rs) because they
+    // access private Generator fields (self.seed, self.heightmap,
+    // self.density). Free-standing helpers (Tree struct, try_set_air,
+    // tree_hash) live in trees.rs.
 
     /// Place all trees whose blocks could overlap `coord`'s chunk
     /// volume. Each tree is deterministic in `(seed, cell_x, cell_z)`,

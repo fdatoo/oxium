@@ -77,7 +77,7 @@ impl Biome {
 ///
 /// PR 5 introduces [`Palm`] for `Tropical`; follow-up PRs may add
 /// jungle / pine variants. The stamping logic for each variant lives
-/// in `src/worldgen/mod.rs::stamp_tree`.
+/// in `src/worldgen/trees_impl.rs::stamp_tree`.
 ///
 /// [`Palm`]: TreeKind::Palm
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

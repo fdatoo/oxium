@@ -60,7 +60,7 @@ pub mod data;
 mod tests;
 
 // ── Re-exports — every previously-public item stays accessible at
-//    `worldgen::region::X` so callers (hydrology.rs, caves.rs, mod.rs,
+//    `worldgen::region::X` so callers (hydrology/, caves/, mod.rs,
 //    tests) require no import changes.
 
 // coords

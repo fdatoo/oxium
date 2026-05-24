@@ -208,7 +208,7 @@ pub fn terasology_ambient(
 // issue several FBM samples per voxel. With 32³ voxels per chunk and
 // 2-octave FBM, that dominates the chunk-fill cost.
 //
-// `CarverEvaluator` mirrors `density_graph::CellEvaluator`: sample
+// `CarverEvaluator` mirrors `density::cell_evaluator::CellEvaluator`: sample
 // each underlying noise on a 9³ corner lattice (4-block spacing,
 // 729 corners per chunk), then trilerp per voxel. The per-voxel
 // formulas (clamps, `raw_density`-dependent suppression, gates) run

@@ -305,7 +305,7 @@ pub struct CavePool {
 /// A fully-resolved graph-based cave system.
 ///
 /// Stored in the fine region cache (immutable behind `Arc`). Carving
-/// happens at chunk fill time: the SDF functions in `caves.rs` query
+/// happens at chunk fill time: the SDF functions in `caves/sdf.rs` query
 /// `chambers`, `tunnels`, `entrances`, and `vertical_connectors` to
 /// decide which voxels are air. The `bbox` bounding box lets `fill_chunk`
 /// cull the list to only the systems that overlap the chunk before
